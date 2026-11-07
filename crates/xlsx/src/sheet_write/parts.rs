@@ -353,7 +353,7 @@ pub(super) fn protected_ranges_xml(sheet: &Sheet) -> String {
 /// or [`DEFAULT_NOTE_BOX`], its corners moved with the note's `cell` and kept on the sheet.
 fn note_anchor(cell: CellRef, b: Option<&NoteBox>) -> (String, (f64, f64)) {
     let b = b.unwrap_or(&DEFAULT_NOTE_BOX);
-    let at = |base: u32, d: i64, max: u32| (i64::from(base) + d).clamp(0, i64::from(max) - 1);
+    let at = |base: u32, d: i64, max: u32| i64::from(base).saturating_add(d).clamp(0, i64::from(max) - 1);
     let corner = |k: &NoteCorner| format!("{}, {}, {}, {}", at(cell.col, k.col, MAX_COLS), k.col_px, at(cell.row, k.row, MAX_ROWS), k.row_px);
     (format!("{}, {}", corner(&b.from), corner(&b.to)), b.size_pt.unwrap_or(DEFAULT_NOTE_SIZE_PT))
 }

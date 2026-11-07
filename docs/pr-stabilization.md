@@ -173,3 +173,29 @@ cargo test --locked -p gridcraft-engine --lib tables::tests
 cargo test --locked -p gridcraft-engine
 cargo test --locked -p gridcraft-xlsx
 ~~~
+
+## S02-B2: Clamp note anchors without signed overflow
+
+Revision: 2026-11-07.
+
+The note-box writer now saturates the addition of a cell coordinate and its signed
+relative offset before applying the existing sheet-bound clamp. Constructed model
+notes with extreme offsets therefore save at the appropriate sheet edge. Ordinary
+negative offsets retain their meaning, and pixel offsets and point sizes are preserved.
+This follows up the overflow finding on
+[PR #1614](https://github.com/storytold/gridcraft/pull/1614#discussion_r4334289015).
+
+Synthetic typed-model regressions exercise real XLSX writes at B2 for both axes,
+row-only and column-only signed extremes. They inspect literal VML anchors, pixel
+offsets and the 224.25 × 89.25 pt size, then reopen author and text. Ordinary negative
+offsets and near-upper-bound coordinates provide controls. Clamped geometry is
+normalized on reopen; the extreme relative inputs need not survive unchanged.
+
+~~~sh
+cargo test --locked -p gridcraft-xlsx note_box
+cargo test --locked -p gridcraft-xlsx
+cargo xtask ci
+~~~
+
+This is an arithmetic save repair. Native Windows, live Excel reopen, process RSS
+and broad external-corpus fidelity remain untested by these synthetic checks.
