@@ -544,3 +544,21 @@ impl crate::retained::HeapBytes for Macros {
         c.visit(macros);
     }
 }
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_macro_list_releases_after_last_snapshot() {
+        let macros = Macros::from(vec![Macro { name: "Lifetime".into(), description: "owned macro payload".repeat(64), ..Default::default() }]);
+        let list = Arc::downgrade(&macros.0);
+        let snapshot = macros.clone();
+        drop(macros);
+        assert_eq!(list.strong_count(), 1);
+        assert_eq!(snapshot[0].name, "Lifetime");
+        drop(snapshot);
+        assert!(list.upgrade().is_none(), "macro snapshots must release their shared list");
+    }
+}

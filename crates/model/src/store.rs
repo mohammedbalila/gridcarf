@@ -390,6 +390,25 @@ mod retained_cache_tests {
     use gridcraft_core::Value;
 
     #[test]
+    fn cached_identities_release_bands_and_shared_payload_after_last_store() {
+        let mut store = CellStore::new();
+        store.set(CellRef::new(0, 0), Cell::value(Value::from("cached payload")));
+        store.set(CellRef::new(64, 0), Cell::value(Value::from("other band")));
+        assert!(store.retained_bytes_against(&CellStore::new()) > 0);
+        let bands: Vec<_> = store.bands.values().map(Arc::downgrade).collect();
+        assert!(store.bands.values().all(|band| band.accounting.0.get().unwrap().storage_bytes() > 0));
+        let Value::Text(text) = &store.get(CellRef::new(0, 0)).unwrap().value else { panic!("missing text") };
+        let payload = Arc::downgrade(text);
+        let snapshot = store.clone();
+        drop(store);
+        assert!(bands.iter().all(|band| band.strong_count() == 1));
+        assert!(payload.upgrade().is_some(), "the second store still owns its cached bands");
+        drop(snapshot);
+        assert!(bands.iter().all(|band| band.upgrade().is_none()));
+        assert!(payload.upgrade().is_none(), "cached integer identities must not own payloads");
+    }
+
+    #[test]
     fn unchanged_band_accounting_reuses_its_allocation_inventory() {
         let mut store = CellStore::new();
         store.set(CellRef::new(0, 0), Cell::value(Value::from("payload")));
