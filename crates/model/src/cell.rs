@@ -66,6 +66,16 @@ impl Formula {
     pub fn expr_arc(&self) -> Option<Arc<Expr>> {
         self.expr.clone().or_else(|| gridcraft_formula::parse(&self.text).ok().map(Arc::new))
     }
+    /// Runs `f` on the parsed expression, borrowing the cached tree or, after deserialization,
+    /// a freshly parsed one that is dropped afterwards. Unlike [`expr`](Self::expr) it never copies
+    /// the tree, and unlike [`expr_arc`](Self::expr_arc) it needs no reference count or `Arc`
+    /// allocation. `None` when the text does not parse.
+    pub fn with_expr<R>(&self, f: impl FnOnce(&Expr) -> R) -> Option<R> {
+        match &self.expr {
+            Some(e) => Some(f(e)),
+            None => gridcraft_formula::parse(&self.text).ok().map(|e| f(&e)),
+        }
+    }
 }
 
 /// A static picture stored as cell content, independent of floating drawing anchors.
@@ -138,5 +148,41 @@ impl Cell {
             Some(f) if f.array.is_some() => format!("{{={}}}", f.text),
             _ => self.input_text(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Formula;
+    use std::sync::Arc;
+
+    #[test]
+    fn with_expr_borrows_the_cached_tree_without_cloning() {
+        let formula = Formula::new("=IF(A1>2,SUM(B1:C3),A1*3)");
+        let cached = formula.expr.as_ref().unwrap();
+        let owners = Arc::strong_count(cached);
+        assert_eq!(
+            formula.with_expr(|expr| {
+                assert!(std::ptr::eq(expr, cached.as_ref()), "callback must receive the cached tree itself");
+                assert_eq!(Arc::strong_count(cached), owners, "callback must not clone the Arc handle");
+            }),
+            Some(())
+        );
+    }
+
+    #[test]
+    fn with_expr_parses_text_without_populating_the_cache() {
+        let mut formula = Formula::new("=SUM(A1:B2)+3");
+        formula.expr = None;
+        assert_eq!(formula.with_expr(gridcraft_formula::print).as_deref(), Some("SUM(A1:B2)+3"));
+        assert!(formula.expr.is_none());
+    }
+
+    #[test]
+    fn with_expr_does_not_call_back_for_malformed_text() {
+        let formula = Formula::new("=NOPE(");
+        let mut called = false;
+        assert_eq!(formula.with_expr(|_| called = true), None);
+        assert!(!called);
     }
 }

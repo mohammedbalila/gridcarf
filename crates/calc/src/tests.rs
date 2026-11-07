@@ -2379,6 +2379,65 @@ fn loan_schedule_residue_keeps_excels_sign() {
     assert_eq!(t.get("P7"), Value::Text("".into()));
 }
 
+#[test]
+fn graph_dependencies_survive_cached_and_text_only_formula_edits() {
+    fn formula(input: &str, cached: bool) -> Cell {
+        let mut formula = Formula::new(input);
+        if !cached {
+            formula.expr = None;
+        }
+        Cell::formula(formula)
+    }
+    fn numbers(t: &T, expected: [f64; 3]) {
+        assert_eq!([t.get("B1"), t.get("C1"), t.get("D1")], expected.map(Value::Number));
+    }
+    fn dependents(t: &T, at: &str, expected: &[&str]) {
+        let mut actual = Vec::new();
+        t.calc.graph.dependents(0, c(at), &mut actual);
+        actual.sort_unstable();
+        assert_eq!(actual, expected.iter().map(|at| (0, c(at))).collect::<Vec<_>>(), "dependents of {at}");
+    }
+    for cached in [true, false] {
+        let mut t = T::new();
+        t.set("A1", "2");
+        t.set("A2", "3");
+        for (at, input) in [("B1", "=A1*10"), ("C1", "=B1+A1"), ("D1", "=SUM(A1:C1)"), ("E1", "=NOPE(")] {
+            t.wb.sheet_mut(0).unwrap().cells.set(c(at), formula(input, cached));
+        }
+        t.calc.cells_changed(&mut t.wb, &[(0, c("E1"))]);
+        assert_eq!(t.get("E1"), Value::Error(CellError::Name));
+        t.calc.rebuild(&t.wb);
+        assert_eq!(t.calc.graph.len(), 3, "malformed formulas have no graph node");
+        dependents(&t, "A1", &["B1", "C1", "D1"]);
+        dependents(&t, "B1", &["C1", "D1"]);
+        t.calc.recalc_all(&mut t.wb);
+        numbers(&t, [20.0, 22.0, 44.0]);
+        assert_eq!(t.get("E1"), Value::Error(CellError::Name));
+
+        t.set("A1", "5");
+        numbers(&t, [50.0, 55.0, 110.0]);
+        t.wb.sheet_mut(0).unwrap().cells.set(c("B1"), formula("=A2+100", cached));
+        t.calc.cells_changed(&mut t.wb, &[(0, c("B1"))]);
+        numbers(&t, [103.0, 108.0, 216.0]);
+        dependents(&t, "A1", &["C1", "D1"]);
+        dependents(&t, "A2", &["B1"]);
+        t.set("A1", "7");
+        numbers(&t, [103.0, 110.0, 220.0]);
+        t.set("A2", "9");
+        numbers(&t, [109.0, 116.0, 232.0]);
+
+        t.wb.sheet_mut(0).unwrap().cells.remove(c("B1"));
+        t.calc.cells_changed(&mut t.wb, &[(0, c("B1"))]);
+        assert_eq!(t.get("B1"), Value::Empty);
+        assert_eq!([t.get("C1"), t.get("D1")], [Value::Number(7.0), Value::Number(14.0)]);
+        assert_eq!(t.calc.graph.len(), 2);
+        dependents(&t, "A2", &[]);
+        t.set("A2", "11");
+        assert_eq!([t.get("C1"), t.get("D1")], [Value::Number(7.0), Value::Number(14.0)]);
+        assert_eq!(t.get("E1"), Value::Error(CellError::Name));
+    }
+}
+
 /// Makes `at` a Python cell showing `cached` (its value before this calculation), with `result`
 /// as its kept result, and returns the cell's key for `Calc::cells_changed`.
 fn plant_python(t: &mut T, at: &str, cached: Value, result: Value) -> (usize, CellRef) {

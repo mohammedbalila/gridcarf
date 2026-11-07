@@ -1,6 +1,6 @@
 //! JSON-RPC 2.0 framing and the MCP lifecycle / tools / resources / prompts methods.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 use serde_json::{Value, json};
 
@@ -49,6 +49,39 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
 }
 
+/// Retain at most MAX_LINE + 2 bytes: a full payload plus CRLF, or a bounded probe.
+/// `None` is EOF, `Some(false)` is an oversized frame drained through LF/EOF,
+/// and `Some(true)` still needs UTF-8 and trimmed payload validation.
+pub(crate) fn read_message(input: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Option<bool>> {
+    buf.clear();
+    // Bound the read before accumulation: a peer may never send a newline.
+    let cap = MAX_LINE + 2;
+    if input.take(cap as u64).read_until(b'\n', buf)? == 0 {
+        return Ok(None);
+    }
+    if buf.len() == cap && buf.last() != Some(&b'\n') {
+        skip_line(input)?;
+        return Ok(Some(false));
+    }
+    Ok(Some(true))
+}
+
+/// Drop the oversized frame's remainder without retaining it or the next message.
+fn skip_line(input: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let chunk = input.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        if let Some(i) = chunk.iter().position(|&b| b == b'\n') {
+            input.consume(i + 1);
+            return Ok(());
+        }
+        let n = chunk.len();
+        input.consume(n);
+    }
+}
+
 impl Server {
     pub fn new(backend: Box<dyn Backend>) -> Self {
         Self { backend, initialized: false }
@@ -68,14 +101,13 @@ impl Server {
     pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
         let mut buf = Vec::new();
         loop {
-            buf.clear();
-            let n = input.read_until(b'\n', &mut buf)?;
-            if n == 0 {
-                return Ok(());
-            }
-            let reply = match std::str::from_utf8(&buf) {
-                Ok(line) => self.handle_line(line),
-                Err(_) => Some(error(Value::Null, PARSE_ERROR, "message is not valid UTF-8").to_string()),
+            let reply = match read_message(&mut input, &mut buf)? {
+                None => return Ok(()),
+                Some(false) => Some(error(Value::Null, INVALID_REQUEST, "message too large (16 MB max)").to_string()),
+                Some(true) => match std::str::from_utf8(&buf) {
+                    Ok(line) => self.handle_line(line),
+                    Err(_) => Some(error(Value::Null, PARSE_ERROR, "message is not valid UTF-8").to_string()),
+                },
             };
             if let Some(reply) = reply {
                 output.write_all(reply.as_bytes())?;

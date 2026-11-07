@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use serde_json::{Value, json};
 
@@ -357,6 +357,141 @@ fn serve_loop_over_buffers() {
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[1]["error"]["code"], -32700);
     assert!(lines[2]["result"]["content"][0]["text"].as_str().unwrap().contains("42"));
+}
+
+const MCP_LINE_LIMIT: usize = 16 * 1024 * 1024;
+const FRAMING_PING: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n";
+
+/// Generates an oversized line from one reused chunk, then a small framing tail.
+struct StreamingLine {
+    remaining: usize,
+    chunk: [u8; 8192],
+    tail: &'static [u8],
+    tail_chunk: usize,
+}
+
+impl Read for StreamingLine {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let available = self.fill_buf()?;
+        let n = available.len().min(out.len());
+        out[..n].copy_from_slice(&available[..n]);
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl BufRead for StreamingLine {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.remaining > 0 {
+            Ok(&self.chunk[..self.remaining.min(self.chunk.len())])
+        } else {
+            Ok(&self.tail[..self.tail.len().min(self.tail_chunk)])
+        }
+    }
+
+    fn consume(&mut self, n: usize) {
+        if self.remaining > 0 {
+            self.remaining -= n;
+        } else {
+            self.tail = &self.tail[n..];
+        }
+    }
+}
+
+fn framing_replies(input: impl BufRead) -> Vec<Value> {
+    let mut out = Vec::new();
+    server().serve(input, &mut out).unwrap();
+    assert!(out.is_empty() || out.ends_with(b"\n"));
+    String::from_utf8(out).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+fn assert_framing_size_error(reply: &Value) {
+    assert_eq!(reply, &json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "message too large (16 MB max)"}}));
+}
+
+/// A valid ping with an ignored string field; its payload size excludes framing bytes.
+fn framing_padded_ping(payload_len: usize, ending: &'static [u8]) -> impl BufRead {
+    let prefix = br#"{"jsonrpc":"2.0","id":41,"method":"ping","padding":""#;
+    let suffix = br#""}"#;
+    let padding = payload_len - prefix.len() - suffix.len();
+    BufReader::new(prefix.as_slice().chain(std::io::repeat(b'x').take(padding as u64)).chain(suffix.as_slice()).chain(ending))
+}
+
+#[test]
+fn framing_reader_bounds_stream_and_preserves_next_message() {
+    for tail_chunk in [1, 8192] {
+        let mut input = StreamingLine {
+            remaining: 2 * MCP_LINE_LIMIT + 8192,
+            chunk: [b'a'; 8192],
+            tail: b"\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n",
+            tail_chunk,
+        };
+        let mut buf = Vec::new();
+        let result = crate::server::read_message(&mut input, &mut buf).unwrap();
+        assert!(buf.len() <= MCP_LINE_LIMIT + 2, "retained {} input bytes", buf.len());
+        assert_eq!(result, Some(false));
+        assert_eq!(crate::server::read_message(&mut input, &mut buf).unwrap(), Some(true));
+        assert_eq!(buf, FRAMING_PING);
+        assert_eq!(crate::server::read_message(&mut input, &mut buf).unwrap(), None);
+        assert!(buf.is_empty());
+    }
+}
+
+#[test]
+fn framing_reader_bounds_unterminated_stream_at_eof() {
+    let mut input = StreamingLine { remaining: 2 * MCP_LINE_LIMIT + 8192, chunk: [b'a'; 8192], tail: b"", tail_chunk: 8192 };
+    let mut buf = Vec::new();
+    let result = crate::server::read_message(&mut input, &mut buf).unwrap();
+    assert!(buf.len() <= MCP_LINE_LIMIT + 2, "retained {} input bytes", buf.len());
+    assert_eq!(result, Some(false));
+    assert_eq!(crate::server::read_message(&mut input, &mut buf).unwrap(), None);
+}
+
+#[test]
+fn framing_serve_drains_oversize_once() {
+    for tail in
+        [b"".as_slice(), b"\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n", b"\r\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n"]
+    {
+        // Oversized invalid UTF-8 also gets the size error before decoding.
+        let replies = framing_replies(StreamingLine { remaining: 2 * MCP_LINE_LIMIT + 8192, chunk: [0xff; 8192], tail, tail_chunk: 8192 });
+        assert_eq!(replies.len(), if tail.is_empty() { 1 } else { 2 });
+        assert_framing_size_error(&replies[0]);
+        if !tail.is_empty() {
+            assert_eq!(replies[1], json!({"jsonrpc": "2.0", "id": 7, "result": {}}));
+        }
+    }
+}
+
+#[test]
+fn framing_accepts_exact_limit_with_lf_crlf_or_eof() {
+    for ending in [b"\n".as_slice(), b"\r\n", b"", b"\r"] {
+        let replies = framing_replies(framing_padded_ping(MCP_LINE_LIMIT, ending));
+        assert_eq!(replies, [json!({"jsonrpc": "2.0", "id": 41, "result": {}})], "ending: {ending:?}");
+    }
+}
+
+#[test]
+fn framing_rejects_one_over_limit_with_lf_crlf_or_eof() {
+    for (ending, complete) in [(b"\n".as_slice(), true), (b"\r\n".as_slice(), false), (b"".as_slice(), true)] {
+        let mut input = framing_padded_ping(MCP_LINE_LIMIT + 1, ending);
+        let mut buf = Vec::new();
+        assert_eq!(crate::server::read_message(&mut input, &mut buf).unwrap(), Some(complete));
+        assert!(buf.len() <= MCP_LINE_LIMIT + 2);
+        assert_eq!(crate::server::read_message(&mut input, &mut buf).unwrap(), None);
+        let replies = framing_replies(framing_padded_ping(MCP_LINE_LIMIT + 1, ending));
+        assert_eq!(replies.len(), 1);
+        assert_framing_size_error(&replies[0]);
+    }
+}
+
+#[test]
+fn framing_preserves_small_utf8_errors_notifications_and_eof() {
+    let input = b" \r\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\xff\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}";
+    let replies = framing_replies(input.as_slice());
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0], json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "message is not valid UTF-8"}}));
+    assert_eq!(replies[1], json!({"jsonrpc": "2.0", "id": 7, "result": {}}));
+    assert!(framing_replies(b"".as_slice()).is_empty());
 }
 
 #[test]

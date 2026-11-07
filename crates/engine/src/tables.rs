@@ -247,6 +247,47 @@ pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
                 cell.formula = Some(std::sync::Arc::new(Formula { eval_mode: f.eval_mode, ..Formula::from_expr(ne) }));
             }
         }
+        // Stored calculated-column text binds local references to its owning table.
+        // Read before mutating so tables on unrelated shared sheets stay shared.
+        let mut updates = Vec::new();
+        if let Some(sh) = cx.wb.sheet(i) {
+            for (ti, t) in sh.tables.iter().enumerate() {
+                for (ci, col) in t.columns.iter().enumerate() {
+                    let Some(text) = &col.formula else { continue };
+                    let Ok(e) = gridcraft_formula::parse(text) else { continue };
+                    let mut hit = false;
+                    let ne = e.map(&mut |x| match x {
+                        gridcraft_formula::Expr::Struct(mut st) => {
+                            for (si, table, range, old, name) in &renames {
+                                let this = if st.table.is_empty() { i == *si && t.range == *range } else { st.table.eq_ignore_ascii_case(table) };
+                                if this {
+                                    for end in [&mut st.col_start, &mut st.col_end].into_iter().flatten() {
+                                        if end.eq_ignore_ascii_case(old) {
+                                            *end = name.clone();
+                                            hit = true;
+                                        }
+                                    }
+                                }
+                            }
+                            gridcraft_formula::Expr::Struct(st)
+                        }
+                        o => o,
+                    });
+                    if hit {
+                        updates.push((ti, ci, gridcraft_formula::print(&ne)));
+                    }
+                }
+            }
+        }
+        if !updates.is_empty()
+            && let Some(sh) = cx.wb.sheet_mut(i)
+        {
+            for (ti, ci, text) in updates {
+                if let Some(col) = sh.tables.get_mut(ti).and_then(|t| t.columns.get_mut(ci)) {
+                    col.formula = Some(text);
+                }
+            }
+        }
     }
     cx.structural = true;
 }
@@ -257,6 +298,234 @@ mod tests {
     use serde_json::json;
 
     use crate::Session;
+
+    fn calculated_columns() -> Session {
+        use gridcraft_model::{Formula, FormulaEvalMode};
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Sku","Price","Local","Span"],[101,5,0,0],[102,7,0,0]]})).unwrap();
+        s.execute("range.setValues", json!({"range":"F1", "values":[["Item","Cost","Local","Bad","Other"],[102,0,0,0,0],[101,0,0,0,0]]})).unwrap();
+        s.execute("insert.table", json!({"range":"A1:D3","header":true,"name":"Prices"})).unwrap();
+        s.execute("insert.table", json!({"range":"F1:J3","header":true,"name":"Orders"})).unwrap();
+        s.execute("cell.set", json!({"cell":"N1","input":"=SUM(Prices[Price])"})).unwrap();
+        s.execute("home.insertSheet", json!({"name":"Remote"})).unwrap();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Sku","Price","Local","Span"],[1,2,0,0]]})).unwrap();
+        s.execute("insert.table", json!({"range":"A1:D3","header":true,"name":"Mirror"})).unwrap();
+        s.execute("home.insertSheet", json!({"name":"Untouched"})).unwrap();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Price","Cost"],[2,3]]})).unwrap();
+        s.execute("insert.table", json!({"range":"A1:B2","header":true,"name":"Unrelated"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.tables[0].columns[2].formula = Some("[@Price]*2".into());
+        sh.tables[0].columns[3].formula = Some("SUM(Prices[[Sku]:[Price]])".into());
+        for (col, text) in [(1, "INDEX(Prices[Price],MATCH(Orders[@Item],Prices[Sku],0))"), (2, "[@Price]*2"), (3, "Prices["), (4, " [@Other] + 1 ")]
+        {
+            sh.tables[1].columns[col].formula = Some(text.into());
+        }
+        let cell = sh.cells.get_mut(gridcraft_core::CellRef::new(0, 13)).unwrap();
+        let f = cell.formula.as_ref().unwrap();
+        cell.formula = Some(std::sync::Arc::new(Formula { eval_mode: FormulaEvalMode::Legacy, ..(**f).clone() }));
+        let sh = wb.sheet_mut(1).unwrap();
+        sh.tables[0].columns[1].formula = Some("SUM(prices[price])".into());
+        sh.tables[0].columns[2].formula = Some("[@Price]*2".into());
+        let sh = wb.sheet_mut(2).unwrap();
+        sh.tables[0].columns[0].formula = Some("[@Price]*2".into());
+        sh.tables[0].columns[1].formula = Some("SUM(Unrelated[Price])".into());
+        s
+    }
+
+    fn stored(s: &Session, sheet: usize, table: usize, column: usize) -> &str {
+        s.doc().unwrap().wb.sheet(sheet).unwrap().tables[table].columns[column].formula.as_deref().unwrap()
+    }
+
+    fn assert_stored_file(s: &Session, table: &str, col: usize, model: &str, native: &str) {
+        use std::io::Read;
+        let wb = &s.doc().unwrap().wb;
+        let (si, ti) = wb.table(table).unwrap();
+        assert_eq!(stored(s, si, ti, col), model);
+        let bytes = gridcraft_xlsx::write_xlsx(wb).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut found = false;
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).unwrap();
+            if !entry.name().starts_with("xl/tables/table") {
+                continue;
+            }
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml).unwrap();
+            if xml.contains(&format!("name=\"{table}\"")) {
+                assert!(xml.contains(&format!("<calculatedColumnFormula>{native}</calculatedColumnFormula>")), "{xml}");
+                found = true;
+            }
+        }
+        assert!(found, "missing native table {table}");
+        let (back, _) = gridcraft_xlsx::read_xlsx(&bytes).unwrap();
+        let (si, ti) = back.table(table).unwrap();
+        assert_eq!(back.sheet(si).unwrap().tables[ti].columns[col].formula.as_deref(), Some(model));
+    }
+
+    fn assert_legacy_cell(s: &Session, expected: &str) {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let cell = sh.cell(gridcraft_core::CellRef::new(0, 13)).unwrap();
+        let f = cell.formula.as_ref().unwrap();
+        assert_eq!(f.text, expected);
+        assert_eq!(f.eval_mode, gridcraft_model::FormulaEvalMode::Legacy);
+        assert_eq!(cell.value, Value::Number(12.0));
+    }
+
+    #[test]
+    fn header_rename_updates_stored_calculated_column_formulas() {
+        let mut s = calculated_columns();
+        let untouched = s.doc().unwrap().wb.sheets[2].clone();
+        s.execute("cell.set", json!({"cell":"B1","input":"Amount"})).unwrap();
+        assert_stored_file(
+            &s,
+            "Orders",
+            1,
+            "INDEX(Prices[Amount],MATCH(Orders[@Item],Prices[Sku],0))",
+            "INDEX(Prices[Amount],MATCH(Orders[[#This Row],[Item]],Prices[Sku],0))",
+        );
+        assert_stored_file(&s, "Prices", 2, "[@Amount]*2", "[[#This Row],[Amount]]*2");
+        assert_eq!(stored(&s, 0, 0, 3), "SUM(Prices[[Sku]:[Amount]])");
+        assert_eq!(stored(&s, 1, 0, 1), "SUM(prices[Amount])");
+        assert_eq!(stored(&s, 0, 1, 2), "[@Price]*2");
+        assert_eq!(stored(&s, 1, 0, 2), "[@Price]*2");
+        assert_eq!(stored(&s, 0, 1, 3), "Prices[");
+        assert_eq!(stored(&s, 0, 1, 4), " [@Other] + 1 ");
+        assert!(std::sync::Arc::ptr_eq(&untouched, &s.doc().unwrap().wb.sheets[2]));
+        assert_legacy_cell(&s, "SUM(Prices[Amount])");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(stored(&s, 0, 0, 2), "[@Price]*2");
+        assert_eq!(stored(&s, 0, 1, 1), "INDEX(Prices[Price],MATCH(Orders[@Item],Prices[Sku],0))");
+        assert_legacy_cell(&s, "SUM(Prices[Price])");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(stored(&s, 0, 0, 2), "[@Amount]*2");
+        assert_legacy_cell(&s, "SUM(Prices[Amount])");
+        let mut s = calculated_columns();
+        s.execute("cell.set", json!({"cell":"A1","input":"Code"})).unwrap();
+        assert_eq!(stored(&s, 0, 0, 3), "SUM(Prices[[Code]:[Price]])");
+    }
+
+    #[test]
+    fn table_rename_updates_stored_calculated_column_formulas() {
+        let mut s = calculated_columns();
+        let untouched = s.doc().unwrap().wb.sheets[2].clone();
+        s.execute("table.rename", json!({"table":"Prices","name":"PriceList"})).unwrap();
+        assert_stored_file(
+            &s,
+            "Orders",
+            1,
+            "INDEX(PriceList[Price],MATCH(Orders[@Item],PriceList[Sku],0))",
+            "INDEX(PriceList[Price],MATCH(Orders[[#This Row],[Item]],PriceList[Sku],0))",
+        );
+        assert_eq!(stored(&s, 0, 0, 2), "[@Price]*2");
+        assert_eq!(stored(&s, 1, 0, 1), "SUM(PriceList[price])");
+        assert_eq!(stored(&s, 0, 1, 3), "Prices[");
+        assert_eq!(stored(&s, 0, 1, 4), " [@Other] + 1 ");
+        assert!(std::sync::Arc::ptr_eq(&untouched, &s.doc().unwrap().wb.sheets[2]));
+        assert_legacy_cell(&s, "SUM(PriceList[Price])");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().tables[0].name, "Prices");
+        assert_eq!(stored(&s, 0, 1, 1), "INDEX(Prices[Price],MATCH(Orders[@Item],Prices[Sku],0))");
+        assert_legacy_cell(&s, "SUM(Prices[Price])");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_legacy_cell(&s, "SUM(PriceList[Price])");
+        assert_eq!(stored(&s, 0, 1, 1), "INDEX(PriceList[Price],MATCH(Orders[@Item],PriceList[Sku],0))");
+        s.execute("table.rename", json!({"table":"Orders","name":"Sales"})).unwrap();
+        assert_eq!(stored(&s, 0, 1, 1), "INDEX(PriceList[Price],MATCH(Sales[@Item],PriceList[Sku],0))");
+    }
+
+    #[test]
+    fn stored_calculated_column_rename_preserves_names_strings_and_whole_table_refs() {
+        for (before, after) in [
+            ("ROWS(Prices[])+[@Item]", "ROWS(PriceList[])+[@Item]"),
+            ("LET(Prices,2,Prices)+ROWS(Prices[])", "LET(Prices,2,Prices)+ROWS(PriceList[])"),
+            ("Prices", "Prices"),
+            ("\"Prices[Price]\"", "\"Prices[Price]\""),
+            ("SUM(Orders[Cost])+SUM(Prices[Price])", "SUM(Orders[Cost])+SUM(PriceList[Price])"),
+        ] {
+            let mut s = calculated_columns();
+            std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().tables[1].columns[1].formula = Some(before.into());
+            s.execute("table.rename", json!({"table":"Prices","name":"PriceList"})).unwrap();
+            assert_eq!(stored(&s, 0, 1, 1), after);
+        }
+    }
+
+    fn native_calculated_columns(protected: bool) -> Session {
+        use gridcraft_core::{CellRef, RangeRef};
+        use gridcraft_model::{Cell, Formula, WhatIfTable};
+        let mut s = calculated_columns();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cells.set(
+            CellRef::new(0, 19),
+            if protected {
+                Cell { formula: Some(std::sync::Arc::new(Formula::new("SUM(Prices[Price])"))), value: Value::Number(12.0), ..Default::default() }
+            } else {
+                Cell::value(Value::Number(12.0))
+            },
+        );
+        sh.cells.set(CellRef::new(9, 25), Cell::value(Value::Number(3.0)));
+        sh.cells.set(CellRef::new(1, 19), Cell::value(Value::Number(6.0)));
+        sh.cells.set(CellRef::new(2, 20), Cell::value(Value::Number(8.0)));
+        sh.what_if_tables.push(WhatIfTable {
+            anchor: CellRef::new(1, 19),
+            range: RangeRef::new(CellRef::new(1, 19), CellRef::new(2, 20)),
+            formula_text: "TABLE(Z10,)".into(),
+            input1: Some(CellRef::new(9, 25)),
+            input2: None,
+            two_variable: Some(false),
+            row_oriented: None,
+            input1_deleted: Some(false),
+            input2_deleted: None,
+            calculate: Some(true),
+        });
+        let bytes = gridcraft_xlsx::write_xlsx(wb).unwrap();
+        let (back, _) = crate::io::open_bytes("synthetic.xlsx", &bytes).unwrap();
+        let mut imported = Session::new();
+        imported.add_document(crate::DocState::new(back, None, "synthetic".into(), crate::Trust::FromFile));
+        imported
+    }
+
+    #[test]
+    fn calculated_column_renames_preserve_disjoint_native_whatif_tables() {
+        for (cmd, params) in [("cell.set", json!({"cell":"B1","input":"Amount"})), ("table.rename", json!({"table":"Prices","name":"PriceList"}))] {
+            let mut s = native_calculated_columns(false);
+            let definitions = s.doc().unwrap().wb.sheet(0).unwrap().what_if_tables.clone();
+            s.execute(cmd, params).unwrap();
+            assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().what_if_tables, definitions);
+            let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "synthetic.xlsx").unwrap();
+            let (back, report) = crate::io::open_bytes_with_report("synthetic.xlsx", &bytes, None, false).unwrap();
+            let sh = back.sheet(0).unwrap();
+            assert_eq!(sh.what_if_tables, definitions);
+            assert_eq!(sh.value(gridcraft_core::CellRef::new(1, 19)), Value::Number(6.0));
+            assert_eq!(sh.value(gridcraft_core::CellRef::new(2, 20)), Value::Number(8.0));
+            assert!(report.issues.iter().any(|i| i.feature == "what-if data table" && i.effect == gridcraft_model::CompatibilityEffect::Static));
+        }
+    }
+
+    #[test]
+    fn calculated_column_renames_refuse_protected_native_headers_atomically() {
+        for (cmd, params) in [("cell.set", json!({"cell":"B1","input":"Amount"})), ("table.rename", json!({"table":"Prices","name":"PriceList"}))] {
+            let mut s = native_calculated_columns(true);
+            s.execute("cell.set", json!({"cell":"Z20","input":"1"})).unwrap();
+            s.execute("edit.undo", json!({})).unwrap();
+            let d = s.doc().unwrap();
+            let before = d.wb.clone();
+            let selection = d.selection.clone();
+            let history = (d.undo.len(), d.redo.len());
+            let dirty = d.is_dirty();
+            let error = s.execute(cmd, params).unwrap_err();
+            assert!(error.to_string().contains("what-if"), "{error}");
+            let d = s.doc().unwrap();
+            assert_eq!(&*d.wb, &*before);
+            assert!(std::sync::Arc::ptr_eq(&d.wb, &before));
+            assert_eq!(d.selection, selection);
+            assert_eq!((d.undo.len(), d.redo.len()), history);
+            assert_eq!(d.is_dirty(), dirty);
+        }
+    }
 
     #[test]
     fn editing_a_header_renames_the_column() {

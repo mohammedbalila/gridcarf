@@ -517,12 +517,7 @@ fn permutationa(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
 
 fn integer_args(a: &[Arg]) -> R<Vec<u64>> {
     let v = numbers(a)?;
-    v.iter()
-        .map(|x| {
-            let t = x.trunc();
-            if !(0.0..9.007_199_254_740_992e15).contains(&t) { Err(CellError::Num) } else { Ok(t as u64) }
-        })
-        .collect()
+    v.iter().map(|x| if !(0.0..9.007_199_254_740_992e15).contains(x) { Err(CellError::Num) } else { Ok(x.trunc() as u64) }).collect()
 }
 fn gcd2(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
