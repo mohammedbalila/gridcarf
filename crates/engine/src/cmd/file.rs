@@ -306,14 +306,139 @@ mod autosave_tests {
     use crate::Session;
     use serde_json::json;
 
+    struct Directory(std::path::PathBuf);
+
+    impl Directory {
+        fn acquire(candidates: impl IntoIterator<Item = std::path::PathBuf>) -> std::io::Result<Self> {
+            for path in candidates {
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "fixture candidates exhausted"))
+        }
+    }
+
+    impl std::ops::Deref for Directory {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            // Only exclusively acquired synthetic fixture directories may be cleaned up.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn directory(name: &str) -> Directory {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Directory::acquire((0..).map(|_| {
+            std::env::temp_dir().join(format!("gridcraft-autosave-sandbox-{name}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn fixture_directory_retries_collisions_without_owning_sentinels() {
+        // Acquire the outer parent independently: even a failing ownership test stays synthetic.
+        let outer = (0..)
+            .find_map(|id| {
+                let path = std::env::temp_dir().join(format!("gridcraft-autosave-sandbox-collision-{}-{id}", std::process::id()));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => Some(Directory(path)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("cannot acquire collision parent: {e}"),
+                }
+            })
+            .unwrap();
+        let file = outer.join("existing-file");
+        std::fs::write(&file, b"existing file sentinel").unwrap();
+        let existing = outer.join("existing-directory");
+        std::fs::create_dir(&existing).unwrap();
+        let sentinel = existing.join("keep.bin");
+        std::fs::write(&sentinel, b"existing directory sentinel").unwrap();
+        let fresh = outer.join("fresh");
+        let acquired = Directory::acquire([file.clone(), existing.clone(), fresh.clone()]).unwrap();
+        let selected = acquired.0.clone();
+        std::fs::write(acquired.join("owned.bin"), b"owned contents").unwrap();
+        drop(acquired);
+        assert_eq!(std::fs::read(&file).unwrap(), b"existing file sentinel");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing directory sentinel");
+        assert_eq!(selected, fresh, "colliding directories must not be accepted as owned");
+        assert!(!fresh.try_exists().unwrap(), "owned directory must be cleaned up");
+    }
+
+    #[test]
+    fn fixture_directory_surfaces_non_collision_errors() {
+        let outer = directory("errors");
+        let missing = outer.join("missing").join("child");
+        let unused = outer.join("unused");
+        let error = Directory::acquire([missing, unused.clone()]).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!unused.try_exists().unwrap());
+    }
+
+    fn sandbox_file(candidates: impl IntoIterator<Item = std::path::PathBuf>) -> std::io::Result<std::path::PathBuf> {
+        use std::io::Write;
+        for path in candidates {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(b"original")?;
+                    return Ok(path);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "fixture file candidates exhausted"))
+    }
+
+    #[test]
+    fn sandbox_file_retries_collisions_without_truncating_sentinels() {
+        let outer = directory("file-collisions");
+        let file = outer.join("existing-file.xlsx");
+        std::fs::write(&file, b"existing file sentinel").unwrap();
+        let existing = outer.join("existing-directory.xlsx");
+        std::fs::create_dir(&existing).unwrap();
+        let sentinel = existing.join("keep.bin");
+        std::fs::write(&sentinel, b"existing directory sentinel").unwrap();
+        let fresh = outer.join("fresh.xlsx");
+        let acquired = sandbox_file([file.clone(), existing.clone(), fresh.clone()]).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"existing file sentinel", "fixture must not truncate a colliding file");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing directory sentinel");
+        assert_eq!(acquired, fresh, "only a fresh file may be accepted as owned");
+        assert_eq!(std::fs::read(&acquired).unwrap(), b"original");
+        std::fs::remove_file(acquired).unwrap();
+        assert!(!fresh.try_exists().unwrap());
+        assert_eq!(std::fs::read(&file).unwrap(), b"existing file sentinel");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing directory sentinel");
+    }
+
+    #[test]
+    fn sandbox_file_surfaces_non_collision_errors() {
+        let outer = directory("file-errors");
+        let missing = outer.join("missing").join("book.xlsx");
+        let unused = outer.join("unused.xlsx");
+        let error = sandbox_file([missing, unused.clone()]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!unused.try_exists().unwrap());
+    }
+
     #[test]
     fn autosave_keeps_script_file_io_sandbox_on_inactive_documents() {
         let mut s = Session::new();
         s.new_workbook();
         s.execute("cell.set", json!({"cell":"A1","input":"unsaved"})).unwrap();
         let uid = s.doc().unwrap().uid;
-        let path = std::env::temp_dir().join(format!("gridcraft-autosave-sandbox-{}-{uid}.xlsx", std::process::id()));
-        std::fs::write(&path, b"original").unwrap();
+        let dir = directory("guard");
+        let path = sandbox_file([dir.join("book.xlsx")]).unwrap();
         s.doc_mut().unwrap().path = Some(path.to_str().unwrap().into());
         s.new_workbook();
         let active = s.doc().unwrap().uid;
@@ -328,6 +453,5 @@ mod autosave_tests {
         assert_eq!(s.window_list(), windows);
         assert_eq!(s.journal.len(), journal);
         assert!(s.documents().iter().find(|d| d.uid == uid).unwrap().is_dirty());
-        std::fs::remove_file(path).unwrap();
     }
 }

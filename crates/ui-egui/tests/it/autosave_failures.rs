@@ -1,13 +1,86 @@
 //! Synthetic AutoSave destinations; never externally authored workbook fixtures.
 use egui_kittest::kittest::Queryable;
-use gridcraft_engine::{DocState, Session, Trust, model::Workbook};
+use gridcraft_engine::{Session, model::Workbook};
 use serde_json::json;
 
-fn directory(name: &str) -> std::path::PathBuf {
-    let id = DocState::new(Workbook::new(), None, "id".into(), Trust::Local).uid;
-    let dir = std::env::temp_dir().join(format!("gridcraft-autosave-{name}-{}-{id}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+struct Directory(std::path::PathBuf);
+
+impl Directory {
+    fn acquire(candidates: impl IntoIterator<Item = std::path::PathBuf>) -> std::io::Result<Self> {
+        for path in candidates {
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "fixture candidates exhausted"))
+    }
+}
+
+impl std::ops::Deref for Directory {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for Directory {
+    fn drop(&mut self) {
+        // Only exclusively acquired synthetic fixture directories may be cleaned up.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn directory(name: &str) -> Directory {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    Directory::acquire(
+        (0..)
+            .map(|_| std::env::temp_dir().join(format!("gridcraft-autosave-{name}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))),
+    )
+    .unwrap()
+}
+
+#[test]
+fn fixture_directory_retries_collisions_without_owning_sentinels() {
+    // Acquire the outer parent independently: even a failing ownership test stays synthetic.
+    let outer = (0..)
+        .find_map(|id| {
+            let path = std::env::temp_dir().join(format!("gridcraft-autosave-collision-{}-{id}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => Some(Directory(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => panic!("cannot acquire collision parent: {e}"),
+            }
+        })
+        .unwrap();
+    let file = outer.join("existing-file");
+    std::fs::write(&file, b"existing file sentinel").unwrap();
+    let existing = outer.join("existing-directory");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("keep.bin");
+    std::fs::write(&sentinel, b"existing directory sentinel").unwrap();
+    let fresh = outer.join("fresh");
+    let acquired = Directory::acquire([file.clone(), existing.clone(), fresh.clone()]).unwrap();
+    let selected = acquired.0.clone();
+    std::fs::write(acquired.join("owned.bin"), b"owned contents").unwrap();
+    drop(acquired);
+    assert_eq!(std::fs::read(&file).unwrap(), b"existing file sentinel");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing directory sentinel");
+    assert_eq!(selected, fresh, "colliding directories must not be accepted as owned");
+    assert!(!fresh.try_exists().unwrap(), "owned directory must be cleaned up");
+}
+
+#[test]
+fn fixture_directory_surfaces_non_collision_errors() {
+    let outer = directory("errors");
+    let missing = outer.join("missing").join("child");
+    let unused = outer.join("unused");
+    let error = Directory::acquire([missing, unused.clone()]).err().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(!unused.try_exists().unwrap());
 }
 
 fn window_context(session: &Session) -> serde_json::Value {
@@ -54,7 +127,6 @@ fn all_eligible_documents_are_considered() {
     assert_eq!(app.session.active_window(), window);
     assert_eq!(window_context(&app.session), windows, "no activation or MRU change");
     assert_eq!(app.session.active().unwrap().selection, selection);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -96,7 +168,6 @@ fn lossy_save_never_auto_confirms() {
     assert!(app.session.doc().unwrap().is_dirty());
     assert!(app.dialog.is_none());
     assert!(!app.session.journal.iter().any(|(id, _)| id == "file.save"));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -126,7 +197,6 @@ fn unwritable_destination_keeps_dirty_and_notifies() {
     assert!(path.exists());
     assert!(!h.state().session.documents().iter().find(|d| d.uid == uid).unwrap().is_dirty());
     assert!(h.query_by_label(&label).is_none(), "a successful retry clears the failure");
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -173,7 +243,6 @@ fn locked_and_failed_inactive_documents_do_not_block_another_save() {
     assert_eq!(saves[0].doc, good);
     assert_eq!(saves[0].selection, selected);
     assert_eq!(app.session.macro_debug.as_ref().unwrap().doc, locked);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -202,7 +271,6 @@ fn encrypted_own_file_never_becomes_unprotected_automatically() {
     assert!(h.state().session.doc().unwrap().is_dirty());
     assert!(h.state().dialog.is_none());
     assert_eq!(std::fs::read(&path).unwrap(), encrypted);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -242,7 +310,6 @@ fn inactive_save_flushes_the_live_view_instead_of_mru_or_visible_window() {
     assert_eq!(window_context(&app.session), windows);
     assert_eq!(app.session.doc_window(uid), Some(first));
     assert_eq!(app.session.document_view_window(uid), Some(second));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -274,7 +341,6 @@ fn current_and_parked_drafts_are_preserved_while_other_documents_save() {
     );
     assert!(!dir.join("draft.xlsx").exists());
     assert!(app.session.doc().unwrap().is_dirty());
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -306,7 +372,6 @@ fn engine_autosave_rejects_non_destination_and_preserves_context_on_failure() {
     assert!(result["bytes"].as_u64().unwrap() > 0);
     assert!(std::fs::read(&path).unwrap().starts_with(b"PK"));
     assert!(!session.doc().unwrap().is_dirty());
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -331,7 +396,6 @@ fn active_autosave_keeps_trace_arrows_through_stored_view_changes() {
     let trace = app.grid.trace.as_ref().unwrap();
     assert_eq!(trace.revision, d.revision, "pure stored view changes preserve arrows");
     assert_eq!(trace.arrows, arrows);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -359,7 +423,6 @@ fn an_active_draft_does_not_defer_another_document() {
         (&after.text, after.doc, after.window, after.caret, after.anchor),
         (&before.text, before.doc, before.window, before.caret, before.anchor)
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -388,7 +451,6 @@ fn textbox_draft_uses_its_document_before_the_first_window_sync() {
     assert_eq!((app.session.doc().unwrap().uid, app.session.active_window()), (active, window));
     let draft = app.text_box_editor.as_ref().unwrap();
     assert_eq!((draft.id, draft.text.as_str()), (id, "unfinished text"));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -472,7 +534,6 @@ fn inactive_autosave_rebases_valid_parked_traces_only_for_its_view_change() {
         let mut h = crate::common::harness_with(crate::common::builder().with_size(egui::vec2(1200.0, 800.0)), app, 4);
         h.render().unwrap().save(path).unwrap();
     }
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -504,5 +565,4 @@ fn inactive_autosave_does_not_rebase_traces_across_new_source_metadata() {
     assert!(trace.revision > before_view, "the pure stored-view change was rebased");
     assert!(trace.revision < d.revision, "the separate save metadata change still invalidates the trace");
     assert_eq!(trace.arrows, arrows);
-    std::fs::remove_dir_all(dir).unwrap();
 }

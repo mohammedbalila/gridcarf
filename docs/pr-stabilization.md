@@ -199,3 +199,31 @@ cargo xtask ci
 
 This is an arithmetic save repair. Native Windows, live Excel reopen, process RSS
 and broad external-corpus fidelity remain untested by these synthetic checks.
+
+## T01: Acquire exclusive AutoSave test fixtures
+
+Revision: 2026-11-07.
+
+The AutoSave integration fixtures and engine sandbox test now acquire their
+synthetic parent directories with exclusive `create_dir`, retrying only existing
+candidates. RAII cleans up only a successfully acquired parent. The sandbox
+fixture also creates its workbook file exclusively and retries file collisions.
+No production save behavior or script permission policy changes.
+
+Deterministic synthetic file and directory collisions retain their sentinel bytes,
+select a fresh candidate and verify owned cleanup. Missing-parent errors surface
+without trying another candidate. The direct-file regression reproduced the old
+fixture write truncating sentinel bytes before exclusive creation was applied.
+All collision setup and cleanup stays below an independently acquired parent.
+The original AutoSave cases and sandbox denial, document/window, dirty-state and
+journal assertions remain in place; fixture creation stays outside the sandbox.
+
+~~~sh
+cargo test --locked -p gridcraft-engine --lib autosave_tests
+cargo test --locked -p gridcraft-ui-egui --test it autosave_failures
+cargo test --locked -p gridcraft-engine --test it save_temp_ownership
+cargo xtask ci
+~~~
+
+These are test-fixture ownership checks. Native Windows, live Excel, process RSS
+and broad external-corpus fidelity remain untested.
