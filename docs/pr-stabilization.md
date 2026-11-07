@@ -35,3 +35,18 @@ cargo xtask ci
 
 Tests use synthetic data. Live Excel observations, Windows execution and process-memory
 measurements are separate verification activities; native Rust tests do not substitute for them.
+
+## Shape typeface XML attributes
+
+[Typeface repair source: PR #2196](https://github.com/storytold/gridcraft/pull/2196),
+reviewed at 94eed2bd835ea0a991c6dc4fbb8f9c798ab6b2ed.
+
+Drawing text now escapes its font name as an XML attribute. A quote in the font name
+previously ended the typeface attribute, allowing the remaining text to become another
+attribute or malformed XML. The regression checks emitted XML structure independently,
+then verifies exact Unicode font, Arabic text and RTL state after save/reopen.
+
+~~~sh
+cargo test --locked -p gridcraft-xlsx tests::shape_text_rtl
+cargo test --locked -p gridcraft-xlsx
+~~~

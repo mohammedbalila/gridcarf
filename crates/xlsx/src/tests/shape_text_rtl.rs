@@ -4,6 +4,8 @@ use std::io::Read;
 use std::sync::Arc;
 
 use gridcraft_model::{Anchor, Color, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, Sheet, Workbook};
+use quick_xml::events::Event;
+use quick_xml::{Reader, XmlVersion};
 
 use super::minimal;
 use crate::{read_xlsx, write_xlsx};
@@ -84,4 +86,38 @@ fn shape_text_without_rtl_writes_unchanged_ppr() {
 
     let xml = written_drawing(&text_box("plain", ShapeFormat::default()));
     assert!(!xml.contains("<a:pPr"), "no paragraph properties without alignment or direction: {xml}");
+}
+
+#[test]
+fn shape_font_typeface_is_attribute_escaped() {
+    let font = r#"عربي" injected="字<&>'"#;
+    let wb = text_box("مرحبا", ShapeFormat { font: Some(font.into()), rtl: true, ..Default::default() });
+    let xml = written_drawing(&wb);
+    let mut reader = Reader::from_str(&xml);
+    let mut typefaces = Vec::new();
+    loop {
+        match reader.read_event().expect("saved drawing must be valid XML") {
+            Event::Start(e) | Event::Empty(e) => {
+                let attrs: Vec<_> = e
+                    .attributes()
+                    .map(|a| {
+                        let a = a.expect("saved drawing attributes must be valid");
+                        (String::from_utf8(a.key.as_ref().to_vec()).unwrap(), a.normalized_value(XmlVersion::Explicit1_0).unwrap().into_owned())
+                    })
+                    .collect();
+                if e.name().as_ref() == b"a:latin" {
+                    typefaces.push(attrs);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert_eq!(typefaces, vec![vec![("typeface".into(), font.into())]], "one typeface value with no injected attributes");
+
+    let (reopened, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    let after = &reopened.sheet(0).unwrap().shapes[0];
+    assert_eq!(after.format.font.as_deref(), Some(font));
+    assert_eq!(after.text, "مرحبا");
+    assert!(after.format.rtl);
 }
