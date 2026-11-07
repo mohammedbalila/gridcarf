@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "baseline_id": "gridcraft-v01-2026-11-07",
+  "source_sha": "6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214",
+  "source_version": "0.16.0",
+  "earlier_audit_cli_version": "0.17.0",
+  "edition": "2024",
+  "minimum_rust": "1.95",
+  "lockfile": {
+    "file": "Cargo.lock",
+    "sha256": "2868f6f77405c857cf34d409a20509b4d4417e4184f68499f71a80b5b452ebf8"
+  },
+  "environment": {
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)",
+    "llvm": "22.1.2",
+    "target": "aarch64-apple-darwin",
+    "os": "macOS 27.0.1 (26A434)",
+    "cpu": "Apple M5",
+    "logical_cpus": 10,
+    "ram_bytes": 17179869184,
+    "dev_and_test_debug": 0,
+    "incremental": false,
+    "native_fonts": {
+      "initial_gate": "unset; two UI missing-glyph test failures",
+      "final_gate_input": {
+        "repository": "https://github.com/storytold/craft-fonts",
+        "revision": "b076417b5880bd4154bd22f00695b1d28c6bea83",
+        "required": true,
+        "validated_font_rows": 14,
+        "license": "OFL-1.1",
+        "manifest_sha256": "e825709cd46ff7abe213c141e981c0c11e098195a134951e95dada85eaea778a",
+        "simplified_chinese_manifest_sha256": "5e42723fe7148934bff0ddf28191e59cc41b021cf82c21803a5477031a24b7c1",
+        "files_committed": false
+      }
+    },
+    "installed_targets": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown"
+    ]
+  },
+  "fixture_policy": {
+    "origin": "Original synthetic Rust-generated inputs; no Excel-authored files",
+    "binaries_committed": false,
+    "external_corpus": null,
+    "hash_semantics": "Whole ZIP hashes identify this generation run; canonical package hash is SHA-256 of sorted UTF-8 entry name + NUL + uncompressed content + NUL, without XML normalization. Writer timestamps and compression may vary. Recipes define semantic reproduction."
+  },
+  "generators": {
+    "xlsx": {
+      "file": "crates/xlsx/src/tests/compatibility_fixtures.rs",
+      "helper": "crates/xlsx/src/tests.rs::minimal",
+      "test": "tests::compatibility_fixtures::synthetic_baseline_inputs_are_bounded"
+    },
+    "engine": {
+      "file": "crates/engine/tests/it/compatibility_fixtures.rs",
+      "helper": "Session::execute and io::save_bytes",
+      "test": "compatibility_fixtures::synthetic_slicer_input_is_bounded"
+    },
+    "output_environment_variable": "GRIDCRAFT_COMPAT_FIXTURE_DIR",
+    "overwrite_policy": "create_new; preexisting files are refused"
+  },
+  "fixtures": [
+    {
+      "file": "legacy-intersection.xlsx",
+      "bytes": 1422,
+      "sha256": "2c4c80afc40bb06ba6ccc073ab14e34d49470d3c083399a0ce166c2e0ce29c3b",
+      "canonical_package_sha256": "695ab44445d5b2e44f9d250a172ba29e329329dba958bf007f4c6e9d026f8a04",
+      "recipe": "xlsx::synthetic_baseline_inputs_are_bounded",
+      "bounds": {
+        "input_cells": 4,
+        "formula_cell": "B2",
+        "formula": "SQRT(A1:A3)",
+        "cached_value": 2,
+        "A1_A3": [
+          1,
+          4,
+          9
+        ],
+        "dynamic_metadata": false
+      },
+      "expected": "B2 = 2; B3:B4 empty; no spill",
+      "source": "https://learn.microsoft.com/en-us/office/vba/excel/concepts/cells-and-ranges/range-formula-vs-formula2"
+    },
+    {
+      "file": "whatif.xlsx",
+      "bytes": 1446,
+      "sha256": "5ba328a1f1272e8c6247a9d773a019891650db65e692363fdf6177ffc600763a",
+      "canonical_package_sha256": "5551fed48995ec0447f480f90c4e6e5b41da3fb69a414dd463c3e6a1c023caf0",
+      "recipe": "xlsx::synthetic_baseline_inputs_are_bounded",
+      "bounds": {
+        "input_cells": 6,
+        "formula_cell": "B2",
+        "formula_type": "dataTable",
+        "ref": "B2:B3",
+        "r1": "A1",
+        "cached_outputs": [
+          4,
+          6
+        ]
+      },
+      "expected": "Preserve the definition or explicitly refuse unsupported save loss",
+      "source": "https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.spreadsheet.cellformula?view=openxml-3.0.1"
+    },
+    {
+      "file": "notes.xlsx",
+      "bytes": 6339,
+      "sha256": "fa0e335c5157401b49c972785ab154bc11060eeceab6a11311e81b59b2d5590c",
+      "canonical_package_sha256": "3fa3ee8d191e7939be29371eeff40cd1c6417eb904f4aefc23e4da0c86c8ba81",
+      "recipe": "xlsx::synthetic_baseline_inputs_are_bounded",
+      "bounds": {
+        "notes": 64,
+        "bytes_per_note": 32767,
+        "total_text_bytes": 2097088,
+        "edit_cell": "B1",
+        "edit_counts": [
+          0,
+          20,
+          80,
+          140
+        ]
+      },
+      "expected": "Retain notes and history without copying immutable note text for every B1 edit; RSS diagnostic only",
+      "source": "docs/compatibility-baseline.md"
+    },
+    {
+      "file": "plain.xlsx",
+      "bytes": 1347,
+      "sha256": "42ac503ca74d9cce2eb88fcbf1b03b27a51c1c210b92d161f0b8929df5169a0d",
+      "canonical_package_sha256": "c40711e57dd0d0b50940d8f2e29b6576cfef4766b3caeebd4ee340be95c720c2",
+      "recipe": "xlsx::synthetic_baseline_inputs_are_bounded",
+      "bounds": {
+        "notes": 0,
+        "cells": 0,
+        "edit_cell": "B1",
+        "edit_counts": [
+          0,
+          20,
+          80,
+          140
+        ]
+      },
+      "expected": "Control for notes RSS comparison",
+      "source": "docs/compatibility-baseline.md"
+    },
+    {
+      "file": "slicer.xlsx",
+      "bytes": 4857,
+      "sha256": "3243d264fe9679d57450f9305a094d846d973e1a15f30d4df564fed8f61e593b",
+      "canonical_package_sha256": "67be2f8479b182bc7b3c1aa6233b3a4792718ddceb498b31a70d4932e37c6ad6",
+      "recipe": "engine::synthetic_slicer_input_is_bounded",
+      "bounds": {
+        "table": "SalesTable",
+        "range": "A1:B3",
+        "values": [
+          [
+            "Region",
+            "Sales"
+          ],
+          [
+            "East",
+            10
+          ],
+          [
+            "West",
+            20
+          ]
+        ],
+        "slicers": 1,
+        "column": "Region",
+        "anchor": "D1"
+      },
+      "expected": "One slicer survives save/reopen or unsupported loss is explicitly refused",
+      "source": "docs/gaps.md#3-some-unmodelled-xlsx-content-is-dropped-on-save-ff"
+    }
+  ],
+  "slicer_model_evidence": {
+    "file": "slicer-before.json",
+    "bytes": 7475,
+    "sha256": "6c89d7c8dc82be241630333af61699e9ec513a11a31b7aaee0a89b54c3cd56d2"
+  },
+  "earlier_audit_artifacts": [
+    {
+      "file": "probe.py",
+      "bytes": 5990,
+      "sha256": "f21aa6ebdc8771442b149aaa077935b6f4b77f7e3e98aeebca9de14d9a923940"
+    },
+    {
+      "file": "results.json",
+      "bytes": 4566,
+      "sha256": "262f0ea35fea3e48b011c9b4c9428984848ef970789f07b4cdcccfbc9de74cfd"
+    },
+    {
+      "file": "legacy-intersection.xlsx",
+      "bytes": 1435,
+      "sha256": "d5cfda5256db0059d4f85bca80eb77e5cceb966bd443faa836a5709d41b32d43",
+      "canonical_package_sha256": "9b20be152053d99b0a7382c98d2fe73089af29aafdd6490f50bd8a0eee5ae613"
+    },
+    {
+      "file": "whatif.xlsx",
+      "bytes": 1458,
+      "sha256": "2da33e5df6e42baf1c4aa9fafc7b11a0eb75d506a44b9017a9d1eb21d6e59795",
+      "canonical_package_sha256": "5507b5a4f5f887e6dd6dc4588e4ebdb6afcbdd0848a1e2542f4b9e23b6ce3e1e"
+    },
+    {
+      "file": "notes.xlsx",
+      "bytes": 6460,
+      "sha256": "42f79fbb47581f8c51b58762b0efb2fc490f5cb49e777de4cfef03bd725a4d8a",
+      "canonical_package_sha256": "be7e92e494de8a36483da0fd60281e54ab675ade4be0a1eacd87e6aa84fb423f"
+    },
+    {
+      "file": "plain.xlsx",
+      "bytes": 1364,
+      "sha256": "58cdd0b3aa99ba62139a681efd24a910d79b44b8dd09dbc3e7859b884b9091bb",
+      "canonical_package_sha256": "b67e8bfd6b04ae4da56f36e271768134201535f2edc9e7ba05f6d8a4939982f7"
+    },
+    {
+      "file": "slicer.xlsx",
+      "bytes": 4857,
+      "sha256": "3243d264fe9679d57450f9305a094d846d973e1a15f30d4df564fed8f61e593b",
+      "canonical_package_sha256": "67be2f8479b182bc7b3c1aa6233b3a4792718ddceb498b31a70d4932e37c6ad6"
+    }
+  ],
+  "source_diagnostics": {
+    "legacy_cat_csv": "1,\n4,1\n9,2\n,3\n",
+    "legacy_check_exit": 1,
+    "legacy_numeric_mismatches": 1,
+    "slicers_before": 1,
+    "slicers_after": 0,
+    "whatif_definition_preserved": false,
+    "whatif_convert_exit": 0,
+    "desired_assertions_failed": 4,
+    "rust_fixture_memory": [
+      {
+        "kind": "plain",
+        "edits": 0,
+        "peak_rss_bytes": 9568256,
+        "undo": 0,
+        "exit": 0
+      },
+      {
+        "kind": "plain",
+        "edits": 20,
+        "peak_rss_bytes": 10420224,
+        "undo": 20,
+        "exit": 0
+      },
+      {
+        "kind": "plain",
+        "edits": 80,
+        "peak_rss_bytes": 10993664,
+        "undo": 80,
+        "exit": 0
+      },
+      {
+        "kind": "plain",
+        "edits": 140,
+        "peak_rss_bytes": 11206656,
+        "undo": 100,
+        "exit": 0
+      },
+      {
+        "kind": "notes",
+        "edits": 0,
+        "peak_rss_bytes": 16334848,
+        "undo": 0,
+        "exit": 0
+      },
+      {
+        "kind": "notes",
+        "edits": 20,
+        "peak_rss_bytes": 59637760,
+        "undo": 20,
+        "exit": 0
+      },
+      {
+        "kind": "notes",
+        "edits": 80,
+        "peak_rss_bytes": 187809792,
+        "undo": 80,
+        "exit": 0
+      },
+      {
+        "kind": "notes",
+        "edits": 140,
+        "peak_rss_bytes": 234881024,
+        "undo": 100,
+        "exit": 0
+      }
+    ]
+  },
+  "checks": {
+    "pristine_headless": {
+      "status": "PASS",
+      "passed": 1811,
+      "failed": 0,
+      "ignored": 1,
+      "ignored_test": "recalc::tests::recalc_with_range_formulas_scales_linearly",
+      "command": "cargo test -p gridcraft-core -p gridcraft-numfmt -p gridcraft-formula -p gridcraft-functions -p gridcraft-model -p gridcraft-calc -p gridcraft-xlsx -p gridcraft-engine -p gridcraft-cli"
+    },
+    "fixture_generators": {
+      "status": "PASS",
+      "passed": 2
+    },
+    "release_cli": {
+      "status": "PASS",
+      "command": "cargo build --release -p gridcraft-cli"
+    },
+    "full_gate": {
+      "status": "PASS",
+      "command": "cargo xtask ci",
+      "exit": 0,
+      "steps": [
+        "i18n-report",
+        "fmt",
+        "clippy",
+        "test",
+        "doctest",
+        "assets",
+        "layers",
+        "wasm",
+        "parity",
+        "keytips"
+      ],
+      "passed": 3537,
+      "failed": 0,
+      "ignored": 1,
+      "wasm_packages": 12,
+      "warnings": [
+        "Existing three unused egui Cargo patches",
+        "Intentional font policy exclusion of Noto Sans CJK SC Regular",
+        "WASM dead code: Modified::At and Modified::Unknown"
+      ],
+      "browser_execution": "NOT TESTED"
+    },
+    "external_excel": {
+      "status": "NOT TESTED",
+      "reason": "No Excel installation; no external oracle corpus"
+    },
+    "initial_full_gate": {
+      "status": "ENVIRONMENT FAILURE",
+      "exit": 1,
+      "passed_steps": [
+        "i18n-report",
+        "fmt",
+        "clippy"
+      ],
+      "failed_tests": [
+        "interaction::column_autocomplete_folds_case_beyond_ascii",
+        "interaction::language_switch_renders_the_ribbon_and_persists"
+      ],
+      "reason": "Missing optional pinned font input; affected tests passed after provisioning it",
+      "later_steps": "skipped by fail-fast gate"
+    },
+    "font_affected_tests": {
+      "status": "PASS",
+      "passed": 2,
+      "failed": 0
+    },
+    "cargo_run_legacy_check": {
+      "command": "cargo run -p gridcraft-cli -- check <generated-legacy-fixture> --json",
+      "exit": 1,
+      "classification": "expected product diagnostic failure; one numeric mismatch"
+    }
+  },
+  "upstream_snapshot": {
+    "checked_date": "2026-11-07",
+    "main_sha": "6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214",
+    "existing_issues": [
+      410,
+      1636,
+      2077,
+      2889,
+      1227
+    ],
+    "competing_prs": [
+      {
+        "number": 417,
+        "state": "open",
+        "merged": false,
+        "mergeable_state": "dirty"
+      },
+      {
+        "number": 1660,
+        "state": "open",
+        "merged": false,
+        "mergeable_state": "dirty"
+      },
+      {
+        "number": 2677,
+        "state": "open",
+        "merged": false,
+        "mergeable_state": "dirty"
+      },
+      {
+        "number": 959,
+        "state": "open",
+        "merged": false,
+        "mergeable_state": "dirty"
+      }
+    ],
+    "public_mutations": false
+  },
+  "source_release_binary": {
+    "version": "gridcraft-cli 0.16.0",
+    "sha256": "26ce161489f488b232d456f12ce9d959859e3c1efa7e8fc343d1f15d32ae1615",
+    "profile": "release (committed profile)"
+  },
+  "earlier_audit_binary": {
+    "version": "gridcraft-cli 0.17.0",
+    "sha256": "a15339aadcb73901f36fd89237f0882ad14bbd068c8555938825b68bf05a84e9",
+    "source_correspondence": "not established; distinct from pinned source build"
+  }
+}
