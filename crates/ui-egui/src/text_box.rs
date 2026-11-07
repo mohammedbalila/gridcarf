@@ -17,6 +17,12 @@ pub struct EditState {
     rect: Option<Rect>,
 }
 
+impl EditState {
+    pub(crate) fn document(&self) -> u64 {
+        self.uid
+    }
+}
+
 /// Returns the stable id for the text-box editor.
 pub(crate) fn editor_id() -> egui::Id {
     egui::Id::unique("gridcraft.text_box_editor")

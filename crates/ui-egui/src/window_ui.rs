@@ -53,6 +53,16 @@ impl WindowUi {
 }
 
 impl SheetApp {
+    /// AutoSave leaves drafts in their own document, including parked native windows.
+    pub(crate) fn document_has_draft(&self, uid: u64) -> bool {
+        self.editor.as_ref().is_some_and(|e| e.doc == uid)
+            || self.text_box_editor.as_ref().is_some_and(|e| e.document() == uid)
+            || self
+                .parked
+                .values()
+                .any(|w| w.editor.as_ref().is_some_and(|e| e.doc == uid) || w.text_box_editor.as_ref().is_some_and(|e| e.document() == uid))
+    }
+
     /// Exchanges the per-window fields with `w`. Destructured in full, so a field added to
     /// [`WindowUi`] can't be left out of the swap.
     fn swap_window_ui(&mut self, w: &mut WindowUi) {

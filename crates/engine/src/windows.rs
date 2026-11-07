@@ -142,6 +142,12 @@ impl Session {
         self.windows_of(doc).max_by_key(|w| (!w.hidden, w.last_active)).map(|w| w.id)
     }
 
+    /// The window whose view currently lives in the document, which can differ from the
+    /// most recently activated or visible window after a host draws another window.
+    pub fn document_view_window(&self, doc: u64) -> Option<u64> {
+        self.windows_of(doc).find(|w| w.view.is_none()).map(|w| w.id)
+    }
+
     /// Resolves a [`Target`] to a window id.
     pub fn target_window(&self, t: Target) -> Result<u64> {
         match t {

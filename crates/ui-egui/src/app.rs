@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::clock::monotonic_ms;
 use super::clock::now_ms;
 use super::services::{Chrome, Services};
 use super::state::{NoticeKind, OpenWindow, SaveAnswer, SheetView};
@@ -17,6 +15,7 @@ mod editing;
 #[cfg(test)]
 pub(crate) use editing::{DRAFT_CODE_HIDDEN, DRAFT_SHEET_GONE};
 mod files;
+pub(crate) use files::AutoSaveState;
 mod fonts;
 mod input;
 mod keys;
@@ -40,6 +39,7 @@ impl SheetApp {
             message: None,
             toast: None,
             notice: None,
+            autosave_states: HashMap::new(),
             services,
             printing: Default::default(),
             print_feedback_seen: None,
@@ -476,14 +476,13 @@ mod lifecycle_tests {
         app.run("cell.set", serde_json::json!({"cell": "A1", "input": "42"})).unwrap();
         app.ui.autosave = true;
         app.session.active_mut().unwrap().path = Some(path.to_string_lossy().into_owned());
-        app.grid.last_autosave = monotonic_ms() - 3000.0;
 
         let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
         assert!(path.exists(), "a hidden logic-only tick saves a dirty workbook with a file");
         assert!(!app.session.active().unwrap().is_dirty(), "the save clears the dirty state");
-        let saved_at = app.grid.last_autosave;
+        let journal_len = app.session.journal.len();
         let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
-        assert_eq!(app.grid.last_autosave, saved_at, "the same change is not saved a second time");
+        assert_eq!(app.session.journal.len(), journal_len, "the same change is not saved a second time");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -634,10 +634,12 @@ pub fn toast(app: &mut SheetApp, ctx: &egui::Context) {
     ctx.request_repaint_after(std::time::Duration::from_millis(200));
 }
 
-/// The info bar under the ribbon (Excel's message-bar slot). Shows an open-time notice with an
-/// optional action button and a dismiss ✕. Returns nothing; dismissing clears `app.notice`.
+/// The info bar under the ribbon. AutoSave failures stay until resolved; otherwise an open-time
+/// notice has an optional action and dismiss button, which clears `app.notice`.
 pub fn notice_bar(app: &mut SheetApp, ui: &mut Ui) {
-    let Some(notice) = app.notice.clone() else { return };
+    let autosave = app.autosave_notice();
+    let persistent = autosave.is_some();
+    let Some(notice) = autosave.or_else(|| app.notice.clone()) else { return };
     let t = Tokens::get(ui.ctx());
     let (bg, border) = match notice.kind {
         crate::NoticeKind::Warning => (t.notice_warn_bg, t.notice_warn_border),
@@ -663,7 +665,7 @@ pub fn notice_bar(app: &mut SheetApp, ui: &mut Ui) {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(&notice.text).font(theme::ui_font(12.5)).color(t.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_button(ui, Icon::Close, t.text_dim, "Dismiss", vec2(20.0, 20.0)).clicked() {
+                if !persistent && icon_button(ui, Icon::Close, t.text_dim, "Dismiss", vec2(20.0, 20.0)).clicked() {
                     dismiss = true;
                 }
                 if let Some((label, dialog)) = &notice.action

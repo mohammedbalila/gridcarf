@@ -264,7 +264,6 @@ pub struct GridState {
     pub glide: crate::selection_glide::SelectionGlide,
     pub last_click: Option<(CellRef, f64)>,
     pub hover_cell: Option<CellRef>,
-    pub last_autosave: f64,
     pub last_border: String,
     pub last_fill: String,
     pub last_font_color: String,

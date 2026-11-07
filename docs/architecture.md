@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-02 · **Change:** minor (Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-07 · **Change:** minor (per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -152,6 +152,24 @@ The macro engine (`engine/src/macros/`, commands in `cmd/macros.rs`, described i
 recording buffer, the policy asks before a macro in a `FromFile` workbook runs, and xlsx keeps
 macros as chunked hidden names (`_gc_macro_<n>_<k>`: macro `n`, chunk `k`).
 
+## AutoSave
+
+The UI schedules every dirty, named XLSX-class document (including case-insensitive `.xlsm`
+and template extensions) synchronously, with at least two seconds between attempts per document.
+`Session::autosave_document(uid)` scopes only the fixed `file.save` command to that document,
+without activating a window. It reuses command eligibility, macro-debug locking, script I/O
+sandboxing, revision-scoped save analysis, journaling and recording. Clean direct helper calls
+perform a real save; dirty eligibility belongs to the UI. No loss or encryption warning is
+accepted automatically. Active and parked drafts defer only their own document.
+
+The UI flushes scroll state from `Session::document_view_window(uid)`, whose selection and active
+sheet currently live in the document; this can differ from the visible or most recently activated
+window. `store_document_view` delegates to the existing clean/revision-aware view storage. Runtime
+failure notices are kept per document independently of dismissible import notices, prefer the
+active document, and clear on a successful save, clean state or close. An untitled dirty workbook
+explicitly reports that recovery is not available yet and asks for Save As. This is ordinary
+AutoSave, without a recovery store, asynchronous serializer or additional durability guarantees.
+
 ## Python cells
 
 A Python cell is a `Cell` whose `py` holds a `model::PyCode`: the code, the return type (an Excel
@@ -236,6 +254,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | AutoSave considers every dirty named XLSX-class document, preserves live window views and drafts, and keeps per-document failure notices; untitled recovery remains unavailable |
 | 2026-11-02 | minor | Python mode in the formula bar: Python mode on the shared editor, `code_field` and its stop keys; drafts follow their sheet by `model::SheetUid` |
 | 2026-11-02 | minor | Python cells as data: `model::PyCode`, the file forms, calc laying out kept results, the limits on open, and what copying, filling and sorting do to `xl()` references; edits that would push code past the limit are refused |
 | 2026-11-01 | trivial | Equations: the layout cache answers for a source over the cap by its length alone, without hashing it |

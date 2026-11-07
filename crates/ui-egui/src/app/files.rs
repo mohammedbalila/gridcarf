@@ -1,5 +1,13 @@
 use super::{Json, Notice, NoticeKind, OpenWindow, SheetApp, clean_error, json};
 
+/// Session-local per-document scheduling and result; never confused with recovery protection.
+#[derive(Default)]
+pub(crate) struct AutoSaveState {
+    path: Option<String>,
+    last_attempt: Option<f64>,
+    failure: Option<String>,
+}
+
 impl SheetApp {
     pub fn open_path(&mut self, path: &str) {
         match self.run("file.open", json!({"path": path})) {
@@ -140,32 +148,73 @@ impl SheetApp {
         }
     }
 
-    /// AutoSave: save workbooks that have a file shortly after they change. This decision lives in
-    /// `logic` so a hidden or logic-only frame still saves; the monotonic timestamp check keeps a
-    /// forced hidden UI pass from saving the same change twice.
+    /// Save every eligible dirty document synchronously, at most once per two seconds per
+    /// document. A failed write keeps its warning until a successful save, close or clean undo.
     pub(super) fn autosave(&mut self, ctx: &egui::Context) {
-        let dirty_xlsx = self.session.active().is_some_and(|d| d.is_dirty() && d.path.as_deref().is_some_and(|p| p.ends_with(".xlsx")));
-        let now = crate::monotonic_ms();
-        let autosave_due =
-            self.ui.autosave && self.editor.is_none() && self.text_box_editor.is_none() && now - self.grid.last_autosave > 2000.0 && dirty_xlsx;
-        if autosave_due {
-            self.grid.last_autosave = now;
-            self.store_view_state();
-            if let Err(error) = self.session.run("file.save", json!({})) {
-                self.notice = Some(Notice {
-                    text: if serde_json::from_str::<gridcraft_engine::save::SaveFailure>(&error).is_ok() {
-                        "AutoSave paused: saving would lose content. Choose Save to review the losses.".into()
-                    } else {
-                        clean_error(&error)
-                    },
-                    kind: NoticeKind::Warning,
-                    action: None,
-                });
+        self.autosave_states.retain(|uid, _| self.session.documents().iter().any(|d| d.uid == *uid));
+        let docs: Vec<_> = self.session.documents().iter().map(|d| (d.uid, d.path.clone(), d.is_dirty())).collect();
+        let mut pending = false;
+        for (uid, path, dirty) in docs {
+            let state = self.autosave_states.entry(uid).or_default();
+            if state.path != path {
+                *state = AutoSaveState { path: path.clone(), ..Default::default() };
             }
-        } else if self.ui.autosave && dirty_xlsx {
-            // Keep checking even when no input arrives while the window is hidden.
+            if !dirty {
+                state.failure = None;
+                continue;
+            }
+            if !self.ui.autosave {
+                continue;
+            }
+            let Some(path) = path else {
+                state.failure = Some("no save destination. Recovery is not available yet; choose Save As.".into());
+                continue;
+            };
+            if gridcraft_engine::io::FileKind::from_path(&path) != Some(gridcraft_engine::io::FileKind::Xlsx) {
+                continue;
+            }
+            pending = true;
+            let now = crate::monotonic_ms();
+            if state.last_attempt.is_some_and(|last| now - last < 2000.0) || self.document_has_draft(uid) {
+                continue;
+            }
+            if self.session.active().is_some_and(|d| d.uid == uid) {
+                self.store_view_state();
+            } else {
+                self.store_document_view_state(uid);
+            }
+            let result = self.session.autosave_document(uid);
+            let failure = result.err().map(|error| {
+                if matches!(error, gridcraft_engine::EngineError::SaveBlocked(_)) {
+                    "saving needs your decision about content loss or compatibility. Choose Save to review it.".into()
+                } else {
+                    clean_error(&error.to_string())
+                }
+            });
+            let state = self.autosave_states.entry(uid).or_default();
+            state.last_attempt = Some(crate::monotonic_ms());
+            state.failure = failure;
+        }
+        if pending {
+            // Hidden logic ticks also retry failures; there is never a retry for every paint.
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
+    }
+
+    /// Prefer the visible document's result, then the first other failed document in open order.
+    /// This warning is independent of dismissible open notices and survives window switches.
+    pub(crate) fn autosave_notice(&self) -> Option<Notice> {
+        let active = self.session.active().map(|d| d.uid);
+        let failed = |d: &&gridcraft_engine::DocState| self.autosave_states.get(&d.uid).is_some_and(|s| s.failure.is_some());
+        let d = self
+            .session
+            .documents()
+            .iter()
+            .filter(|d| Some(d.uid) == active)
+            .find(failed)
+            .or_else(|| self.session.documents().iter().find(failed))?;
+        let failure = self.autosave_states.get(&d.uid)?.failure.as_ref()?;
+        Some(Notice { text: format!("AutoSave paused for {}: {failure}", d.display_title()), kind: NoticeKind::Warning, action: None })
     }
 
     /// Flip AutoSave (title-bar switch / Options ▸ Save). Persisted with the other UI

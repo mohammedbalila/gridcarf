@@ -39,8 +39,17 @@ impl SheetApp {
     /// Page Layout view scrolls over pages, not cells.
     pub fn store_view_state(&mut self) {
         let trace_before = crate::grid::Trace::key(self);
-        let window = self.session.active_window();
-        let Some(d) = self.session.active_mut() else { return };
+        if let Some(uid) = self.session.active().map(|d| d.uid) {
+            self.store_document_view_state(uid);
+        }
+        crate::grid::Trace::keep_through_view_change(self, trace_before);
+    }
+
+    /// Flush only the window whose selection/sheet is live in this document. Other windows'
+    /// scroll positions must not overwrite that view, even if they are newer in the MRU list.
+    pub(super) fn store_document_view_state(&mut self, uid: u64) {
+        let window = self.session.document_view_window(uid);
+        let Some(d) = self.session.documents().iter().find(|d| d.uid == uid) else { return };
         let mut tops = Vec::new();
         for (&(w, si), v) in &self.views {
             let Some(sh) = d.wb.sheets.get(si).filter(|sh| Some(w) == window && sh.view == gridcraft_engine::model::SheetViewMode::Normal) else {
@@ -52,7 +61,10 @@ impl SheetApp {
             let col = sh.col_at(sh.col_left(fc) + v.scroll.x.max(0.0) as f64 + 0.01);
             tops.push((si, CellRef::new(row, col)));
         }
-        d.store_view(&tops);
-        crate::grid::Trace::keep_through_view_change(self, trace_before);
+        // The document was just found, so this can only fail if it was removed; no commands
+        // run between collecting and storing the view.
+        if let Err(error) = self.session.store_document_view(uid, &tops) {
+            self.alert(error.to_string());
+        }
     }
 }

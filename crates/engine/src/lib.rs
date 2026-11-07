@@ -629,6 +629,12 @@ impl Session {
     pub fn doc_mut(&mut self) -> Result<&mut DocState> {
         self.active_mut().ok_or(EngineError::NoDocument)
     }
+    /// Stores a document's live view without activating any of its windows.
+    pub fn store_document_view(&mut self, uid: u64, tops: &[(usize, CellRef)]) -> Result<()> {
+        let d = self.docs.iter_mut().find(|d| d.uid == uid).ok_or(EngineError::NoDocument)?;
+        d.store_view(tops);
+        Ok(())
+    }
     /// The warning an edit of `at` on `sheet` gets from sheet protection, or `None` when the edit
     /// is allowed. Front ends ask before opening an editor, so typing into a locked cell never
     /// leaves a draft that can't be entered (and so blocks saving).

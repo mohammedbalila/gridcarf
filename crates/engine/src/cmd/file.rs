@@ -155,6 +155,26 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     Ok(json!({"path": path, "bytes": bytes.len()}))
 }
 
+impl Session {
+    /// Saves a named XLSX-class document through the ordinary command guards and save policy,
+    /// without activating a window. Clean documents are really saved too; the caller schedules
+    /// dirty documents. There is no picker, export or implicit loss acknowledgement here.
+    pub fn autosave_document(&mut self, uid: u64) -> Result<Json> {
+        let at = self.document_index(uid).ok_or(crate::EngineError::NoDocument)?;
+        let path = self.docs.get(at).and_then(|d| d.path.as_deref()).ok_or_else(|| bad("file.save", "AutoSave needs a save destination"))?;
+        if crate::io::FileKind::from_path(path) != Some(crate::io::FileKind::Xlsx) {
+            return Err(bad("file.save", "AutoSave needs an XLSX-class destination"));
+        }
+        // Only this fixed command is scoped: it cannot activate/close a window. Reuse execute
+        // rather than extracting serialization and bypassing debugger, journal or save guards.
+        let previous = self.active;
+        self.active = at;
+        let result = self.execute("file.save", json!({}));
+        self.active = previous;
+        result
+    }
+}
+
 fn save_as(s: &mut Session, p: &Json) -> Result<Json> {
     if str_param(p, "path").is_none() {
         s.ui_requests.push(crate::UiRequest::Dialog("saveAs".into(), json!({})));
@@ -279,4 +299,35 @@ fn close_window(s: &mut Session, p: &Json) -> Result<Json> {
     }
     s.close_window(id);
     Ok(json!({"closed": true, "document": true}))
+}
+
+#[cfg(test)]
+mod autosave_tests {
+    use crate::Session;
+    use serde_json::json;
+
+    #[test]
+    fn autosave_keeps_script_file_io_sandbox_on_inactive_documents() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("cell.set", json!({"cell":"A1","input":"unsaved"})).unwrap();
+        let uid = s.doc().unwrap().uid;
+        let path = std::env::temp_dir().join(format!("gridcraft-autosave-sandbox-{}-{uid}.xlsx", std::process::id()));
+        std::fs::write(&path, b"original").unwrap();
+        s.doc_mut().unwrap().path = Some(path.to_str().unwrap().into());
+        s.new_workbook();
+        let active = s.doc().unwrap().uid;
+        let windows = s.window_list();
+        let journal = s.journal.len();
+        let sandbox = crate::io::ScriptSandbox::enter();
+        let error = s.autosave_document(uid).unwrap_err().to_string();
+        drop(sandbox);
+        assert!(error.contains("can't read or write files"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(s.doc().unwrap().uid, active);
+        assert_eq!(s.window_list(), windows);
+        assert_eq!(s.journal.len(), journal);
+        assert!(s.documents().iter().find(|d| d.uid == uid).unwrap().is_dirty());
+        std::fs::remove_file(path).unwrap();
+    }
 }
