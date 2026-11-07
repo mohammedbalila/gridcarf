@@ -506,6 +506,17 @@ impl CfCache {
         let v = sh.value(c);
         let no_stats = RuleStats::default();
         for (idx, cf) in rules {
+            // A visual rule cannot contribute once that component is supplied. Skip its
+            // statistics too; styles and other visual components still follow priority order.
+            let superseded = match &cf.rule {
+                CfRule::ColorScale { .. } => out.scale_fill.is_some(),
+                CfRule::DataBar { .. } => out.bar.is_some(),
+                CfRule::IconSet { .. } => out.icon.is_some(),
+                _ => false,
+            };
+            if superseded {
+                continue;
+            }
             let first = RangeRef::top_left(&cf.ranges).unwrap_or(c);
             let st: &RuleStats = match stats_need(&cf.rule) {
                 Some(need) => match self.statistics(idx, sh, cf, need) {
@@ -835,11 +846,20 @@ mod tests {
     fn statistics_metadata_exhaustion_is_bounded_and_does_not_discard_completed_entries() {
         let mut wb = bounded_book();
         let sh = wb.sheet_mut(0).unwrap();
-        sh.cond_formats[0].ranges = vec![RangeRef::parse("A1").unwrap()];
         let first = sh.cond_formats[0].clone();
-        sh.cond_formats = vec![first; MAX_STATS_METADATA + 1];
+        sh.cond_formats.clear();
+        // Each lookup must need its own rule; repeated scales on one cell are superseded.
+        for row in 0..=MAX_STATS_METADATA {
+            let cell = CellRef::new(row as u32, 0);
+            sh.set_value(cell, Value::Number(row as f64));
+            sh.cond_formats.push(CondFormat { ranges: vec![RangeRef { start: cell, end: cell }], ..first.clone() });
+        }
         let mut cache = CfCache::new();
-        assert!(cache.look(&wb, 0, CellRef::default()).is_some());
+        for row in 0..MAX_STATS_METADATA {
+            assert!(cache.look(&wb, 0, CellRef::new(row as u32, 0)).is_some());
+        }
+        assert_eq!(cache.incomplete(), None);
+        assert!(cache.look(&wb, 0, CellRef::new(MAX_STATS_METADATA as u32, 0)).is_none());
         assert_eq!(cache.incomplete(), Some(CfIncomplete::WorkLimit));
         assert_eq!(cache.stats.len(), MAX_STATS_METADATA);
         let work = cache.budget.work;

@@ -370,3 +370,99 @@ fn finite_degenerate_geometry_preserves_existing_fallbacks() {
         assert_eq!(cache.incomplete(), None);
     }
 }
+
+fn superseded_visual_book(winner: CfRule, loser: CfRule) -> Workbook {
+    let mut wb = Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(cell("A1"), Value::Number(0.0));
+    wb.sheet_mut(0).unwrap().set_value(cell("A2"), Value::Number(1.0));
+    add_rule(&mut wb, &["A1:A2"], winner);
+    add_rule(&mut wb, &["A1:A2"], loser);
+    wb.sheet_mut(0).unwrap().cond_formats[1].priority = 2;
+    wb
+}
+
+fn overflowing_scale() -> CfRule {
+    CfRule::ColorScale { stops: vec![(CfValueKind::Number(-1e308), Color::rgb(0, 0, 0)), (CfValueKind::Number(1e308), Color::rgb(200, 200, 200))] }
+}
+
+fn min_max_bar(show_value: bool) -> CfRule {
+    CfRule::DataBar { min: CfValueKind::Min, max: CfValueKind::Max, color: Color::rgb(0, 0, 0), gradient: false, show_value }
+}
+
+#[test]
+fn superseded_visual_scale_does_not_report_unused_overflow() {
+    let mut wb = superseded_visual_book(scale(), overflowing_scale());
+    add_rule(&mut wb, &["A1:A2"], min_max_bar(true));
+    let mut cache = CfCache::new();
+    let look = cache.look(&wb, 0, cell("A2")).unwrap();
+    assert_eq!(look.scale_fill, Some([200, 200, 200]));
+    assert_eq!(look.bar.map(|bar| bar.0), Some(1.0), "another visual component must still apply");
+    assert_eq!(cache.incomplete(), None);
+}
+
+#[test]
+fn superseded_visual_bar_preserves_the_winning_hide_value() {
+    for show_value in [true, false] {
+        let wb = superseded_visual_book(
+            min_max_bar(show_value),
+            CfRule::DataBar {
+                min: CfValueKind::Number(-1e308),
+                max: CfValueKind::Number(1e308),
+                color: Color::rgb(255, 0, 0),
+                gradient: true,
+                show_value: !show_value,
+            },
+        );
+        let mut cache = CfCache::new();
+        let look = cache.look(&wb, 0, cell("A2")).unwrap();
+        assert_eq!(look.bar, Some((1.0, [0, 0, 0], false)));
+        assert_eq!(look.hide_value, !show_value);
+        assert_eq!(cache.incomplete(), None);
+    }
+}
+
+#[test]
+fn superseded_visual_icon_preserves_the_winning_hide_value() {
+    for show_value in [true, false] {
+        let wb = superseded_visual_book(
+            CfRule::IconSet { set: "3Arrows".into(), thresholds: vec![], reverse: false, show_value },
+            CfRule::IconSet { set: "3Flags".into(), thresholds: vec![CfValueKind::Number(f64::INFINITY); 3], reverse: true, show_value: !show_value },
+        );
+        let mut cache = CfCache::new();
+        let look = cache.look(&wb, 0, cell("A2")).unwrap();
+        assert_eq!(look.icon, Some(("3Arrows".into(), 2)));
+        assert_eq!(look.hide_value, !show_value);
+        assert_eq!(cache.incomplete(), None);
+    }
+}
+
+#[test]
+fn superseded_visual_statistics_are_not_built() {
+    let mut wb = superseded_visual_book(scale(), scale());
+    wb.sheet_mut(0).unwrap().cond_formats[1].ranges = vec![range("A1:A2"); 4097];
+    let mut cache = CfCache::new();
+    assert_eq!(cache.look(&wb, 0, cell("A2")).and_then(|l| l.scale_fill), Some([200, 200, 200]));
+    assert_eq!(cache.incomplete(), None, "unused rule must not consume its metadata budget");
+}
+
+#[test]
+fn superseded_visual_preserves_later_style_and_stop_behavior() {
+    let mut wb = superseded_visual_book(scale(), overflowing_scale());
+    wb.sheet_mut(0).unwrap().cond_formats[1].stop_if_true = true;
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    add_rule(&mut wb, &["A1:A2"], CfRule::Top10 { bottom: false, percent: false, rank: 1, style: Box::new(bold) });
+    let mut italic = Style::default();
+    italic.font.italic = true;
+    add_rule(&mut wb, &["A1:A2"], CfRule::Top10 { bottom: false, percent: false, rank: 1, style: Box::new(italic) });
+    let rules = &mut wb.sheet_mut(0).unwrap().cond_formats;
+    rules[2].priority = 3;
+    rules[2].stop_if_true = true;
+    rules[3].priority = 4;
+    let mut cache = CfCache::new();
+    let look = cache.look(&wb, 0, cell("A2")).unwrap();
+    let style = look.style.unwrap();
+    assert!(style.font.bold, "visual stop flag must keep its existing non-stopping behavior");
+    assert!(!style.font.italic, "matching style stop flag must still stop later styles");
+    assert_eq!(cache.incomplete(), None);
+}

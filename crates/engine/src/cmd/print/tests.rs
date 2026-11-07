@@ -1026,3 +1026,48 @@ fn cf_opposite_finite_geometry_failure_is_disclosed_by_pdf_paths() {
     assert!(contains(&bytes, "Finite workbook content"));
     assert!(contains(&bytes, "Conditional formatting is incomplete"));
 }
+
+fn superseded_visual_session() -> Session {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range":"A1", "values":[[0], [1]]})).unwrap();
+    s.execute("cell.set", json!({"cell":"B1", "input":"Winning format content"})).unwrap();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    for (priority, min, max) in [
+        (1, gridcraft_model::CfValueKind::Min, gridcraft_model::CfValueKind::Max),
+        (2, gridcraft_model::CfValueKind::Number(-1e308), gridcraft_model::CfValueKind::Number(1e308)),
+    ] {
+        sh.cond_formats.push(gridcraft_model::CondFormat {
+            ranges: vec![RangeRef::parse("A1:A2").unwrap()],
+            priority,
+            stop_if_true: false,
+            rule: gridcraft_model::CfRule::ColorScale {
+                stops: vec![(min, gridcraft_model::Color::rgb(0, 0, 0)), (max, gridcraft_model::Color::rgb(200, 200, 200))],
+            },
+        });
+    }
+    s
+}
+
+#[test]
+fn cf_superseded_visual_checked_pdf_succeeds() {
+    let mut s = superseded_visual_session();
+    let wb = &s.doc().unwrap().wb;
+    let lays = layouts(wb, &PrintOptions::default());
+    let (bytes, pages) = try_render_pdf(wb, &lays, "book", "").unwrap();
+    assert_eq!(pages, 1);
+    assert!(contains(&bytes, "Winning format content"));
+    let (bytes, pages) = pdf_of(&mut s, json!({}));
+    assert_eq!(pages, 1);
+    assert!(contains(&bytes, "Winning format content"));
+}
+
+#[test]
+fn cf_superseded_visual_legacy_pdf_has_no_false_diagnostic() {
+    let s = superseded_visual_session();
+    let wb = &s.doc().unwrap().wb;
+    let lays = layouts(wb, &PrintOptions::default());
+    let (bytes, pages) = render_pdf(wb, &lays, "book", "");
+    assert_eq!(pages, 1);
+    assert!(contains(&bytes, "Winning format content"));
+    assert!(!contains(&bytes, "Conditional formatting is incomplete"));
+}
