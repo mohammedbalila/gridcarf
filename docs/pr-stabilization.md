@@ -210,10 +210,12 @@ candidates. RAII cleans up only a successfully acquired parent. The sandbox
 fixture also creates its workbook file exclusively and retries file collisions.
 No production save behavior or script permission policy changes.
 
-Deterministic synthetic file and directory collisions retain their sentinel bytes,
-select a fresh candidate and verify owned cleanup. Missing-parent errors surface
-without trying another candidate. The direct-file regression reproduced the old
-fixture write truncating sentinel bytes before exclusive creation was applied.
+Directory-acquisition regressions retry both file and directory collisions. The
+file-writer regression retries a regular-file collision; a separate directory-only
+refusal control preserves its sentinel without requiring a platform-specific error
+kind. Fresh candidates and owned cleanup are checked, and missing-parent errors
+surface without trying another candidate. The direct-file regression reproduced
+the old fixture write truncating sentinel bytes before exclusive creation was applied.
 All collision setup and cleanup stays below an independently acquired parent.
 The original AutoSave cases and sandbox denial, document/window, dirty-state and
 journal assertions remain in place; fixture creation stays outside the sandbox.

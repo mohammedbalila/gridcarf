@@ -401,23 +401,30 @@ mod autosave_tests {
     }
 
     #[test]
-    fn sandbox_file_retries_collisions_without_truncating_sentinels() {
+    fn sandbox_file_retries_file_collision_without_truncating_sentinel() {
         let outer = directory("file-collisions");
         let file = outer.join("existing-file.xlsx");
         std::fs::write(&file, b"existing file sentinel").unwrap();
-        let existing = outer.join("existing-directory.xlsx");
-        std::fs::create_dir(&existing).unwrap();
-        let sentinel = existing.join("keep.bin");
-        std::fs::write(&sentinel, b"existing directory sentinel").unwrap();
         let fresh = outer.join("fresh.xlsx");
-        let acquired = sandbox_file([file.clone(), existing.clone(), fresh.clone()]).unwrap();
+        let acquired = sandbox_file([file.clone(), fresh.clone()]).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"existing file sentinel", "fixture must not truncate a colliding file");
-        assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing directory sentinel");
         assert_eq!(acquired, fresh, "only a fresh file may be accepted as owned");
         assert_eq!(std::fs::read(&acquired).unwrap(), b"original");
         std::fs::remove_file(acquired).unwrap();
         assert!(!fresh.try_exists().unwrap());
         assert_eq!(std::fs::read(&file).unwrap(), b"existing file sentinel");
+    }
+
+    #[test]
+    fn sandbox_file_rejects_directory_without_changing_sentinel() {
+        let outer = directory("file-directory");
+        let existing = outer.join("existing-directory.xlsx");
+        std::fs::create_dir(&existing).unwrap();
+        let sentinel = existing.join("keep.bin");
+        std::fs::write(&sentinel, b"existing directory sentinel").unwrap();
+        // Directory opens have platform-specific errors; refusal must preserve the candidate.
+        assert!(sandbox_file([existing.clone()]).is_err());
+        assert!(existing.is_dir());
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"existing directory sentinel");
     }
 
