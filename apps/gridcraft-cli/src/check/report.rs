@@ -90,6 +90,12 @@ pub fn report_json(reports: &[FileReport], opts: &Options) -> Json {
                 .iter()
                 .map(|cat| (cat.name.to_string(), json!({"equal": cat.diffs == 0, "diffs": cat.diffs, "examples": cat.examples})))
                 .collect();
+            let source_package = match &r.round_trip.source_package {
+                SourcePackage::NotChecked => json!({"status":"notChecked"}),
+                SourcePackage::NotApplicable => json!({"status":"notApplicable"}),
+                SourcePackage::Compared { relationship_kinds } => json!({"status":"compared", "relationshipKinds":relationship_kinds}),
+                SourcePackage::Unavailable { error } => json!({"status":"unavailable", "error":error}),
+            };
             json!({
                 "path": r.path,
                 "opened": r.error.is_none(),
@@ -101,7 +107,7 @@ pub fn report_json(reports: &[FileReport], opts: &Options) -> Json {
                     "mismatches": mismatches, "functions": functions_json(&c.functions),
                     "signatures": c.signatures,
                 },
-                "roundTrip": {"error": r.round_trip.error, "differing": r.round_trip.differing(), "categories": categories},
+                "roundTrip": {"sourcePackage": source_package, "error": r.round_trip.error, "differing": r.round_trip.differing(), "categories": categories},
             })
         })
         .collect();
@@ -131,6 +137,17 @@ fn fit(s: &str, w: usize) -> String {
     if n <= w { s.to_string() } else { format!("…{}", s.chars().skip(n + 1 - w).collect::<String>()) }
 }
 
+fn print_source_package(source: &SourcePackage) {
+    match source {
+        SourcePackage::Compared { relationship_kinds } => {
+            outln!("  source package: {relationship_kinds} relationship kinds compared (not a content-completeness check)")
+        }
+        SourcePackage::NotApplicable => outln!("  source package: not applicable (no OPC relationship coverage)"),
+        SourcePackage::NotChecked => outln!("  source package: not checked"),
+        SourcePackage::Unavailable { error } => outln!("  source package: coverage unavailable: {}", one_line(error)),
+    }
+}
+
 fn print_file_reports(reports: &[FileReport]) {
     for r in reports {
         outln!("== {}", r.path);
@@ -148,6 +165,9 @@ fn print_file_reports(reports: &[FileReport]) {
             c.no_oracle,
             c.volatile
         );
+        if c.checked == 0 {
+            outln!("  calculation correctness unverified: no comparable formula results");
+        }
         if c.stale_cache {
             outln!("  (the producer asked for a full recalculation on load: its cached values aren't results)");
         }
@@ -169,6 +189,7 @@ fn print_file_reports(reports: &[FileReport]) {
             outln!("  … {} more mismatches", c.mismatched - c.mismatches.len());
         }
         let rt = &r.round_trip;
+        print_source_package(&rt.source_package);
         if let Some(e) = &rt.error {
             outln!("  round trip: {e}");
         }

@@ -47,6 +47,13 @@ mod tests;
 use gridcraft_core::DateSystem;
 use gridcraft_model::Workbook;
 
+/// Whether an array-mode formula needs an XLSX array marker to preserve its evaluation.
+/// This is the writer's bounded static classifier, not a calculation oracle. A false result
+/// permits an ordinary scalar formula to reopen in legacy mode without changing its meaning.
+pub fn formula_needs_array(wb: &Workbook, sheet: usize, cell: gridcraft_core::CellRef, formula: &gridcraft_model::Formula) -> bool {
+    array_formula::needs_array(wb, sheet, cell, formula)
+}
+
 pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
 pub use ods::read_ods;

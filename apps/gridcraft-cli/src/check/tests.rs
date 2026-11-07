@@ -428,7 +428,7 @@ fn json_schema_keys() {
     assert_eq!(f["calc"]["signatures"], json!({"number → number": 1}));
     assert_eq!(keys(&f["calc"]["mismatches"][0]), set(&["cell", "formula", "expected", "actual", "kind", "functions", "primary"]));
     assert_eq!(f["calc"]["mismatches"][0]["expected"], json!(3.0));
-    assert_eq!(keys(&f["roundTrip"]), set(&["error", "differing", "categories"]));
+    assert_eq!(keys(&f["roundTrip"]), set(&["error", "differing", "categories", "sourcePackage"]));
     assert_eq!(
         keys(&f["roundTrip"]["categories"]),
         set(&[
@@ -445,7 +445,14 @@ fn json_schema_keys() {
             "comments",
             "hyperlinks",
             "pivots",
-            "package"
+            "package",
+            "slicers",
+            "controls",
+            "pictures",
+            "shapes",
+            "styles",
+            "printSettings",
+            "formulaModes"
         ])
     );
     assert_eq!(keys(&f["roundTrip"]["categories"]["values"]), set(&["equal", "diffs", "examples"]));
@@ -469,4 +476,280 @@ fn json_schema_keys() {
         ])
     );
     assert_eq!(keys(&v["functions"][0]), set(&["name", "checked", "mismatched", "primary"]));
+}
+
+/// Build the audited slicer input through public commands before serialization.
+fn slicer_book() -> Workbook {
+    let mut session = gridcraft_engine::Session::new();
+    session.new_workbook();
+    session.execute("range.setValues", json!({"range":"A1", "values":[["Region","Sales"],["East",10],["West",20]]})).unwrap();
+    session.execute("insert.table", json!({"range":"A1:B3","name":"SalesTable","header":true})).unwrap();
+    session.execute("insert.slicer", json!({"table":"SalesTable","column":"Region","at":"D1"})).unwrap();
+    (*session.doc().unwrap().wb).clone()
+}
+
+fn feature_book() -> Workbook {
+    use gridcraft_engine::model::*;
+    let mut wb = slicer_book();
+    let sheet = wb.sheet_mut(0).unwrap();
+    sheet.comments.insert(
+        at("A1"),
+        Comment {
+            author: "Author".into(),
+            text: "Original".into(),
+            replies: vec![],
+            threaded: false,
+            resolved: false,
+            visible: false,
+            dates: vec![],
+            note_box: None,
+        },
+    );
+    sheet.hyperlinks.insert(at("A2"), Hyperlink { target: "https://example.com/first".into(), tooltip: Some("Details".into()), external: true });
+    sheet.validations.push(Validation {
+        ranges: vec![gridcraft_engine::core::RangeRef::parse("B2:B3").unwrap()],
+        f1: "1".into(),
+        ..Default::default()
+    });
+    sheet.pivots.push(PivotTable { id: 47, source: "SalesTable".into(), ..Default::default() });
+    sheet.charts.push(Chart {
+        id: 91,
+        kind: ChartKind::Line,
+        anchor: Anchor::default(),
+        title: Some("Sales".into()),
+        series: vec![Series { values: "Sheet1!$B$2:$B$3".into(), ..Default::default() }],
+        legend: LegendPos::Bottom,
+        data_labels: false,
+        data_table: None,
+        gridlines: true,
+        style: 2,
+        hole_size: 75,
+        first_slice_angle: 0,
+        x_title: None,
+        y_title: None,
+        source: None,
+        by_rows: false,
+        pivot: None,
+    });
+    sheet.controls.push(FormControl { id: 80, text: "Run".into(), ..Default::default() });
+    sheet.images.push(Image { id: 62, anchor: Anchor::default(), data: Arc::new(vec![1, 2, 3]), mime: "image/png".into(), alt: "Picture".into() });
+    sheet.cell_pictures.insert(at("C2"), Arc::new(CellPicture { data: vec![4, 5, 6], mime: "image/png".into(), alt: "Cell picture".into() }));
+    sheet.shapes.push(Shape {
+        id: 19,
+        kind: ShapeKind::Rectangle,
+        anchor: Anchor::default(),
+        fill: Color::Auto,
+        line: Color::Auto,
+        text: "Label".into(),
+        format: ShapeFormat::default(),
+        math: EquationCache::default(),
+    });
+    wb
+}
+
+type SheetChange = (&'static str, fn(&mut Sheet));
+
+fn category_diffs(a: &Workbook, b: &Workbook, name: &str) -> usize {
+    diff_workbooks(a, b, &Options::default()).iter().find(|c| c.name == name).map(|c| c.diffs).unwrap_or(0)
+}
+
+#[test]
+fn check_detects_slicer_loss() {
+    // Start with JSON, before the lossy XLSX writer has a chance to remove the slicer.
+    let wb = slicer_book();
+    let bytes = gridcraft_engine::io::save_bytes(&wb, "slicer.json").unwrap();
+    let report = check_bytes("slicer.json", &bytes, &Options::default());
+    let json = report_json(&[report], &Options::default());
+    assert!(json["files"][0]["roundTrip"]["categories"]["slicers"]["diffs"].as_u64().unwrap_or(0) > 0, "{json}");
+    let path = std::env::temp_dir().join(format!("gridcraft-slicer-check-{}.json", std::process::id()));
+    std::fs::write(&path, bytes).unwrap();
+    let exit = main(&[path.to_string_lossy().into_owned(), "--json".into()]);
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(exit, ExitCode::FAILURE);
+}
+
+#[test]
+fn check_detects_payload_changes() {
+    use gridcraft_engine::model::PivotLayout;
+    let a = feature_book();
+    let changes: &[SheetChange] = &[
+        ("comments", |s| s.comments.get_mut(&at("A1")).unwrap().text = "Changed".into()),
+        ("hyperlinks", |s| s.hyperlinks.get_mut(&at("A2")).unwrap().target = "https://example.com/second".into()),
+        ("charts", |s| s.charts[0].title = Some("Changed".into())),
+        ("charts", |s| s.charts[0].x_title = Some("New axis".into())),
+        ("charts", |s| s.charts[0].series[0].secondary = true),
+        ("validations", |s| s.validations[0].f1 = "9".into()),
+        ("pivots", |s| s.pivots[0].layout = PivotLayout::Tabular),
+        ("tables", |s| s.tables[0].banded_rows = !s.tables[0].banded_rows),
+    ];
+    for (category, change) in changes {
+        let mut b = a.clone();
+        change(b.sheet_mut(0).unwrap());
+        assert!(category_diffs(&a, &b, category) > 0, "missed {category} payload change");
+    }
+}
+
+#[test]
+fn check_detects_drawing_payload_changes_and_complete_losses() {
+    let a = feature_book();
+    let changes: &[SheetChange] = &[
+        ("slicers", |s| s.slicers[0].selected = Some(vec!["East".into()])),
+        ("controls", |s| s.controls[0].text = "Changed".into()),
+        ("pictures", |s| s.images[0].data = Arc::new(vec![9])),
+        ("pictures", |s| Arc::make_mut(s.cell_pictures.get_mut(&at("C2")).unwrap()).alt = "Changed".into()),
+        ("shapes", |s| s.shapes[0].text = "Changed".into()),
+        ("printSettings", |s| s.print.header = "Confidential".into()),
+        ("slicers", |s| s.slicers.clear()),
+        ("controls", |s| s.controls.clear()),
+        ("pictures", |s| s.images.clear()),
+        ("pictures", |s| s.cell_pictures.clear()),
+        ("shapes", |s| s.shapes.clear()),
+    ];
+    for (category, change) in changes {
+        let mut b = a.clone();
+        change(b.sheet_mut(0).unwrap());
+        assert!(category_diffs(&a, &b, category) > 0, "missed {category} change/loss");
+    }
+}
+
+#[test]
+fn check_detects_full_style_changes_and_ignores_interned_ids() {
+    use gridcraft_engine::model::{LineInfo, Style, StyleId};
+    let mut a = book(&[("A1", "1", n(1.0))]);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let aid = a.styles.intern(bold.clone());
+    a.sheet_mut(0).unwrap().cells.get_mut(at("A1")).unwrap().style = aid;
+    a.sheet_mut(0).unwrap().rows.insert(2, LineInfo { style: Some(aid), ..Default::default() });
+    let mut b = a.clone();
+    b.sheet_mut(0).unwrap().cells.get_mut(at("A1")).unwrap().style = StyleId::DEFAULT;
+    assert!(category_diffs(&a, &b, "styles") > 0);
+    b = a.clone();
+    b.sheet_mut(0).unwrap().rows.get_mut(&2).unwrap().style = None;
+    assert!(category_diffs(&a, &b, "styles") > 0);
+    // Same style through a different interning order is equal.
+    let mut b = a.clone();
+    b.styles = Default::default();
+    let mut italic = Style::default();
+    italic.font.italic = true;
+    b.styles.intern(italic);
+    let bid = b.styles.intern(bold);
+    b.sheet_mut(0).unwrap().cells.get_mut(at("A1")).unwrap().style = bid;
+    b.sheet_mut(0).unwrap().rows.get_mut(&2).unwrap().style = Some(bid);
+    assert_eq!(category_diffs(&a, &b, "styles"), 0);
+}
+
+#[test]
+fn check_ignores_generated_object_ids() {
+    let a = feature_book();
+    let mut b = a.clone();
+    let s = b.sheet_mut(0).unwrap();
+    s.tables[0].id += 100;
+    s.charts[0].id += 100;
+    s.pivots[0].id += 100;
+    s.slicers[0].id += 100;
+    s.controls[0].id += 100;
+    s.images[0].id += 100;
+    s.shapes[0].id += 100;
+    assert!(diff_workbooks(&a, &b, &Options::default()).iter().all(|c| c.diffs == 0));
+}
+
+#[test]
+fn check_compares_formula_modes_without_scalar_normalization_noise() {
+    use gridcraft_engine::model::FormulaEvalMode;
+    let scalar = book(&[("A1", "=1+2", n(3.0)), ("B1", "=SUM(A1:A2)", n(3.0))]);
+    assert!(round_trip(&scalar, b"", &Options::default()).is_clean());
+    let mut a = book(&[("A1", "1", n(1.0)), ("A2", "2", n(2.0)), ("B1", "=SUM(A1:A2*2)", n(6.0))]);
+    let mut b = a.clone();
+    Arc::make_mut(b.sheet_mut(0).unwrap().cells.get_mut(at("B1")).unwrap().formula.as_mut().unwrap()).eval_mode = FormulaEvalMode::Legacy;
+    assert!(category_diffs(&a, &b, "formulaModes") > 0);
+    assert!(round_trip(&a, b"", &Options::default()).is_clean());
+    // A changed CSE extent is not only a change to formula text.
+    Arc::make_mut(a.sheet_mut(0).unwrap().cells.get_mut(at("B1")).unwrap().formula.as_mut().unwrap()).array =
+        Some(gridcraft_engine::core::RangeRef::parse("B1:B2").unwrap());
+    assert!(category_diffs(&a, &b, "formulaModes") > 0);
+}
+
+#[test]
+fn check_preserves_zero_oracle_visibility() {
+    let wb = book(&[("A1", "=1+1", Value::Empty), ("B1", "=2+2", Value::Empty)]);
+    let r = check(&wb, &Options::default());
+    let j = report_json(&[r], &Options::default());
+    assert_eq!(j["files"][0]["calc"]["checked"], 0);
+    assert_eq!(j["files"][0]["calc"]["matched"], 0);
+    assert_eq!(j["files"][0]["calc"]["noOracle"], 2);
+    assert_eq!(j["totals"]["checked"], 0);
+    assert_eq!(j["totals"]["matched"], 0);
+    assert_eq!(j["totals"]["noOracle"], 2);
+}
+
+#[test]
+fn check_reports_source_package_coverage_separately() {
+    let wb = book(&[]);
+    let opts = Options::default();
+    let json_bytes = gridcraft_engine::io::save_bytes(&wb, "t.json").unwrap();
+    let r = check_bytes("t.json", &json_bytes, &opts);
+    let j = report_json(&[r], &opts);
+    assert_eq!(j["files"][0]["roundTrip"]["sourcePackage"]["status"], "notApplicable");
+    let bytes = plain();
+    let r = check_bytes("t.xlsx", &bytes, &opts);
+    let j = report_json(&[r], &opts);
+    assert_eq!(j["files"][0]["roundTrip"]["sourcePackage"]["status"], "compared");
+    assert!(j["files"][0]["roundTrip"]["sourcePackage"]["relationshipKinds"].as_u64().unwrap() > 0);
+    let malformed = zip_of(&[(WB_RELS, "<Relationships><broken></Relationships>")]);
+    let rt = round_trip(&wb, &malformed, &opts);
+    assert!(!rt.is_clean(), "unreadable source coverage must not silently pass");
+    assert!(rt.categories.iter().any(|c| c.name == "package" && c.diffs > 0));
+}
+
+#[test]
+fn check_detects_named_style_payload_loss() {
+    use gridcraft_engine::model::Style;
+    let mut a = book(&[]);
+    let mut style = Style::default();
+    style.font.bold = true;
+    a.cell_styles.push(("Emphasis".into(), style));
+    let b = book(&[]);
+    assert!(category_diffs(&a, &b, "styles") > 0);
+}
+
+#[test]
+fn check_dynamic_spill_retains_array_mode_and_shape() {
+    use gridcraft_engine::model::FormulaEvalMode;
+    let mut a = book(&[("A1", "1", n(1.0)), ("A2", "2", n(2.0)), ("B1", "=A1:A2*2", Value::Empty)]);
+    Calc::new().recalc_all(&mut a);
+    assert_eq!(a.sheet(0).unwrap().spill_ranges[&at("B1")].a1(), "B1:B2");
+    assert!(round_trip(&a, b"", &Options::default()).is_clean());
+    let bytes = gridcraft_engine::io::save_bytes(&a, "spill.xlsx").unwrap();
+    let (mut b, _) = gridcraft_engine::io::open_bytes("spill.xlsx", &bytes).unwrap();
+    Calc::new().recalc_all(&mut b);
+    let s = b.sheet(0).unwrap();
+    assert_eq!(s.cell(at("B1")).unwrap().formula.as_ref().unwrap().eval_mode, FormulaEvalMode::Array);
+    assert_eq!(s.spill_ranges[&at("B1")].a1(), "B1:B2");
+    assert_eq!(s.spill[&at("B2")], n(4.0));
+    assert_eq!(category_diffs(&a, &b, "formulaModes"), 0);
+    Arc::make_mut(b.sheet_mut(0).unwrap().cells.get_mut(at("B1")).unwrap().formula.as_mut().unwrap()).eval_mode = FormulaEvalMode::Legacy;
+    assert!(category_diffs(&a, &b, "formulaModes") > 0);
+}
+
+#[test]
+fn check_control_round_trip_ignores_generated_default_name() {
+    use gridcraft_engine::model::{Anchor, FormControl};
+    let mut wb = book(&[]);
+    wb.sheet_mut(0).unwrap().controls.push(FormControl {
+        id: 80,
+        anchor: Anchor { cell: at("D1"), width: 100.0, height: 30.0, ..Default::default() },
+        text: "Run".into(),
+        ..Default::default()
+    });
+    let rt = round_trip(&wb, b"", &Options::default());
+    assert!(rt.is_clean(), "{rt:?}");
+}
+
+#[test]
+fn check_detects_theme_changes_behind_shared_style_indices() {
+    let a = book(&[]);
+    let mut b = a.clone();
+    b.theme.colors[4] = 0x123456;
+    assert!(category_diffs(&a, &b, "styles") > 0);
 }

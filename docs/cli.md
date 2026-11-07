@@ -1,5 +1,7 @@
 # gridcraft-cli
 
+Last updated: 2026-11-07 — semantic save-loss checks and version 2 report coverage.
+
 Headless GridCraft: inspect, convert, evaluate, script and serve MCP without a window. Errors go to stderr with a
 non-zero exit code.
 
@@ -88,19 +90,34 @@ calls. Mismatches roll up by function: *checked* (formula cells calling it), *mi
 while none of the cell's precedents mismatch — the likely culprit, as opposed to a downstream effect). They also roll
 up by *signature*, `expected type → actual type` (e.g. `number → #SPILL!`), which often groups one root cause.
 
-**Round trip.** The recalculated workbook is written with GridCraft's XLSX writer, the package is validated (every
-part has a content type, every content-type override and internal relationship target exists, relationship ids are
-unique: what Excel would "repair"), compared with the source (no kind of relationship it had, such as `xmlMaps`, is
-missing; a calculation chain doesn't count, Excel rebuilds it, nor do a link to a place in the workbook and a
-relationship to an empty part, such as a comments part without comments) and read back. Categories compared: `package`, `sheets` (names and order),
-`values`, `formulas`, `numFmts` (per cell), `merges`, `names`, `tables` (name, range, columns), `condFormats` (rules
-per sheet), `validations`, `charts` (kinds and series counts), `comments`, `hyperlinks`, `pivots`. `#SPILL!`/`#CALC!`
-compare equal to `#VALUE!` and `#CIRC!` to 0, as that's what the file format stores.
-unique: what Excel would "repair") and read back. Categories compared: `package`, `sheets` (names and order),
-`values`, `formulas`, `numFmts` (per cell), `merges`, `names`, `tables` (name, range, columns), `condFormats` (each
-sheet's rules in priority order, priority numbers aside), `validations`, `charts` (kinds and series counts), `comments`,
-`hyperlinks`, `pivots`. `#SPILL!`/`#CALC!` compare equal to `#VALUE!` and `#CIRC!` to 0, as
-that's what the file format stores.
+**Round trip.** The recalculated workbook is written with GridCraft's XLSX writer, the package is validated
+(content types, internal targets and unique relationship ids), then read back and compared with the model.
+The categories are:
+
+- `package`: malformed output or source relationship kinds lost on save. Calculation chains, internal links
+  stored as relationships and relationships to empty parts are excluded as before.
+- `sheets` (names and order), `values`, `formulas` (text), `numFmts` (per cell), `merges`, `names`
+  (scope, formula, visibility and comment), `condFormats` (complete rules in priority order).
+- `tables`, `validations`, `charts`, `comments`, `hyperlinks`, `pivots`: complete modeled payloads, including
+  table options, validation formulas/messages, chart titles/axes/series, comment text/history and link targets.
+- `slicers`, `controls`, `pictures` (floating and cell pictures, including image bytes and alt text), `shapes`,
+  `styles` (full cell, row, column, default and named styles, and theme bindings), `printSettings`, `formulaModes` (evaluation
+  semantics and legacy array extents).
+
+Generated object ids and interned style indices are ignored; references by name, address or XML-map binding
+remain significant. Slicer and pivot-filter selection lists compare as sets. A control's automatic generated
+name compares equal to its materialized default name. Ordinary array-mode scalar formulas may reopen in
+legacy mode: `formulaModes` uses the writer's bounded static classifier to allow that normalization, while
+retaining differences for array-sensitive formulas, explicit dynamic markers and legacy array extents. This
+shared classifier is not an independent calculation oracle. `#SPILL!`/`#CALC!` compare equal to `#VALUE!` and
+`#CIRC!` to 0, as that's what the file format stores.
+
+JSON `roundTrip.sourcePackage` reports original OPC relationship coverage separately: `compared` (with
+`relationshipKinds`), `notApplicable` for inputs without an OPC ZIP graph, `notChecked` if the check could not
+reach that stage, or `unavailable` (with `error`) when relationship inspection fails. Unavailable inspection
+also fails the `package` category. The human report shows this status too. This is a relationship-kind check,
+not a complete package-content comparison: multiple objects of one kind, unmodeled XML and content already
+lost during import can remain invisible. Equal model categories cannot prove import completeness.
 
 Files that fail to open are reported with GridCraft's error and don't stop the run. Unreadable directories,
 directory-entry/metadata errors, and subtrees or files omitted by the depth (32) and file (100,000) limits appear
@@ -109,14 +126,22 @@ JSON `totals.files` includes failed discovery paths; `totals.opened` counts only
 An empty scan fails with a diagnostic. Exit code: 0 when at least one file was checked, discovery was complete, and every file
 opened with no mismatch and no round-trip difference, 1 otherwise, 2 on a usage error. `--max-report` caps the
 examples listed per file and category (counts are always complete).
+Exit 0 means no observed mismatch or loss under these checks; it is not a release-pass or Excel-compatibility
+claim. In particular, `checked: 0` with `noOracle`/`volatile` formulas gives no calculation correctness evidence,
+and synthetic cached values generated by GridCraft are not an independent oracle. Human output explicitly
+labels zero comparable results as calculation correctness unverified.
 
 The human report prints each file's mismatches and differing categories, a summary table, the most mismatching
-functions, mismatch signatures and totals. `--json` prints one object (schema `gridcraft-check/1`; new fields may be
-added, a changed meaning bumps the version):
+functions, mismatch signatures and totals. `--json` prints one object (schema `gridcraft-check/2`; new fields may be
+added, a changed meaning bumps the version). Version 2 strengthens payload equality and adds the categories
+and `sourcePackage` field above. Category `diffs` counts affected sheets/payload groups (cell styles and formula
+modes count affected cells), not individual changed payload fields; consumers of version 1 must accept the new
+schema and category keys. Calculation counts and exit codes 0/1/2 retain their meanings, but newly detected
+losses now return 1:
 
 ```jsonc
 {
-  "schema": "gridcraft-check/1",
+  "schema": "gridcraft-check/2",
   "tolerance": 1e-9,
   "files": [{
     "path": "book.xlsx",
@@ -134,6 +159,7 @@ added, a changed meaning bumps the version):
       "signatures": {"number → number": 1}
     },
     "roundTrip": {
+      "sourcePackage": {"status": "compared", "relationshipKinds": 6},
       "error": null,                   // write or read-back failure
       "differing": ["values"],
       "categories": {"values": {"equal": false, "diffs": 1, "examples": ["Sheet1!A1: 2 → 3"]}, "...": {}}

@@ -281,9 +281,9 @@ fn relationship_kinds_within(bytes: &[u8], mut budget: u64) -> Result<BTreeMap<S
         let xml = match read_zip_part_within(&mut zip, n, &mut budget) {
             Ok(xml) => xml,
             Err(PartError::OverBudget) => return Err(format!("{n}: relationship check stopped at its decompression limit")),
-            Err(PartError::Unreadable) => continue,
+            Err(PartError::Unreadable) => return Err(format!("{n}: relationship part could not be read")),
         };
-        let Ok(els) = xml_elements(&xml) else { continue };
+        let els = xml_elements(&xml).map_err(|e| format!("{n}: {e}"))?;
         for (_, attrs) in els.iter().filter(|(el, _)| el == "Relationship") {
             let Some(kind) = attr(attrs, "Type").and_then(|t| t.rsplit('/').next()) else { continue };
             let target = attr(attrs, "Target").unwrap_or("");

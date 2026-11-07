@@ -46,7 +46,7 @@ use report::print_human;
 pub use report::report_json;
 
 /// Version tag of the `--json` output; bumped when a field changes meaning or disappears.
-pub const SCHEMA: &str = "gridcraft-check/1";
+pub const SCHEMA: &str = "gridcraft-check/2";
 /// Directory recursion limit (symlink loops end here).
 const MAX_DEPTH: usize = 32;
 /// Most files collected from the inputs.
@@ -131,9 +131,24 @@ pub struct Category {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoundTrip {
-    /// Writing or reading back failed (the categories are then empty).
+    /// Writing or reading back failed (available package diagnostics are retained).
     pub error: Option<String>,
     pub categories: Vec<Category>,
+    /// Original OPC relationship-kind coverage, separate from the imported model comparison.
+    pub source_package: SourcePackage,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum SourcePackage {
+    #[default]
+    NotChecked,
+    NotApplicable,
+    Compared {
+        relationship_kinds: usize,
+    },
+    Unavailable {
+        error: String,
+    },
 }
 
 impl RoundTrip {

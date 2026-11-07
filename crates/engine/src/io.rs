@@ -9,6 +9,8 @@ use crate::{EngineError, Result};
 
 mod sylk;
 
+pub use gridcraft_xlsx::formula_needs_array;
+
 /// File formats GridCraft reads or writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
