@@ -155,7 +155,7 @@ impl SheetApp {
         // logic-only tick. Its UI and scroll state must go before the no-transition return.
         let session = &self.session;
         self.parked.retain(|w, _| session.window(*w).is_some());
-        self.views.retain(|&(w, _), _| session.window(w).is_some());
+        self.prune_sheet_views();
         // A window hidden while parked (from another window's View › Hide) isn't drawn either:
         // its waiting key tip request goes, as it does for a window hidden as it is left.
         let session = &self.session;

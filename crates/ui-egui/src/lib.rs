@@ -225,6 +225,7 @@ pub struct SheetApp {
     /// Scroll position per (window id, sheet uid): each sheet keeps its own when sheets are
     /// inserted, deleted or moved.
     pub views: HashMap<(u64, u64), SheetView>,
+    reachable_sheets: HashMap<u64, app::ReachableSheets>,
     pub editor: Option<editor::EditState>,
     pub text_box_editor: Option<text_box::EditState>,
     pub dialog: Option<dialogs::Dialog>,

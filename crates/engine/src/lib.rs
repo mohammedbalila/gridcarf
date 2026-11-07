@@ -635,6 +635,25 @@ impl Session {
         d.store_view(tops);
         Ok(())
     }
+    /// Borrows the workbooks that can restore this document's sheets, without cloning owners
+    /// or allocating. Visits current, saved, undo, redo, then matching open groups in opening
+    /// order: each group's workbook followed by its redo entries. Stack entries keep their
+    /// stored order and duplicate roots are visited. An absent document has no roots.
+    /// Clipboard and debugger comparison payloads are not document-restoration roots.
+    pub fn visit_document_workbooks(&self, uid: u64, mut visit: impl FnMut(&Workbook)) {
+        let Some(d) = self.docs.iter().find(|d| d.uid == uid) else { return };
+        visit(&d.wb);
+        visit(&d.saved);
+        for entry in d.undo.iter().chain(&d.redo) {
+            visit(&entry.wb);
+        }
+        for group in self.groups.iter().filter(|group| group.doc == uid) {
+            visit(&group.wb);
+            for entry in &group.redo {
+                visit(&entry.wb);
+            }
+        }
+    }
     /// The warning an edit of `at` on `sheet` gets from sheet protection, or `None` when the edit
     /// is allowed. Front ends ask before opening an editor, so typing into a locked cell never
     /// leaves a draft that can't be entered (and so blocks saving).

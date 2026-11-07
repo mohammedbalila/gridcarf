@@ -3,10 +3,7 @@ use egui_kittest::kittest::Queryable;
 use gridcraft_engine::{Session, model::Workbook};
 use serde_json::json;
 
-// Shared test source: isolated package tests require the full workspace layout.
-#[path = "../../../engine/tests/support/owned_directory.rs"]
-mod owned_directory;
-use owned_directory::Directory;
+use crate::owned_directory::Directory;
 
 fn directory(name: &str) -> Directory {
     use std::sync::atomic::{AtomicU64, Ordering};

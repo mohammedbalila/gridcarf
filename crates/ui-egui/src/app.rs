@@ -23,6 +23,7 @@ mod prefs;
 mod print;
 mod quit;
 mod view;
+pub(crate) use view::ReachableSheets;
 
 impl SheetApp {
     /// Constructs a `SheetApp` with default UI, grid, printing, control and screenshot state and the caller's session and services.
@@ -32,6 +33,7 @@ impl SheetApp {
             ui: UiState::default(),
             chrome: Chrome::default(),
             views: HashMap::new(),
+            reachable_sheets: HashMap::new(),
             editor: None,
             text_box_editor: None,
             dialog: None,

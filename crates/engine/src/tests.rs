@@ -6129,3 +6129,141 @@ fn pivot_new_sheet_destination_respects_workbook_structure_protection() {
 }
 
 mod history_budget_features;
+
+mod document_workbook_roots {
+    use super::*;
+    use crate::{HistoryEntry, Workbook};
+    use std::sync::Arc;
+
+    fn snapshot() -> Arc<Workbook> {
+        Arc::new(Workbook::new())
+    }
+
+    fn entry(wb: Arc<Workbook>) -> HistoryEntry {
+        HistoryEntry { wb, label: "root fixture".into(), selection: Default::default(), retained_bytes: 0 }
+    }
+
+    fn roots(s: &Session, uid: u64) -> Vec<usize> {
+        let mut roots = Vec::new();
+        s.visit_document_workbooks(uid, |wb| roots.push(std::ptr::from_ref(wb) as usize));
+        roots
+    }
+
+    #[test]
+    fn ordered_isolated_roots_include_nested_groups_and_their_redo_without_owners() {
+        let mut s = s();
+        let uid = s.doc().unwrap().uid;
+        let outer = s.group_begin("outer").unwrap();
+        let inner = s.group_begin("inner").unwrap();
+        // Independent synthetic roots isolate every position; these are fixture substitutions,
+        // not a supported command mutation path. Each root has a different numeric sheet UID.
+        let d = s.doc_mut().unwrap();
+        d.wb = snapshot();
+        d.saved = snapshot();
+        d.undo = vec![entry(snapshot()), entry(snapshot())];
+        d.redo = vec![entry(snapshot())];
+        for group in &mut s.groups {
+            group.wb = snapshot();
+            group.redo = vec![entry(snapshot())];
+        }
+        let d = s.doc().unwrap();
+        let expected = [
+            &d.wb,
+            &d.saved,
+            &d.undo[0].wb,
+            &d.undo[1].wb,
+            &d.redo[0].wb,
+            &s.groups[0].wb,
+            &s.groups[0].redo[0].wb,
+            &s.groups[1].wb,
+            &s.groups[1].redo[0].wb,
+        ];
+        let pointers: Vec<_> = expected.iter().map(|wb| Arc::as_ptr(wb) as usize).collect();
+        let uids: Vec<_> = expected.iter().map(|wb| wb.sheets[0].uid.get()).collect();
+        assert_eq!(uids.iter().copied().collect::<std::collections::HashSet<_>>().len(), 9);
+        let probes: Vec<_> = expected.iter().map(|wb| Arc::downgrade(wb)).collect();
+        let counts: Vec<_> = probes.iter().map(std::sync::Weak::strong_count).collect();
+        let mut visited = Vec::new();
+        s.visit_document_workbooks(uid, |wb| {
+            assert_eq!(probes.iter().map(std::sync::Weak::strong_count).collect::<Vec<_>>(), counts);
+            visited.push(wb.sheets[0].uid.get());
+        });
+        assert_eq!(visited, uids);
+        assert_eq!(roots(&s, uid), pointers);
+        assert_eq!(probes.iter().map(std::sync::Weak::strong_count).collect::<Vec<_>>(), counts);
+        assert!(roots(&s, u64::MAX).is_empty());
+        s.new_workbook();
+        let other_uid = s.doc().unwrap().uid;
+        let other_group = s.group_begin("other document").unwrap();
+        assert_eq!(roots(&s, uid), pointers, "other documents' groups do not become roots");
+        assert_eq!(roots(&s, other_uid).len(), 3);
+        s.group_rollback(other_group).unwrap();
+        s.close_document(s.document_index(uid).unwrap());
+        assert!(roots(&s, uid).is_empty());
+        assert!(!s.group_is_open(&outer));
+        assert!(!s.group_is_open(&inner));
+        assert!(probes.iter().all(|probe| probe.strong_count() == 0));
+    }
+
+    #[test]
+    fn group_redo_is_restorable_through_rollback_and_released_on_commit() {
+        let mut s = s();
+        let uid = s.doc().unwrap().uid;
+        s.run("home.insertSheet", json!({"name":"Restorable"})).unwrap();
+        let target = s.doc().unwrap().wb.active().unwrap().uid.get();
+        s.run("edit.undo", json!({})).unwrap();
+        let outer = s.group_begin("outer").unwrap();
+        let inner = s.group_begin("inner").unwrap();
+        // Removing the public redo fixture isolates its two captured group-redo roots.
+        s.doc_mut().unwrap().redo.clear();
+        let occurrences = |s: &Session| {
+            let mut count = 0;
+            s.visit_document_workbooks(uid, |wb| count += usize::from(wb.sheets.iter().any(|sh| sh.uid.get() == target)));
+            count
+        };
+        assert_eq!(occurrences(&s), 2);
+        s.group_rollback(inner).unwrap();
+        assert_eq!(occurrences(&s), 2, "inner rollback restores public redo beside outer group redo");
+        s.group_rollback(outer).unwrap();
+        assert_eq!(occurrences(&s), 1);
+        s.run("edit.redo", json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), target);
+        s.run("edit.undo", json!({})).unwrap();
+        let group = s.group_begin("commit edit").unwrap();
+        s.run("cell.set", json!({"cell":"A1","input":"1"})).unwrap();
+        assert!(occurrences(&s) > 0);
+        s.group_end(group).unwrap();
+        assert_eq!(occurrences(&s), 0, "commit releases public and group redo roots");
+    }
+
+    #[test]
+    fn real_debugger_uses_group_restoration_without_extra_comparison_roots() {
+        let mut s = s();
+        s.run(
+            "macro.save",
+            json!({"name":"RootWalk", "output":{"onConflict":"fail"}, "steps":[
+                {"command":"cell.set", "params":{"cell":"E1","input":"first"}},
+                {"command":"cell.set", "params":{"cell":"E2","input":"second"}}
+            ]}),
+        )
+        .unwrap();
+        let uid = s.doc().unwrap().uid;
+        let before = Arc::as_ptr(&s.doc().unwrap().wb) as usize;
+        s.run("macro.debug", json!({"action":"start","name":"RootWalk","onConflict":"fail"})).unwrap();
+        s.run("macro.debug", json!({"action":"step"})).unwrap();
+        assert!(s.macro_debug.is_some());
+        assert_eq!(s.groups.len(), 1);
+        let d = s.doc().unwrap();
+        let expected_count = 2 + d.undo.len() + d.redo.len() + 1 + s.groups[0].redo.len();
+        assert_eq!(roots(&s, uid).len(), expected_count, "debugger start/guard comparisons add no restoration roots");
+        assert!(roots(&s, uid).contains(&before));
+        assert_eq!(v(&s, "E1"), Value::text("first"));
+        s.run("macro.debug", json!({"action":"stop","keep":false})).unwrap();
+        assert!(s.macro_debug.is_none());
+        assert!(!s.in_group(uid));
+        assert_eq!(Arc::as_ptr(&s.doc().unwrap().wb) as usize, before);
+        assert!(v(&s, "E1").is_empty());
+        let d = s.doc().unwrap();
+        assert_eq!(roots(&s, uid).len(), 2 + d.undo.len() + d.redo.len());
+    }
+}

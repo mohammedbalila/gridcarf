@@ -6,6 +6,8 @@ use gridcraft_engine::{DocState, Session};
 use gridcraft_ui_egui::{SheetApp, grid::Geo};
 use serde_json::json;
 
+use crate::owned_directory::Directory;
+
 type Harness = egui_kittest::Harness<'static, SheetApp>;
 
 fn harness(freeze: Option<(u32, u32)>) -> Harness {
@@ -157,4 +159,148 @@ fn m03a_windows_on_one_document_keep_independent_scroll_and_release_closed_entri
     assert_eq!(app.session.active_window(), Some(first));
     assert_scroll_row(&app, 10);
     assert!(app.views.keys().all(|(window, _)| *window == first), "closed window's scroll entries remain");
+}
+
+fn has_sheet_uid(wb: &Workbook, uid: u64) -> bool {
+    wb.sheets.iter().any(|sh| sh.uid.get() == uid)
+}
+
+fn logic_tick(app: &mut SheetApp) {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(gridcraft_ui_egui::theme::pinned_font_definitions());
+    gridcraft_ui_egui::theme::apply(&ctx, false);
+    let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
+}
+
+fn assert_saved_is_only_sheet_root(app: &SheetApp, doc: u64, deleted_uid: u64) {
+    let d = app.session.doc().unwrap();
+    assert_eq!(d.undo.len(), 100);
+    assert!(!has_sheet_uid(&d.wb, deleted_uid));
+    assert!(d.undo.iter().chain(&d.redo).all(|entry| !has_sheet_uid(&entry.wb, deleted_uid)));
+    assert!(has_sheet_uid(&d.saved, deleted_uid), "saved is the final restorable root");
+    assert!(!app.session.in_group(doc));
+}
+
+fn assert_saved_and_history_released_sheet(app: &SheetApp, doc: u64, deleted_uid: u64) {
+    let d = app.session.doc().unwrap();
+    assert!(!d.is_dirty());
+    assert!(!has_sheet_uid(&d.wb, deleted_uid));
+    assert!(!has_sheet_uid(&d.saved, deleted_uid));
+    assert!(d.undo.iter().chain(&d.redo).all(|entry| !has_sheet_uid(&entry.wb, deleted_uid)));
+    assert!(!app.session.in_group(doc));
+}
+
+#[test]
+fn m03c2_deleted_sheet_scroll_survives_undo_and_expires_after_last_root() {
+    let dir = Directory::acquire((0..).map(|id| std::env::temp_dir().join(format!("gridcraft-scroll-roots-{}-{id}", std::process::id())))).unwrap();
+    let path = dir.join("views.json");
+    let mut app = identity_app();
+    let window = app.session.active_window().unwrap();
+    let doc = app.session.doc().unwrap().uid;
+    let deleted_uid = app.session.doc().unwrap().wb.sheets[0].uid.get();
+    assert_eq!(app.session.doc().unwrap().wb.sheets[0].name, "Sheet1");
+    let deleted_key = (window, deleted_uid);
+    let deleted_scroll = app.views[&deleted_key].scroll;
+    let saved = app.run("file.save", json!({"path":path})).unwrap();
+    assert!(saved["bytes"].as_u64().unwrap() > 0);
+    assert_eq!(std::fs::read(&path).unwrap().len() as u64, saved["bytes"].as_u64().unwrap());
+    assert!(has_sheet_uid(&app.session.doc().unwrap().wb, deleted_uid));
+    assert!(has_sheet_uid(&app.session.doc().unwrap().saved, deleted_uid));
+    assert!(!app.session.doc().unwrap().is_dirty());
+    assert!(!app.session.in_group(doc));
+
+    app.run("home.deleteSheet", json!({"sheet":"Sheet1"})).unwrap();
+    let d = app.session.doc().unwrap();
+    assert!(!has_sheet_uid(&d.wb, deleted_uid));
+    assert!(d.undo.iter().any(|entry| has_sheet_uid(&entry.wb, deleted_uid)));
+    assert!(has_sheet_uid(&d.saved, deleted_uid));
+    assert_eq!(d.wb.sheets[0].name, "Two");
+    logic_tick(&mut app);
+    assert_eq!(app.views[&deleted_key].scroll, deleted_scroll);
+    assert_scroll_row(&app, 10);
+
+    app.run("edit.undo", json!({})).unwrap();
+    app.run("sheet.activate", json!({"sheet":"Sheet1"})).unwrap();
+    assert_eq!(app.session.doc().unwrap().wb.active().unwrap().uid.get(), deleted_uid);
+    assert_scroll_row(&app, 50);
+    app.run("edit.redo", json!({})).unwrap();
+    assert!(!has_sheet_uid(&app.session.doc().unwrap().wb, deleted_uid));
+    assert!(has_sheet_uid(&app.session.doc().unwrap().saved, deleted_uid));
+    logic_tick(&mut app);
+    assert_eq!(app.views[&deleted_key].scroll, deleted_scroll);
+    assert_scroll_row(&app, 10);
+
+    for value in 0..101 {
+        app.run("cell.set", json!({"cell":"A1", "input":value.to_string()})).unwrap();
+    }
+    assert_saved_is_only_sheet_root(&app, doc, deleted_uid);
+    logic_tick(&mut app);
+    assert_eq!(app.views[&deleted_key].scroll, deleted_scroll, "saved alone must preserve deleted-sheet scroll");
+
+    // Store view metadata first, then bypass app.run cleanup so logic alone must evict.
+    app.store_view_state();
+    let before_save_revision = app.session.doc().unwrap().revision;
+    let saved = app.session.run("file.save", json!({"path":path})).unwrap();
+    assert!(saved["bytes"].as_u64().unwrap() > 0);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len() as u64, saved["bytes"].as_u64().unwrap());
+    let (written, _) = gridcraft_engine::io::open_bytes("views.json", &bytes).unwrap();
+    assert_eq!(written.sheets.len(), 1);
+    assert_eq!(written.sheets[0].name, "Two");
+    let d = app.session.doc().unwrap();
+    assert_eq!(d.revision, before_save_revision, "same-path save replaces saved without a revision change");
+    assert_saved_and_history_released_sheet(&app, doc, deleted_uid);
+    assert!(app.views.contains_key(&deleted_key), "no UI cleanup has run since saved released the UID");
+    logic_tick(&mut app);
+    assert_eq!(app.session.active_window(), Some(window));
+    assert_eq!(app.session.doc().unwrap().uid, doc);
+    assert_scroll_row(&app, 10);
+    assert!(!app.views.contains_key(&deleted_key), "deleted-sheet scroll remains after every restorable root released its UID");
+}
+
+#[test]
+fn m03c2_same_name_new_sheet_at_deleted_index_does_not_inherit_scroll() {
+    let mut app = identity_app();
+    let deleted_uid = app.session.doc().unwrap().wb.sheets[0].uid.get();
+    app.run("home.deleteSheet", json!({"sheet":"Sheet1"})).unwrap();
+    app.run("home.insertSheet", json!({"name":"Sheet1", "before":0})).unwrap();
+    let d = app.session.doc().unwrap();
+    assert_eq!(d.wb.active_sheet(), 0);
+    assert_eq!(d.wb.sheets[0].name, "Sheet1");
+    assert_ne!(d.wb.sheets[0].uid.get(), deleted_uid);
+    assert_scroll_row(&app, 0);
+    app.run("sheet.activate", json!({"sheet":"Two"})).unwrap();
+    assert_scroll_row(&app, 10);
+}
+
+#[test]
+fn m03c2_engine_close_releases_scroll_on_logic_without_app_cleanup() {
+    let mut app = identity_app();
+    app.run("selection.set", json!({"cell":"E11"})).unwrap();
+    let sentinel = app.session.active_window().unwrap();
+    let sentinel_doc = app.session.doc().unwrap().uid;
+    let selection = app.session.doc().unwrap().selection.clone();
+    let sentinel_views = app.views.clone();
+    app.run("file.new", json!({})).unwrap();
+    let target = app.session.active_window().unwrap();
+    let target_doc = app.session.doc().unwrap().uid;
+    app.view_mut().unwrap().scroll.y = 100.0;
+    app.enter_window(sentinel);
+    app.session.hide_window(target);
+    let target_index = app.session.document_index(target_doc).unwrap();
+    app.session.close_document(target_index);
+    assert!(app.session.document_index(target_doc).is_none());
+    assert!(app.session.window(target).is_none());
+    assert!(app.views.keys().any(|(window, _)| *window == target), "engine close must precede any UI cleanup");
+    logic_tick(&mut app);
+    assert!(app.views.keys().all(|(window, _)| *window == sentinel));
+    assert_eq!(app.views.len(), sentinel_views.len());
+    for (key, view) in sentinel_views {
+        assert_eq!(app.views[&key].scroll, view.scroll);
+    }
+    assert_eq!(app.session.active_window(), Some(sentinel));
+    assert_eq!(app.ui_window(), Some(sentinel));
+    assert_eq!(app.session.doc().unwrap().uid, sentinel_doc);
+    assert_eq!(app.session.doc().unwrap().selection, selection);
+    assert_scroll_row(&app, 10);
 }

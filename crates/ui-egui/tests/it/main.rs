@@ -6,6 +6,10 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+// Shared test source: isolated package tests require the full workspace layout.
+#[path = "../../../engine/tests/support/owned_directory.rs"]
+mod owned_directory;
+
 mod accounting_fill;
 mod active_row_highlight;
 mod advanced_filter;
