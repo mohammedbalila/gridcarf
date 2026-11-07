@@ -50,3 +50,25 @@ then verifies exact Unicode font, Arabic text and RTL state after save/reopen.
 cargo test --locked -p gridcraft-xlsx tests::shape_text_rtl
 cargo test --locked -p gridcraft-xlsx
 ~~~
+
+## Borrow cached expressions while building dependencies
+
+[Expression-borrowing source: PR #2693](https://github.com/storytold/gridcraft/pull/2693),
+reviewed at 21504859c842d200bce71e3fd008c94fdc901f96 (also merged upstream).
+
+Dependency graph construction and edited-formula updates now borrow the cached expression
+through Formula::with_expr instead of copying its tree. Text-only formulas still parse on
+request; malformed text retains the existing failure behavior. Existing calculation modes,
+computed-criteria dependency rules, Python/spill handling and native what-if guards remain.
+
+Regression tests check cached-tree identity and ownership, text-only/malformed behavior,
+independent dependency/value expectations, formula replacement and stale-edge removal.
+This establishes the absence of the cached-tree copy at these call sites, not a process-RSS
+or timing improvement measurement.
+
+~~~sh
+cargo test --locked -p gridcraft-model -p gridcraft-calc
+cargo test --locked -p gridcraft-engine --test it recalc_invariants
+cargo test --locked -p gridcraft-engine --test it legacy_implicit_intersection
+cargo test --locked -p gridcraft-engine --test it whatif_tables
+~~~
