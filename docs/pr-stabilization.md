@@ -202,13 +202,28 @@ and broad external-corpus fidelity remain untested by these synthetic checks.
 
 ## T01: Acquire exclusive AutoSave test fixtures
 
-Revision: 2026-11-07.
+Revision: 2026-11-08 (Asia/Dubai).
 
 The AutoSave integration fixtures and engine sandbox test now acquire their
 synthetic parent directories with exclusive `create_dir`, retrying only existing
 candidates. RAII cleans up only a successfully acquired parent. The sandbox
 fixture also creates its workbook file exclusively and retries file collisions.
 No production save behavior or script permission policy changes.
+
+Both suites compile the same test-only directory helper from
+`crates/engine/tests/support/owned_directory.rs`, keeping acquisition and cleanup
+policy in one place without a runtime dependency or production API. Relative
+module declarations keep the helper visible to the workspace formatter. The UI
+integration tests refer to engine-owned test source: isolated packaged UI tests
+require the full workspace/engine source layout.
+
+Cleanup errors fail normally completing tests and include the owned path and
+original filesystem error. During unwinding they are written directly to stderr
+without a second panic. If stderr itself fails, there is no reliable secondary
+diagnostic channel during unwinding. Deterministic regressions remove an empty,
+exclusively acquired directory before dropping its owner; a captured child test
+checks that both its original panic and cleanup error survive. The child gets its
+marker through `Command::env`, without changing the parent's environment or panic hook.
 
 Directory-acquisition regressions retry both file and directory collisions. The
 file-writer regression retries a regular-file collision; a separate directory-only
@@ -221,7 +236,7 @@ The original AutoSave cases and sandbox denial, document/window, dirty-state and
 journal assertions remain in place; fixture creation stays outside the sandbox.
 
 ~~~sh
-cargo test --locked -p gridcraft-engine --lib autosave_tests
+cargo test --locked -p gridcraft-engine --lib cmd::file::
 cargo test --locked -p gridcraft-ui-egui --test it autosave_failures
 cargo test --locked -p gridcraft-engine --test it save_temp_ownership
 cargo xtask ci

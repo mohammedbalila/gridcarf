@@ -3,35 +3,10 @@ use egui_kittest::kittest::Queryable;
 use gridcraft_engine::{Session, model::Workbook};
 use serde_json::json;
 
-struct Directory(std::path::PathBuf);
-
-impl Directory {
-    fn acquire(candidates: impl IntoIterator<Item = std::path::PathBuf>) -> std::io::Result<Self> {
-        for path in candidates {
-            match std::fs::create_dir(&path) {
-                Ok(()) => return Ok(Self(path)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "fixture candidates exhausted"))
-    }
-}
-
-impl std::ops::Deref for Directory {
-    type Target = std::path::Path;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Drop for Directory {
-    fn drop(&mut self) {
-        // Only exclusively acquired synthetic fixture directories may be cleaned up.
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+// Shared test source: isolated package tests require the full workspace layout.
+#[path = "../../../engine/tests/support/owned_directory.rs"]
+mod owned_directory;
+use owned_directory::Directory;
 
 fn directory(name: &str) -> Directory {
     use std::sync::atomic::{AtomicU64, Ordering};
