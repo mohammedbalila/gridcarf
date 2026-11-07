@@ -162,10 +162,8 @@ impl Ctx for FnCtx<'_, '_> {
     }
     /// Excel's "formula as criteria": the formula is written for the first record, so its relative
     /// references move down to `record`'s row, and the database's labels name its fields.
-    /// Known gap: the shifted references are not dependencies of the calling cell. One that lands
-    /// outside both the database and the criteria cell's own precedents (say `=G2<H2` with column H
-    /// outside the database) is read here but not tracked, so editing that cell doesn't recalculate
-    /// the D-function until something else does.
+    /// The graph treats database callers as dynamic because these shifted references can land
+    /// outside the database and the criterion cell's own precedents.
     fn computed_criterion(&mut self, row: usize, col: usize, db: &Array, record: usize) -> Option<bool> {
         let area = self.criteria?;
         let at = area.range.start.offset(row as i64, col as i64).filter(|c| area.range.contains(*c))?;

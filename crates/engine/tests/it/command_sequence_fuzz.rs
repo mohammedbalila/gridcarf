@@ -29,8 +29,10 @@
 //! - `GRIDCRAFT_FUZZ_SHRINK=1`: on failure, shrink the sequence to a minimal list of commands that
 //!   still fails the same way, printed as `execute` calls ready for a regression test.
 //! - `GRIDCRAFT_FUZZ_KEEP_GOING=1`: report every failing seed instead of stopping at the first.
+//! - `GRIDCRAFT_FUZZ_PROGRESS=1`: print each seed as it starts (use with `--nocapture`).
 
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::Arc;
 
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
@@ -123,6 +125,9 @@ fn command_sequences_keep_the_workbook_consistent() {
     };
     let mut reports = Vec::new();
     for seed in list {
+        if std::env::var_os("GRIDCRAFT_FUZZ_PROGRESS").is_some() {
+            eprintln!("command-sequence fuzz: seed {seed}, {steps} steps");
+        }
         let (sample, sequence, failure) = run_seed(seed, steps);
         if let Some(f) = failure {
             reports.push(report(seed, steps, sample, &sequence, &f));
@@ -469,6 +474,34 @@ fn overlaps(a: &RangeRef, b: &RangeRef) -> bool {
     a.intersection(b).is_some()
 }
 
+/// Exact rectangle-overlap sweep for valid, inclusive ranges. Active rectangles share the
+/// current start row; until the first overlap their column intervals are disjoint. The last
+/// interval starting at or before the new right edge is therefore the only candidate needed.
+/// Whole-column Merge Across can create a million ranges: never compare all pairs here.
+fn merge_overlap(ranges: &[RangeRef]) -> Option<(usize, usize)> {
+    let mut order: Vec<_> = ranges.iter().enumerate().collect();
+    order.sort_unstable_by_key(|(_, r)| (r.start.row, r.start.col));
+    let mut active: BTreeMap<u32, (u32, usize)> = BTreeMap::new();
+    let mut expiry: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    for (index, range) in order {
+        while let Some(&Reverse((end_row, start_col))) = expiry.peek() {
+            if end_row >= range.start.row {
+                break;
+            }
+            expiry.pop();
+            active.remove(&start_col);
+        }
+        if let Some((_, &(end_col, other))) = active.range(..=range.end.col).next_back()
+            && end_col >= range.start.col
+        {
+            return Some((other, index));
+        }
+        active.insert(range.start.col, (range.end.col, index));
+        expiry.push(Reverse((range.end.row, range.start.col)));
+    }
+    None
+}
+
 fn structure_problem(wb: &Workbook, sel: &gridcraft_engine::Selection) -> Option<String> {
     if wb.sheets.is_empty() {
         return Some("no sheets left".into());
@@ -493,10 +526,8 @@ fn structure_problem(wb: &Workbook, sel: &gridcraft_engine::Selection) -> Option
                 return Some(format!("{}!{c}: array formula covers {a}", sh.name));
             }
         }
-        for (k, m) in sh.merges.iter().enumerate() {
-            if let Some(o) = sh.merges.iter().skip(k + 1).find(|o| overlaps(m, o)) {
-                return Some(format!("{}: merges {m} and {o} overlap", sh.name));
-            }
+        if let Some((a, b)) = merge_overlap(&sh.merges) {
+            return Some(format!("{}: merges {} and {} overlap", sh.name, sh.merges[a], sh.merges[b]));
         }
         for (k, t) in sh.tables.iter().enumerate() {
             if !tables.insert(t.name.to_ascii_lowercase()) {
@@ -599,6 +630,10 @@ fn canonical(wb: &Workbook) -> Workbook {
     wb.set_active_sheet(0);
     wb.names.retain(|n| n.name != WATCH_NAME);
     for sh in wb.sheets.iter_mut() {
+        // Avoid copying large spill maps merely to write view fields that are already normal.
+        if sh.view_active == CellRef::default() && sh.view_top_left == CellRef::default() && sh.view == SheetViewMode::Normal {
+            continue;
+        }
         let sh = Arc::make_mut(sh);
         sh.view_active = CellRef::default();
         sh.view_top_left = CellRef::default();
@@ -1374,5 +1409,137 @@ fn independent_checkpoints_survive_debugger_group_commit_and_rollback() {
         h.execute_checked(2, "macro.debug", &json!({"action":"stop", "keep":keep})).unwrap();
         assert_eq!(h.undo.len(), usize::from(keep));
         h.end_episode(3).unwrap();
+    }
+}
+
+#[test]
+fn merge_overlap_sweep_matches_pairwise_oracle() {
+    let check = |ranges: &[RangeRef]| {
+        let expected = ranges.iter().enumerate().any(|(i, a)| ranges.iter().skip(i + 1).any(|b| overlaps(a, b)));
+        let actual = merge_overlap(ranges);
+        assert_eq!(actual.is_some(), expected, "{ranges:?}");
+        if let Some((a, b)) = actual {
+            assert_ne!(a, b);
+            assert!(overlaps(&ranges[a], &ranges[b]));
+        }
+    };
+    for addresses in [
+        vec![],
+        vec!["A1:B2"],
+        vec!["A1:B2", "B2:C3"],
+        vec!["A1:B2", "C1:D2"],
+        vec!["A1:B2", "A3:B4"],
+        vec!["A1:D4", "B2:C3"],
+        vec!["A1:B2", "A1:B2"],
+        vec!["A1:B4", "D1:E4", "B3:D3"],
+        vec!["A1:B2", "A3:B4", "A2:A3"],
+        vec!["A1:A1", "A2:A2", "B1:B1"],
+    ] {
+        let ranges: Vec<_> = addresses.iter().map(|r| RangeRef::parse(r).unwrap()).collect();
+        check(&ranges);
+        check(&ranges.iter().copied().rev().collect::<Vec<_>>());
+    }
+    let mut rng = Rng(0xC03);
+    for _ in 0..2_000 {
+        let ranges: Vec<_> = (0..rng.below(40))
+            .map(|_| {
+                let start = CellRef::new(rng.below(30) as u32, rng.below(30) as u32);
+                let end = CellRef::new(start.row + rng.below(5) as u32, start.col + rng.below(5) as u32);
+                RangeRef::new(start, end)
+            })
+            .collect();
+        check(&ranges);
+    }
+}
+
+#[test]
+fn merge_overlap_sweep_handles_a_full_column_of_merges() {
+    // A real Merge Across result: one disjoint rectangle per row. This input would require
+    // 549,755,289,600 pair comparisons; the sweep visits each rectangle and expires it once.
+    let mut ranges: Vec<_> = (0..MAX_ROWS).map(|r| RangeRef::new(CellRef::new(r, 0), CellRef::new(r, 1))).collect();
+    assert_eq!(merge_overlap(&ranges), None);
+    ranges.push(RangeRef::new(CellRef::new(MAX_ROWS - 1, 1), CellRef::new(MAX_ROWS - 1, 2)));
+    let (a, b) = merge_overlap(&ranges).expect("shared bottom-right cell is an overlap");
+    assert!(overlaps(&ranges[a], &ranges[b]));
+}
+
+#[test]
+fn canonical_history_comparison_keeps_normalized_sheets_shared() {
+    let mut wb = Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(CellRef::new(0, 0), Value::Number(7.0));
+    let normalized = canonical(&wb);
+    assert!(Arc::ptr_eq(&wb.sheets[0], &normalized.sheets[0]), "normalization must not detach an already-normalized sheet");
+    assert_eq!(workbook_diff(&wb, &wb), None);
+}
+
+#[test]
+fn canonical_history_comparison_matches_original_normalization() {
+    fn original(wb: &Workbook) -> Workbook {
+        let mut wb = wb.clone();
+        wb.set_active_sheet(0);
+        wb.names.retain(|n| n.name != WATCH_NAME);
+        for sh in &mut wb.sheets {
+            let sh = Arc::make_mut(sh);
+            sh.view_active = CellRef::default();
+            sh.view_top_left = CellRef::default();
+            sh.view = SheetViewMode::Normal;
+        }
+        wb
+    }
+    let mut base = Workbook::new();
+    base.sheet_mut(0).unwrap().set_cell(CellRef::new(0, 0), gridcraft_model::Cell::formula(Formula::new("A2:A3")));
+    let mut variants = vec![base.clone()];
+    for (cell, value) in [(CellRef::new(1, 0), Value::Number(7.0)), (CellRef::new(0, 2), Value::text("changed"))] {
+        let mut wb = base.clone();
+        wb.sheet_mut(0).unwrap().set_value(cell, value);
+        variants.push(wb);
+    }
+    let mut view = base.clone();
+    let sh = view.sheet_mut(0).unwrap();
+    sh.view_active = CellRef::new(12, 3);
+    sh.view_top_left = CellRef::new(10, 2);
+    sh.view = SheetViewMode::PageLayout;
+    variants.push(view);
+    let mut formula = base.clone();
+    let f = formula.sheet_mut(0).unwrap().cells.get_mut(CellRef::new(0, 0)).unwrap().formula.as_mut().unwrap();
+    Arc::make_mut(f).eval_mode = gridcraft_model::FormulaEvalMode::Legacy;
+    variants.push(formula);
+    let mut spill = base.clone();
+    let sh = spill.sheet_mut(0).unwrap();
+    sh.spill.insert(CellRef::new(1, 0), Value::Number(2.0));
+    sh.spill_ranges.insert(CellRef::new(0, 0), RangeRef::parse("A1:A2").unwrap());
+    variants.push(spill);
+    let mut props = base.clone();
+    props.props.title = "Changed title".into();
+    variants.push(props);
+    for a in &variants {
+        assert_eq!(canonical(a), original(a));
+        for b in &variants {
+            // The original algorithm first cloned and normalized both sides. Compare its
+            // fully detached normalization against the version that preserves sharing.
+            let (left, right) = (original(a), original(b));
+            assert_eq!(workbook_diff(a, b), workbook_diff(&left, &right));
+            assert_eq!(workbook_diff(a, b).is_none(), left == right);
+        }
+    }
+}
+
+#[test]
+fn canonical_history_comparison_retains_non_finite_diagnostics() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut value = Workbook::new();
+        value.sheet_mut(0).unwrap().set_value(CellRef::new(0, 0), Value::Number(number));
+        let mut setting = Workbook::new();
+        setting.calc.max_change = number;
+        let mut style = Workbook::new();
+        let mut font_style = gridcraft_model::Style::default();
+        font_style.font.size = number as f32;
+        style.styles.intern(font_style);
+        for wb in [value, setting, style] {
+            let (left, right) = (wb.clone(), wb.clone());
+            let expected = workbook_diff(&left, &right);
+            assert_eq!(expected.is_some(), number.is_nan());
+            assert_eq!(workbook_diff(&wb, &wb), expected, "same-instance comparison must preserve non-reflexive numeric diagnostics");
+        }
     }
 }

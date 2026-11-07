@@ -28,7 +28,7 @@ pub fn resized_sum_range(sum: RangeRef, height: u32, width: u32) -> RangeRef {
 }
 
 /// Collects the static references of an expression with their sheets resolved; `dynamic` is
-/// set when the formula uses INDIRECT/OFFSET/names/tables whose targets can change.
+/// set when references depend on evaluation (including shifted database criteria).
 pub fn precedents(wb: &Workbook, sheet: usize, e: &Expr) -> (Vec<Area>, bool) {
     let mut out = Vec::new();
     let mut dynamic = false;
@@ -64,6 +64,11 @@ pub fn precedents(wb: &Workbook, sheet: usize, e: &Expr) -> (Vec<Area>, bool) {
         {
             dynamic = true
         }
+        // A database criterion is evaluated at each record's row: its shifted references can
+        // lie outside both explicit argument ranges and the criterion cell's own precedents.
+        // Criteria can also be replaced after this graph node is built, so keep every database
+        // caller dynamic, using the same conservative invalidation as INDIRECT and OFFSET.
+        Expr::Call(n, _) if gridcraft_functions::lookup(n).is_some_and(|s| s.category == gridcraft_functions::Category::Database) => dynamic = true,
         Expr::Name(_) | Expr::Struct(_) => dynamic = true,
         Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() && !is_special(n) => dynamic = true,
         // A range ending in a function's result (`A1:INDEX(B1:B9,n)`) covers the cells between

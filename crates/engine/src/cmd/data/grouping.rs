@@ -213,6 +213,11 @@ pub(super) fn outline_settings(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 pub(super) fn subtotal(s: &mut Session, p: &Json) -> Result<Json> {
+    // Nested edits belong to one action: a second Undo must not resurrect a partial subtotal.
+    s.grouped("Subtotal", |s| subtotal_grouped(s, p))
+}
+
+fn subtotal_grouped(s: &mut Session, p: &Json) -> Result<Json> {
     let (sheet, r) = data_target(s, p, "data.subtotal")?;
     let header = bool_param(p, "header").unwrap_or(true);
     let group_col = col_param(p.get("groupBy"), r.start.col).unwrap_or(r.start.col);

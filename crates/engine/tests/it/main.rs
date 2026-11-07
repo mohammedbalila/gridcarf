@@ -25,6 +25,7 @@ mod percent_entry;
 mod pivot_unknown_func;
 mod pivotchart_link;
 mod range_fill_formats;
+mod recalc_invariants;
 mod recently_used;
 mod row_autofit;
 mod sheet_copy_spill;
