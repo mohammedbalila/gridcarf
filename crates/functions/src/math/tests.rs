@@ -230,6 +230,55 @@ fn combinatorics() {
 }
 
 #[test]
+fn gcd_and_lcm_reject_negative_fractional_scalars() {
+    for x in [-0.5, -0.1, -0.999] {
+        assert_eq!([ev2("GCD", x, 2.0), ev2("LCM", x, 2.0)], [Value::Error(Num), Value::Error(Num)]);
+    }
+}
+
+#[test]
+fn gcd_and_lcm_reject_negative_fractions_in_arrays_and_ranges() {
+    for x in [-0.5, -0.1, -0.999] {
+        let values = row(&[2.0, x]);
+        assert_eq!(
+            [
+                ev("GCD", vec![av(values.clone())]),
+                ev("LCM", vec![av(values.clone())]),
+                ev("GCD", vec![rf(values.clone())]),
+                ev("LCM", vec![rf(values)]),
+            ],
+            [Value::Error(Num), Value::Error(Num), Value::Error(Num), Value::Error(Num)]
+        );
+    }
+}
+
+#[test]
+fn gcd_and_lcm_validate_negative_fractions_after_zero() {
+    assert_eq!([ev2("GCD", 0.0, -0.5), ev2("LCM", 0.0, -0.5)], [Value::Error(Num), Value::Error(Num)]);
+    let values = row(&[0.0, -0.5]);
+    assert_eq!(
+        [ev("GCD", vec![av(values.clone())]), ev("LCM", vec![av(values.clone())]), ev("GCD", vec![rf(values.clone())]), ev("LCM", vec![rf(values)]),],
+        [Value::Error(Num), Value::Error(Num), Value::Error(Num), Value::Error(Num)]
+    );
+}
+
+#[test]
+fn gcd_and_lcm_preserve_fraction_zero_and_range_boundaries() {
+    for (name, fractional, zero) in [("GCD", 6.0, 2.0), ("LCM", 36.0, 0.0)] {
+        close(ev2(name, 12.9, 18.9), fractional);
+        close(ev(name, vec![av(row(&[12.9, 18.9]))]), fractional);
+        close(ev(name, vec![rf(row(&[12.9, 18.9]))]), fractional);
+        for x in [0.0, -0.0] {
+            close(ev2(name, x, 2.0), zero);
+        }
+        assert_eq!(ev1(name, 9_007_199_254_740_991.0), Value::Number(9_007_199_254_740_991.0));
+        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 9_007_199_254_740_992.0, 9_007_199_254_740_994.0] {
+            is_err(ev2(name, x, 2.0), Num);
+        }
+    }
+}
+
+#[test]
 fn trig() {
     close(ev1("SIN", PI / 2.0), 1.0);
     close(ev1("COS", 0.0), 1.0);
