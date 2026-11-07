@@ -106,3 +106,54 @@ fn saturated_estimates_still_trim_to_latest_step() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].label, "3");
 }
+
+#[test]
+fn retention_index_obeys_bounds_latest_step_and_saturation() {
+    let entry = |bytes| crate::HistoryEntry {
+        label: String::new(),
+        wb: Arc::new(Workbook::new()),
+        selection: crate::Selection::default(),
+        retained_bytes: bytes,
+    };
+    assert_eq!(crate::retention_index(&[], 100, 10), 0);
+    assert_eq!(crate::retention_index(&[entry(usize::MAX)], 0, 0), 0);
+    assert_eq!(crate::retention_index(&[entry(4), entry(6)], 100, 10), 0);
+    assert_eq!(crate::retention_index(&[entry(4), entry(7)], 100, 10), 1);
+    assert_eq!(crate::retention_index(&[entry(0), entry(0), entry(0)], 2, usize::MAX), 1);
+    assert_eq!(crate::retention_index(&[entry(usize::MAX), entry(usize::MAX), entry(5)], 100, 10), 2);
+}
+
+#[test]
+fn default_retention_prediction_preserves_inputs_and_matches_trimming() {
+    let current = Workbook::new();
+    let mut history = Vec::new();
+    for i in 0..105 {
+        crate::push_entry(&mut history, i.to_string(), Arc::new(Workbook::new()), &current, crate::Selection::default());
+    }
+    assert_eq!(crate::history_retained_start(&[], &current), 0);
+    assert_eq!(crate::history_retained_start(&history, &current), 5);
+    assert_eq!(history.len(), 105);
+    assert!(history.iter().all(|e| e.retained_bytes == 0));
+    crate::trim_to_budget(&mut history, &current, crate::UNDO_BYTES_LIMIT);
+    assert_eq!(history.len(), 100);
+    assert_eq!(history[0].label, "5");
+}
+
+#[test]
+fn default_retention_prediction_uses_original_metadata_capacity() {
+    let current = Workbook::new();
+    let mut history = Vec::new();
+    for _ in 0..2 {
+        crate::push_entry(
+            &mut history,
+            String::with_capacity(crate::UNDO_BYTES_LIMIT + 1),
+            Arc::new(Workbook::new()),
+            &current,
+            crate::Selection::default(),
+        );
+    }
+    assert_eq!(crate::history_retained_start(&history, &current), 1);
+    assert_eq!(history.len(), 2, "prediction does not trim its input");
+    crate::trim_to_budget(&mut history, &current, crate::UNDO_BYTES_LIMIT);
+    assert_eq!(history.len(), 1, "an oversized latest entry remains");
+}

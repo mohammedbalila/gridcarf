@@ -254,12 +254,32 @@ fn account_history(history: &mut [HistoryEntry], current: &Workbook) {
     let mut accounting = gridcraft_model::RetainedBytes::default();
     accounting.seed_workbook(current);
     for entry in history.iter_mut().rev() {
-        entry.retained_bytes = accounting
-            .workbook(&entry.wb)
-            .saturating_add(entry.label.capacity())
-            .saturating_add(entry.selection.ranges.capacity().saturating_mul(std::mem::size_of::<gridcraft_core::RangeRef>()))
-            .saturating_add(std::mem::size_of::<HistoryEntry>());
+        entry.retained_bytes = history_entry_bytes(&entry.wb, &entry.label, &entry.selection, &mut accounting);
     }
+}
+
+fn history_entry_bytes<'a>(wb: &'a Workbook, label: &String, selection: &Selection, accounting: &mut gridcraft_model::RetainedBytes<'a>) -> usize {
+    accounting
+        .workbook(wb)
+        .saturating_add(label.capacity())
+        .saturating_add(selection.ranges.capacity().saturating_mul(std::mem::size_of::<gridcraft_core::RangeRef>()))
+        .saturating_add(std::mem::size_of::<HistoryEntry>())
+}
+
+/// Index of the oldest entry retained by the default 100-step / 128 MiB history policy.
+/// The latest entry is always retained, even when oversized; an empty history returns zero.
+/// This reads the supplied candidate history without changing its entries or workbook content
+/// (model allocation-summary caches may initialize). It describes a completed history boundary,
+/// not the protected prefix of an open command/group, where trimming is deferred or tail-only.
+pub fn history_retained_start(history: &[HistoryEntry], current: &Workbook) -> usize {
+    let mut accounting = gridcraft_model::RetainedBytes::default();
+    accounting.seed_workbook(current);
+    let mut estimated = history.to_vec();
+    for (entry, estimate) in history.iter().zip(&mut estimated).rev() {
+        // Read capacities from the original: cloning owned metadata can shrink spare capacity.
+        estimate.retained_bytes = history_entry_bytes(&entry.wb, &entry.label, &entry.selection, &mut accounting);
+    }
+    retention_index(&estimated, UNDO_LIMIT, UNDO_BYTES_LIMIT)
 }
 
 fn push_history(history: &mut Vec<HistoryEntry>, label: String, wb: Arc<Workbook>, next: &Workbook, selection: Selection) {
@@ -290,16 +310,24 @@ fn push_entry(history: &mut Vec<HistoryEntry>, label: String, wb: Arc<Workbook>,
 /// (even if that one edit exceeds the budget).
 fn trim_to_budget(history: &mut Vec<HistoryEntry>, current: &Workbook, byte_budget: usize) {
     account_history(history, current);
+    let start = retention_index(history, UNDO_LIMIT, byte_budget);
+    history.drain(..start);
+}
+
+fn retention_index(history: &[HistoryEntry], step_limit: usize, byte_budget: usize) -> usize {
+    let mut start = 0;
     let mut total = history.iter().fold(0usize, |sum, entry| sum.saturating_add(entry.retained_bytes));
-    while history.len() > 1 && (history.len() > UNDO_LIMIT || total > byte_budget) {
-        let removed = history.remove(0).retained_bytes;
+    while history.len() - start > 1 && (history.len() - start > step_limit || total > byte_budget) {
+        let removed = history[start].retained_bytes;
+        start += 1;
         // Subtracting from a saturated sum can understate what the remaining entries retain.
         total = if total == usize::MAX {
-            history.iter().fold(0usize, |sum, entry| sum.saturating_add(entry.retained_bytes))
+            history[start..].iter().fold(0usize, |sum, entry| sum.saturating_add(entry.retained_bytes))
         } else {
             total.saturating_sub(removed)
         };
     }
+    start
 }
 
 impl DocState {

@@ -36,7 +36,7 @@ use std::sync::Arc;
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
 use gridcraft_engine::calc::Calc;
 use gridcraft_engine::model::{CalcMode, Formula, Sheet, SheetViewMode, Workbook};
-use gridcraft_engine::{EngineError, Session, command_specs, find_command, io};
+use gridcraft_engine::{EngineError, HistoryEntry, Selection, Session, command_specs, find_command, history_retained_start, io};
 use serde_json::{Value as Json, json};
 
 const SAMPLES: [&str; 3] = ["sales", "budget", "grades"];
@@ -220,6 +220,21 @@ fn shrink(sample: &str, steps: &[Step], kind: &str) -> Vec<Step> {
 
 struct Harness {
     s: Session,
+    // These checkpoints come from command-before workbooks, never from the surviving stack.
+    base: Arc<Workbook>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+    group_start: Option<HistoryEntry>,
+}
+
+fn checkpoint(wb: Arc<Workbook>, selection: Selection, label: String) -> HistoryEntry {
+    HistoryEntry { wb, selection, label, retained_bytes: 0 }
+}
+
+fn retain_expected(history: &mut Vec<HistoryEntry>, current: &Workbook) -> usize {
+    let start = history_retained_start(history, current);
+    history.drain(..start);
+    start
 }
 
 fn fail(step: usize, kind: &'static str, what: impl Into<String>) -> Failure {
@@ -242,7 +257,8 @@ impl Harness {
     fn new(sample: &str) -> Harness {
         let mut s = Session::new();
         s.execute("file.new", json!({"sample": sample})).expect("sample opens");
-        Harness { s }
+        let base = s.doc().expect("document").wb.clone();
+        Harness { s, base, undo: Vec::new(), redo: Vec::new(), group_start: None }
     }
 
     fn wb(&self) -> Arc<Workbook> {
@@ -251,14 +267,8 @@ impl Harness {
 
     fn step(&mut self, i: usize, id: &str, params: &Json) -> Result<(), Failure> {
         let before = self.wb();
-        let r = self.s.execute(id, params.clone());
+        self.execute_checked(i, id, params)?;
         self.s.take_ui_requests();
-        if let Err(EngineError::Internal(_, msg)) = &r {
-            return Err(fail(i, "panic", format!("`{id}` panicked (caught by Session::execute): {msg}")));
-        }
-        if self.s.documents().len() != 1 {
-            return Err(fail(i, "documents", format!("`{id}` changed the number of open documents; exclude it in EXCLUDED")));
-        }
         let after = self.wb();
         let spec = find_command(id).expect("generated ids are registered");
         if !spec.undoable
@@ -277,6 +287,84 @@ impl Harness {
         Ok(())
     }
 
+    /// Compare against independent checkpoints before accepting the engine's history. A short
+    /// stack is only valid after the policy predictor removed that exact prefix from our copy.
+    fn check_history(&self, i: usize) -> Result<(), Failure> {
+        let d = self.s.doc().expect("document");
+        for (kind, expected, actual) in [("undo", &self.undo, &d.undo), ("redo", &self.redo, &d.redo)] {
+            if expected.len() != actual.len() {
+                return Err(fail(i, kind, format!("expected {} independently tracked entries, got {}", expected.len(), actual.len())));
+            }
+            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+                if let Some(diff) = workbook_diff(&expected.wb, &actual.wb) {
+                    return Err(fail(i, kind, format!("checkpoint {index} differs from its command-before workbook: {diff}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_checked(&mut self, i: usize, id: &str, params: &Json) -> Result<(), Failure> {
+        self.check_history(i)?;
+        let d = self.s.doc().expect("document");
+        let before = d.wb.clone();
+        let selection = d.selection.clone();
+        let was_grouped = self.s.in_group(d.uid);
+        let result = self.s.execute(id, params.clone());
+        if let Err(EngineError::Internal(_, msg)) = &result {
+            return Err(fail(i, "panic", format!("`{id}` panicked (caught by Session::execute): {msg}")));
+        }
+        if self.s.documents().len() != 1 {
+            return Err(fail(i, "documents", format!("`{id}` changed the number of open documents; exclude it in EXCLUDED")));
+        }
+        let after = self.wb();
+        let grouped = self.s.in_group(self.s.doc().expect("document").uid);
+        let spec = find_command(id).expect("generated ids are registered");
+        if !was_grouped && grouped {
+            let name = &self.s.macro_debug.as_ref().expect("only debugger commands leave groups open").name;
+            self.group_start = Some(checkpoint(before.clone(), selection.clone(), format!("Run Macro: {name}")));
+        } else if was_grouped && !grouped {
+            let start = self.group_start.take().expect("group start was captured independently");
+            if !Arc::ptr_eq(&start.wb, &after) {
+                self.undo.push(start);
+                self.redo.clear();
+            }
+        } else if !grouped {
+            if matches!(id, "edit.undo" | "edit.redo") && result.is_ok() {
+                let steps = params.get("steps").and_then(Json::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(1).max(1);
+                let mut current = before.clone();
+                let mut current_selection = selection.clone();
+                let (source, target) = if id == "edit.undo" { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+                for _ in 0..steps {
+                    let Some(entry) = source.pop() else { break };
+                    let next_selection = entry.selection.clone();
+                    let saved_selection = if id == "edit.undo" { entry.selection } else { current_selection };
+                    target.push(checkpoint(current, saved_selection, entry.label));
+                    current = entry.wb;
+                    current_selection = next_selection;
+                    let evicted = retain_expected(target, &current);
+                    if id == "edit.redo" && evicted != 0 {
+                        self.base = target.first().expect("policy retains latest entry").wb.clone();
+                    }
+                }
+                if let Some(diff) = workbook_diff(&current, &after) {
+                    return Err(fail(i, "history transition", format!("`{id}` did not reach its independently tracked target: {diff}")));
+                }
+            } else if spec.undoable && !Arc::ptr_eq(&before, &after) {
+                self.undo.push(checkpoint(before, selection, spec.label.trim_end_matches('…').to_string()));
+                self.redo.clear();
+            }
+        }
+        if !grouped {
+            let evicted = retain_expected(&mut self.undo, &after);
+            if evicted != 0 {
+                self.base = self.undo.first().expect("policy retains latest entry").wb.clone();
+            }
+            retain_expected(&mut self.redo, &after);
+        }
+        self.check_history(i)
+    }
+
     /// Structure and recalculation invariants on the current state.
     fn check_state(&self, i: usize) -> Result<(), Failure> {
         let d = self.s.doc().expect("document");
@@ -291,13 +379,12 @@ impl Harness {
     /// eviction can make the episode's original start or end unreachable; the retained snapshots
     /// are still required to round-trip exactly, including formula modes and spill state.
     fn end_episode(&mut self, i: usize) -> Result<(), Failure> {
+        self.check_history(i)?;
         let end = self.wb();
-        let retained_start = self.s.doc().expect("document").undo.first().map_or_else(|| end.clone(), |e| e.wb.clone());
+        let retained_start = self.base.clone();
         let mut n = 0;
         while !self.s.doc().expect("document").undo.is_empty() {
-            if let Err(EngineError::Internal(_, msg)) = self.s.execute("edit.undo", json!({})) {
-                return Err(fail(i, "panic", format!("`edit.undo` panicked while undoing everything: {msg}")));
-            }
+            self.execute_checked(i, "edit.undo", &json!({}))?;
             n += 1;
             if n > 1_000 {
                 return Err(fail(i, "undo", "undo never empties its history"));
@@ -313,14 +400,12 @@ impl Harness {
         self.check_state(i)?;
         // Only this batch's still-retained steps: earlier sequence undos may have left more,
         // and building redo history can itself evict its oldest entries under the byte budget.
-        let redo = &self.s.doc().expect("document").redo;
+        let redo = &self.redo;
         let redo_count = n.min(redo.len());
         let retained_end =
             if redo_count == n { end.clone() } else { redo.get(redo.len() - redo_count).map_or_else(|| undone.clone(), |e| e.wb.clone()) };
         for _ in 0..redo_count {
-            if let Err(EngineError::Internal(_, msg)) = self.s.execute("edit.redo", json!({})) {
-                return Err(fail(i, "panic", format!("`edit.redo` panicked while redoing everything: {msg}")));
-            }
+            self.execute_checked(i, "edit.redo", &json!({}))?;
         }
         if let Some(diff) = workbook_diff(&retained_end, &self.wb()) {
             return Err(fail(i, "redo", format!("redoing all {redo_count} retained steps doesn't give back their final workbook: {diff}")));
@@ -338,6 +423,9 @@ impl Harness {
         let d = self.s.active_mut().expect("document");
         d.undo.clear();
         d.redo.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.base = self.wb();
         Ok(())
     }
 
@@ -1149,16 +1237,55 @@ fn view_mode_switch_is_not_an_undo_difference() {
 }
 
 #[test]
-fn episode_checks_follow_evicted_undo_history() {
+fn episode_rejects_missing_undo_after_small_edit() {
     let mut h = Harness::new("sales");
-    for i in 1..=3 {
-        h.s.execute("cell.set", json!({"cell":"A1", "input":i.to_string()})).unwrap();
+    h.step(0, "cell.set", &json!({"cell":"A1", "input":"1"})).unwrap();
+    h.s.doc_mut().unwrap().undo.clear();
+    assert!(h.end_episode(1).is_err(), "lost undo must not become a new expected start");
+}
+
+#[test]
+fn episode_rejects_wrong_undo_after_small_edit() {
+    let mut h = Harness::new("sales");
+    h.step(0, "cell.set", &json!({"cell":"A1", "input":"1"})).unwrap();
+    let wrong = h.wb();
+    h.s.doc_mut().unwrap().undo[0].wb = wrong;
+    assert!(h.end_episode(1).is_err(), "a wrong snapshot must not become its own oracle");
+}
+
+#[test]
+fn episode_checks_follow_validated_count_eviction() {
+    let mut h = Harness::new("sales");
+    let original = h.base.clone();
+    for i in 0..105 {
+        h.execute_checked(i, "cell.set", &json!({"cell":"A1", "input":i.to_string()})).unwrap();
     }
-    // Deterministically model the byte policy evicting the first two steps, without allocating
-    // hundreds of megabytes just to test the harness. Seed 1 also exercises real byte eviction.
-    h.s.doc_mut().unwrap().undo.drain(..2);
+    assert_eq!(h.undo.len(), 100);
+    assert!(workbook_diff(&original, &h.base).is_some());
     let end = h.wb();
-    h.end_episode(3).unwrap();
+    h.end_episode(105).unwrap();
+    assert_eq!(workbook_diff(&end, &h.wb()), None);
+}
+
+#[test]
+fn episode_keeps_independent_start_across_explicit_undo_redo() {
+    let mut h = Harness::new("sales");
+    let original = h.base.clone();
+    for (i, (id, params)) in [
+        ("cell.set", json!({"cell":"A1", "input":"1"})),
+        ("cell.set", json!({"cell":"A1", "input":"2"})),
+        ("edit.undo", json!({"steps":2})),
+        ("edit.redo", json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.step(i, id, &params).unwrap();
+    }
+    assert_eq!(workbook_diff(&original, &h.base), None);
+    assert_eq!(h.redo.len(), 1, "pre-existing redo must remain outside the episode undo batch");
+    let end = h.wb();
+    h.end_episode(4).unwrap();
     assert_eq!(workbook_diff(&end, &h.wb()), None);
 }
 
@@ -1175,12 +1302,9 @@ fn retained_history_comparison_keeps_formula_modes_and_spills() {
     assert!(workbook_diff(&a, &b).is_some());
 }
 
-#[test]
-fn episode_checks_the_furthest_retained_redo_after_byte_eviction() {
-    let mut h = Harness::new("sales");
-    h.s.execute("cell.set", json!({"cell":"A1", "input":"1"})).unwrap();
+fn oversized_note(h: &mut Harness, value: &str) {
     let mut text = String::with_capacity(80 * 1024 * 1024);
-    text.push_str("middle");
+    text.push_str(value);
     Arc::make_mut(&mut h.s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().comments_mut().insert(
         CellRef::new(0, 0),
         gridcraft_model::Comment {
@@ -1194,11 +1318,34 @@ fn episode_checks_the_furthest_retained_redo_after_byte_eviction() {
             note_box: None,
         },
     );
+}
+
+#[test]
+fn episode_checks_follow_validated_byte_eviction() {
+    let mut h = Harness::new("sales");
+    oversized_note(&mut h, "note 0");
+    h.base = h.wb(); // Independent initial fixture, before any command/history exists.
+    let original = h.base.clone();
+    let mut checkpoints = Vec::new();
+    for i in 0..4 {
+        oversized_note(&mut h, &format!("note {i}"));
+        checkpoints.push(h.wb());
+        h.execute_checked(i, "cell.set", &json!({"cell":"A1", "input":i.to_string()})).unwrap();
+    }
+    assert_eq!(h.undo.len(), 2, "two history-only 80 MiB notes cannot fit the default budget");
+    assert_eq!(workbook_diff(&checkpoints[2], &h.base), None, "base advances only by the policy-validated prefix");
+    assert!(workbook_diff(&original, &h.base).is_some());
+    h.end_episode(4).unwrap();
+}
+
+#[test]
+fn episode_checks_the_furthest_retained_redo_after_byte_eviction() {
+    let mut h = Harness::new("sales");
+    h.execute_checked(0, "cell.set", &json!({"cell":"A1", "input":"1"})).unwrap();
+    oversized_note(&mut h, "middle");
     let middle = h.wb();
-    h.s.execute("cell.set", json!({"cell":"A1", "input":"2"})).unwrap();
-    let mut text = String::with_capacity(80 * 1024 * 1024);
-    text.push_str("final");
-    Arc::make_mut(&mut h.s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().comments_mut().get_mut(&CellRef::new(0, 0)).unwrap().text = text;
+    h.execute_checked(1, "cell.set", &json!({"cell":"A1", "input":"2"})).unwrap();
+    oversized_note(&mut h, "final");
     let end = h.wb();
     assert_eq!(h.s.doc().unwrap().undo.len(), 2);
     // Capacity makes each version exceed half the real 128 MiB budget without a huge serialized
@@ -1206,4 +1353,26 @@ fn episode_checks_the_furthest_retained_redo_after_byte_eviction() {
     h.end_episode(2).unwrap();
     assert_eq!(workbook_diff(&middle, &h.wb()), None, "one retained redo must run");
     assert!(workbook_diff(&end, &h.wb()).is_some(), "the evicted farther future is unreachable");
+}
+
+#[test]
+fn independent_checkpoints_survive_debugger_group_commit_and_rollback() {
+    for keep in [false, true] {
+        let mut h = Harness::new("sales");
+        let mac = gridcraft_engine::macros::parse_macro(&json!({
+            "name":"Checkpoint", "steps":[
+                {"command":"cell.set", "params":{"cell":"X1", "input":"first"}},
+                {"command":"cell.set", "params":{"cell":"Y1", "input":"second"}}
+            ]
+        }))
+        .unwrap();
+        Arc::make_mut(&mut h.s.doc_mut().unwrap().wb).macros.push(mac);
+        h.base = h.wb(); // Independent initial fixture, with no history yet.
+        h.execute_checked(0, "macro.debug", &json!({"action":"start", "name":"Checkpoint", "breakpoints":["1"]})).unwrap();
+        assert!(h.s.in_group(h.s.doc().unwrap().uid));
+        h.execute_checked(1, "macro.debug", &json!({"action":"step"})).unwrap();
+        h.execute_checked(2, "macro.debug", &json!({"action":"stop", "keep":keep})).unwrap();
+        assert_eq!(h.undo.len(), usize::from(keep));
+        h.end_episode(3).unwrap();
+    }
 }
