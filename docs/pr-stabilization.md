@@ -72,3 +72,26 @@ cargo test --locked -p gridcraft-engine --test it recalc_invariants
 cargo test --locked -p gridcraft-engine --test it legacy_implicit_intersection
 cargo test --locked -p gridcraft-engine --test it whatif_tables
 ~~~
+
+## Bound MCP stdio input before accumulation
+
+[Bounded reader source: PR #2326](https://github.com/storytold/gridcraft/pull/2326),
+reviewed at e7cda6337b5ec39dacee91ec67075f69077c80b6.
+
+The stdio server now caps each retained raw frame at the existing 16 MiB payload
+limit plus two framing bytes, before accumulating input. Oversized frames drain
+through their newline or EOF, produce one size error, and leave the next request
+intact. Exact-limit payloads with LF, CRLF or EOF retain their existing behavior.
+
+Excess raw whitespace padding is refused rather than buffered indefinitely.
+Oversized invalid UTF-8 receives the size error first; ordinary invalid UTF-8
+retains its parse error. This bounds retained input length; it does not measure
+Vec capacity, process RSS, parser/backend allocations or drain time.
+
+Six streaming/boundary regressions exercise the actual reader and server, including
+EOF, invalid UTF-8, one-byte-over payloads and exactly one following ping response.
+
+~~~sh
+cargo test --locked -p gridcraft-mcp framing_
+cargo test --locked -p gridcraft-mcp
+~~~
