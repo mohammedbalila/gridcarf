@@ -753,3 +753,61 @@ fn check_detects_theme_changes_behind_shared_style_indices() {
     b.theme.colors[4] = 0x123456;
     assert!(category_diffs(&a, &b, "styles") > 0);
 }
+
+#[test]
+fn check_detects_default_row_override_lost_at_styled_column_intersections() {
+    use gridcraft_engine::model::{LineInfo, Style, StyleId};
+    // Both a nearby blank intersection and the grid's far edge must remain sparse.
+    for address in ["A2", "XFD1048576"] {
+        let cell = at(address);
+        let mut a = book(&[]);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold_id = a.styles.intern(bold);
+        let sheet = a.sheet_mut(0).unwrap();
+        sheet.cols.insert(cell.col, LineInfo { style: Some(bold_id), ..Default::default() });
+        sheet.rows.insert(cell.row, LineInfo { style: Some(StyleId::DEFAULT), ..Default::default() });
+        assert!(sheet.cells.is_empty());
+        assert_eq!(sheet.style_id(cell), StyleId::DEFAULT);
+        let mut b = a.clone();
+        b.sheet_mut(0).unwrap().rows.get_mut(&cell.row).unwrap().style = None;
+        assert_eq!(b.sheet(0).unwrap().style_id(cell), bold_id);
+        assert!(category_diffs(&a, &b, "styles") > 0, "lost row override at {address}");
+    }
+}
+
+#[test]
+fn check_detects_empty_cell_override_lost_to_row_or_column_inheritance() {
+    use gridcraft_engine::model::{LineInfo, Style, StyleId};
+    for from_row in [false, true] {
+        let cell = at("A2");
+        let mut a = book(&[("A2", "1", n(1.0))]);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold_id = a.styles.intern(bold);
+        let sheet = a.sheet_mut(0).unwrap();
+        let lines = if from_row { &mut sheet.rows } else { &mut sheet.cols };
+        let line = if from_row { cell.row } else { cell.col };
+        lines.insert(line, LineInfo { style: Some(bold_id), ..Default::default() });
+        // Clearing content through a mutable cell retains its explicit default style record.
+        sheet.cells.get_mut(cell).unwrap().clear_content();
+        assert!(sheet.cell(cell).is_some());
+        assert_eq!(sheet.style_id(cell), StyleId::DEFAULT);
+        let mut b = a.clone();
+        assert!(b.sheet_mut(0).unwrap().remove_cell(cell).is_some());
+        assert_eq!(b.sheet(0).unwrap().style_id(cell), bold_id);
+        assert_eq!(category_diffs(&a, &b, "values"), 0);
+        assert!(category_diffs(&a, &b, "styles") > 0, "lost cell override, row inheritance={from_row}");
+    }
+}
+
+#[test]
+fn check_ignores_default_line_styles_without_changed_inheritance() {
+    use gridcraft_engine::model::{LineInfo, StyleId};
+    let a = book(&[]);
+    let mut b = a.clone();
+    let sheet = b.sheet_mut(0).unwrap();
+    sheet.cols.insert(0, LineInfo { style: Some(StyleId::DEFAULT), ..Default::default() });
+    sheet.rows.insert(1, LineInfo { style: Some(StyleId::DEFAULT), ..Default::default() });
+    assert_eq!(category_diffs(&a, &b, "styles"), 0);
+}

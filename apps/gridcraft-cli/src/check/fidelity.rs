@@ -91,15 +91,15 @@ fn diff_payload<T: PartialEq + ?Sized>(d: &mut Diffs, sheet: &str, a: &T, b: &T)
 }
 
 /// Resolve style table indices before comparing: interning order isn't document content.
-fn style<'a>(wb: &'a Workbook, c: Option<&Cell>) -> &'a Style {
-    wb.styles.get(c.map(|c| c.style).unwrap_or_default())
+fn style<'a>(wb: &'a Workbook, sheet: &Sheet, cell: CellRef) -> &'a Style {
+    wb.styles.get(sheet.style_id(cell))
 }
 
-fn line_styles<'a>(wb: &'a Workbook, lines: &BTreeMap<u32, gridcraft_engine::model::LineInfo>) -> BTreeMap<u32, &'a Style> {
+fn line_styles<'a>(wb: &'a Workbook, lines: &BTreeMap<u32, gridcraft_engine::model::LineInfo>, retain_default: bool) -> BTreeMap<u32, &'a Style> {
     lines
         .iter()
         .filter_map(|(i, line)| line.style.map(|id| (*i, wb.styles.get(id))))
-        .filter(|(_, s)| **s != *wb.styles.get(StyleId::DEFAULT))
+        .filter(|(_, s)| retain_default || **s != *wb.styles.get(StyleId::DEFAULT))
         .collect()
 }
 
@@ -182,7 +182,7 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
             if fa != fb {
                 formulas.push(|| format!("{name}!{}: {fa} → {fb}", c.a1()));
             }
-            if style(a, ca) != style(b, cb) {
+            if style(a, sa, c) != style(b, sb, c) {
                 styles.push(|| format!("{name}!{}: style changed", c.a1()));
             }
             let (ma, mb) =
@@ -314,8 +314,13 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
                 .collect::<Vec<_>>()
         };
         diff_payload(&mut shapes, &name, &shape_list(sa), &shape_list(sb));
-        diff_payload(&mut styles, &format!("{name} rows"), &line_styles(a, &sa.rows), &line_styles(b, &sb.rows));
-        diff_payload(&mut styles, &format!("{name} columns"), &line_styles(a, &sa.cols), &line_styles(b, &sb.cols));
+        let (cols_a, cols_b) = (line_styles(a, &sa.cols, false), line_styles(b, &sb.cols, false));
+        // An explicit default row style overrides nondefault column styles. Only discard it
+        // when all columns already fall back to default. This preserves inheritance at blank
+        // row/column intersections without expanding the row × column cross product.
+        let (rows_a, rows_b) = (line_styles(a, &sa.rows, !cols_a.is_empty()), line_styles(b, &sb.rows, !cols_b.is_empty()));
+        diff_payload(&mut styles, &format!("{name} rows"), &rows_a, &rows_b);
+        diff_payload(&mut styles, &format!("{name} columns"), &cols_a, &cols_b);
         diff_payload(&mut print_settings, &name, &sa.print, &sb.print);
     }
     let mut names = Diffs::new("names", m);
