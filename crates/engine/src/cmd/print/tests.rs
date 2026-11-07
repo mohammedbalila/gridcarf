@@ -16,6 +16,43 @@ fn contains(hay: &[u8], needle: &str) -> bool {
     hay.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
 
+fn incomplete_cf_session() -> Session {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell":"A1", "input":"Keep this workbook content"})).unwrap();
+    s.execute("home.conditionalFormat", json!({"range":"A1", "rule":{"type":"duplicate"}})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().cond_formats[0].ranges = vec![RangeRef::parse("A1").unwrap(); 4097];
+    s
+}
+
+#[test]
+fn cf_incomplete_export_and_print_refuse_before_writing() {
+    let mut s = incomplete_cf_session();
+    let path = std::env::temp_dir().join(format!("gridcraft-f01-print-{}-{}.pdf", std::process::id(), s.doc().unwrap().uid));
+    std::fs::write(&path, b"existing user bytes").unwrap();
+    for command in ["file.exportPdf", "file.print"] {
+        let result = s.execute(command, json!({"path":path}));
+        let bytes = std::fs::read(&path).unwrap();
+        // Always remove our synthetic file, even when the regression assertion fails.
+        std::fs::remove_file(&path).unwrap();
+        assert!(result.is_err(), "{command} must report incomplete formatting");
+        assert_eq!(bytes, b"existing user bytes");
+        std::fs::write(&path, b"existing user bytes").unwrap();
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn cf_incomplete_legacy_pdf_keeps_content_and_adds_one_diagnostic() {
+    let s = incomplete_cf_session();
+    let wb = &s.doc().unwrap().wb;
+    let lays = layouts(wb, &PrintOptions::default());
+    let (bytes, pages) = render_pdf(wb, &lays, "book", "");
+    assert!(contains(&bytes, "Keep this workbook content"));
+    assert_eq!(pages, 2);
+    assert!(contains(&bytes, "Conditional formatting is incomplete"));
+}
+
 #[test]
 fn chart_data_table_prints_formatted_values_and_follows_recalculation() {
     let mut s = s();

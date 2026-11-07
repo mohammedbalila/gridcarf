@@ -20,10 +20,87 @@ pub struct CfLook {
     pub hide_value: bool,
 }
 
-/// Precomputed statistics per rule (min/max/percentiles/top-N thresholds/duplicates).
+/// Why complete conditional-format statistics could not be evaluated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CfIncomplete {
+    WorkLimit,
+    MemoryLimit,
+    AllocationFailed,
+    InvalidNumber,
+}
+
+impl std::fmt::Display for CfIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::WorkLimit => "Conditional formatting is incomplete: statistics work limit reached.",
+            Self::MemoryLimit => "Conditional formatting is incomplete: statistics memory limit reached.",
+            Self::AllocationFailed => "Conditional formatting is incomplete: statistics allocation failed.",
+            Self::InvalidNumber => "Conditional formatting is incomplete: numeric statistics are not finite.",
+        })
+    }
+}
+
+impl std::error::Error for CfIncomplete {}
+
+/// Statistics for one immutable sheet snapshot. A persistent caller must replace this cache
+/// when its document, sheet or data/rule revision changes; it never owns workbook payloads.
 #[derive(Default)]
 pub struct CfCache {
-    stats: HashMap<usize, RuleStats>,
+    stats: HashMap<usize, Result<RuleStats, CfIncomplete>>,
+    budget: StatsBudget,
+    incomplete: Option<CfIncomplete>,
+    exhausted: bool,
+}
+
+const MAX_STATS_METADATA: usize = 4096;
+
+struct StatsBudget {
+    work: usize,
+    bytes: usize,
+    work_limit: usize,
+    byte_limit: usize,
+}
+
+impl Default for StatsBudget {
+    fn default() -> Self {
+        Self { work: 0, bytes: 0, work_limit: 64_000_000, byte_limit: 64 * 1024 * 1024 }
+    }
+}
+
+impl StatsBudget {
+    fn charge(&mut self, n: usize) -> Result<(), CfIncomplete> {
+        self.work = self.work.saturating_add(n);
+        if self.work > self.work_limit { Err(CfIncomplete::WorkLimit) } else { Ok(()) }
+    }
+
+    fn check_memory(&self, additional: usize) -> Result<(), CfIncomplete> {
+        if additional > self.byte_limit.saturating_sub(self.bytes) { Err(CfIncomplete::MemoryLimit) } else { Ok(()) }
+    }
+}
+
+// Account buckets, hash control bytes and fixed overhead conservatively, including spare
+// capacity. This is an allocation estimate, not a process RSS or allocator-overhead guarantee.
+fn hash_bytes<K, V>(capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    capacity.checked_next_power_of_two().unwrap_or(usize::MAX).saturating_mul(std::mem::size_of::<(K, V)>().saturating_add(1)).saturating_add(32)
+}
+
+fn reserve_map<K: std::hash::Hash + Eq, V>(map: &mut HashMap<K, V>, budget: &mut StatsBudget) -> Result<(), CfIncomplete> {
+    if map.len() < map.capacity() {
+        return Ok(());
+    }
+    budget.charge(map.len())?;
+    let old = hash_bytes::<K, V>(map.capacity());
+    let target = map.capacity().max(4).saturating_mul(2);
+    // Keep the old allocation charged during growth and allow for the table's bucket rounding.
+    budget.check_memory(hash_bytes::<K, V>(target.saturating_mul(2)))?;
+    map.try_reserve(target.saturating_sub(map.len())).map_err(|_| CfIncomplete::AllocationFailed)?;
+    let new = hash_bytes::<K, V>(map.capacity());
+    budget.check_memory(new.saturating_sub(old))?;
+    budget.bytes = budget.bytes.saturating_add(new.saturating_sub(old));
+    Ok(())
 }
 
 #[derive(Default, Clone)]
@@ -34,13 +111,10 @@ struct RuleStats {
     counts: HashMap<String, usize>,
 }
 
-/// Which statistics a rule reads. Scanning the rule's whole range for them costs O(range), so
-/// rules that read none (cell value, formula, text, blanks, errors, dates) never scan.
+/// Rules that read no statistics never scan the sheet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StatsNeed {
-    /// Sorted numbers, their mean and deviation (top/bottom N, above average, scales, bars, icons).
     Numbers,
-    /// How often each displayed text occurs (duplicate / unique values).
     Counts,
 }
 
@@ -54,50 +128,155 @@ fn stats_need(rule: &CfRule) -> Option<StatsNeed> {
     }
 }
 
-impl RuleStats {
-    fn build(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed) -> RuleStats {
-        let (sorted, counts) = numbers_in(sh, ranges, need);
-        let n = sorted.len().max(1) as f64;
-        let avg = sorted.iter().sum::<f64>() / n;
-        let std = (sorted.iter().map(|x| (x - avg).powi(2)).sum::<f64>() / n).sqrt();
-        RuleStats { sorted, avg, std, counts }
-    }
-}
-
 #[cfg(test)]
 thread_local! {
-    /// Cells `numbers_in` visited on this thread (tests count the work a lookup does).
+    /// Sparse candidates visited on this thread; absent rectangular cells cost no scan work.
     static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn numbers_in(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed) -> (Vec<f64>, HashMap<String, usize>) {
-    let mut nums = Vec::new();
-    let mut counts = HashMap::new();
-    for r in ranges {
-        let r = match sh.used_range().and_then(|u| r.intersection(&u)) {
-            Some(x) => x,
-            None => continue,
-        };
-        for c in r.iter().take(2_000_000) {
-            #[cfg(test)]
-            SCANNED.with(|n| n.set(n.get() + 1));
-            let v = sh.value(c);
-            match need {
-                StatsNeed::Numbers => {
-                    if let Value::Number(n) = v {
-                        nums.push(n);
-                    }
+impl RuleStats {
+    fn build(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed, budget: &mut StatsBudget) -> Result<Self, CfIncomplete> {
+        if ranges.len() > MAX_STATS_METADATA {
+            return Err(CfIncomplete::WorkLimit);
+        }
+        let mut bounds: Option<RangeRef> = None;
+        for range in ranges {
+            budget.charge(1)?;
+            if range.start.row <= range.end.row && range.start.col <= range.end.col {
+                bounds = Some(bounds.map_or(*range, |b| b.union(range)));
+            }
+        }
+        let mut stats = Self::default();
+        if let Some(bounds) = bounds {
+            // iter_range hides work in populated rows with no selected columns. Charge every
+            // stored candidate instead so even hostile sparse-column shapes have bounded work.
+            for (c, _) in sh.cells.iter() {
+                budget.charge(1)?;
+                #[cfg(test)]
+                SCANNED.with(|n| n.set(n.get().saturating_add(1)));
+                if bounds.contains(c) {
+                    stats.visit(sh, c, ranges, need, budget)?;
                 }
-                StatsNeed::Counts => {
-                    if !v.is_empty() {
-                        *counts.entry(v.display().to_lowercase()).or_insert(0) += 1;
-                    }
+            }
+            for (&c, _) in sh.spill.range(bounds.start..=bounds.end) {
+                budget.charge(1)?;
+                #[cfg(test)]
+                SCANNED.with(|n| n.set(n.get().saturating_add(1)));
+                if bounds.contains(c) && sh.cells.get(c).is_none() {
+                    stats.visit(sh, c, ranges, need, budget)?;
                 }
             }
         }
+        let len = stats.sorted.len();
+        // Unstable sort is in-place with bounded stack; total_cmp remains valid for every f64.
+        let levels = usize::BITS - len.saturating_sub(1).leading_zeros();
+        budget.charge(len.saturating_mul(levels as usize).saturating_add(len.saturating_mul(2)))?;
+        stats.sorted.sort_unstable_by(f64::total_cmp);
+        let n = len.max(1) as f64;
+        stats.avg = stats.sorted.iter().sum::<f64>() / n;
+        stats.std = (stats.sorted.iter().map(|x| (x - stats.avg).powi(2)).sum::<f64>() / n).sqrt();
+        if !stats.avg.is_finite() || !stats.std.is_finite() {
+            return Err(CfIncomplete::InvalidNumber);
+        }
+        Ok(stats)
     }
-    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    (nums, counts)
+
+    fn visit(&mut self, sh: &Sheet, c: CellRef, ranges: &[RangeRef], need: StatsNeed, budget: &mut StatsBudget) -> Result<(), CfIncomplete> {
+        budget.charge(1)?;
+        let mut inside = false;
+        for range in ranges {
+            budget.charge(1)?;
+            if range.contains(c) {
+                inside = true;
+                break;
+            }
+        }
+        if !inside {
+            return Ok(());
+        }
+        let Some(value) = sh.value_ref(c) else {
+            return Ok(());
+        };
+        match need {
+            StatsNeed::Numbers => {
+                if let Value::Number(number) = value {
+                    if !number.is_finite() {
+                        return Err(CfIncomplete::InvalidNumber);
+                    }
+                    if self.sorted.len() == self.sorted.capacity() {
+                        let old = self.sorted.capacity().saturating_mul(std::mem::size_of::<f64>());
+                        let target = self.sorted.capacity().max(8).saturating_mul(2);
+                        budget.check_memory(target.saturating_mul(std::mem::size_of::<f64>()))?;
+                        self.sorted.try_reserve_exact(target.saturating_sub(self.sorted.len())).map_err(|_| CfIncomplete::AllocationFailed)?;
+                        let new = self.sorted.capacity().saturating_mul(std::mem::size_of::<f64>());
+                        budget.check_memory(new.saturating_sub(old))?;
+                        budget.bytes = budget.bytes.saturating_add(new.saturating_sub(old));
+                    }
+                    self.sorted.push(*number);
+                }
+            }
+            StatsNeed::Counts if !value.is_empty() => {
+                let key = count_key(value, budget)?;
+                // Keep the temporary string charged while the hash table may grow.
+                budget.check_memory(key.capacity())?;
+                budget.bytes = budget.bytes.saturating_add(key.capacity());
+                if let Some(count) = self.counts.get_mut(&key) {
+                    *count = count.saturating_add(1);
+                    budget.bytes = budget.bytes.saturating_sub(key.capacity());
+                } else {
+                    if self.counts.len() == self.counts.capacity() {
+                        // Rehashing revisits earlier strings. Long early keys can otherwise be
+                        // hashed repeatedly without charging their bytes during table growth.
+                        budget.charge(self.counts.len())?;
+                        for old in self.counts.keys() {
+                            budget.charge(old.len())?;
+                        }
+                    }
+                    reserve_map(&mut self.counts, budget)?;
+                    self.counts.insert(key, 1);
+                }
+            }
+            StatsNeed::Counts => {}
+        }
+        Ok(())
+    }
+}
+
+fn count_key(mut value: &Value, budget: &mut StatsBudget) -> Result<String, CfIncomplete> {
+    let mut in_array = false;
+    while let Value::Array(array) = value {
+        budget.charge(1)?;
+        let Some(first) = array.data.first() else {
+            return Ok(String::new());
+        };
+        value = first;
+        in_array = true;
+    }
+    // Value::display treats an array whose first scalar is an error as empty text.
+    let owned;
+    let text = match value {
+        Value::Text(text) => text.as_ref(),
+        Value::Bool(true) => "TRUE",
+        Value::Bool(false) => "FALSE",
+        Value::Error(error) if !in_array => error.as_str(),
+        Value::Number(_) => {
+            // number_to_text uses at most 30 fixed decimal places or a 15-digit exponent.
+            // Allow all its bounded intermediate formatting strings before calling display.
+            budget.check_memory(4096)?;
+            budget.charge(64)?;
+            owned = value.display();
+            owned.as_str()
+        }
+        _ => "",
+    };
+    // Unicode lowercase maps each scalar to at most three scalars (12 UTF-8 bytes), and
+    // String growth can double capacity. Include input/display and old/new output buffers.
+    // str::to_lowercase preserves contextual sigma; char-by-char conversion would not.
+    budget.charge(text.len().saturating_mul(4))?;
+    budget.check_memory(text.len().saturating_mul(48).saturating_add(4096))?;
+    let key = text.to_lowercase();
+    budget.check_memory(key.capacity())?;
+    Ok(key)
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -230,7 +409,43 @@ impl CfCache {
         Self::default()
     }
 
-    /// Conditional look of `c`, or `None` when no rule applies.
+    /// The first reason statistics are incomplete. Paint/export callers must disclose it;
+    /// `look` omits affected rules instead of returning thresholds from partial statistics.
+    pub fn incomplete(&self) -> Option<CfIncomplete> {
+        self.incomplete
+    }
+
+    fn record_incomplete(&mut self, reason: CfIncomplete) {
+        self.incomplete.get_or_insert(reason);
+        self.exhausted |= reason != CfIncomplete::InvalidNumber;
+    }
+
+    fn statistics(&mut self, idx: usize, sh: &Sheet, cf: &CondFormat, need: StatsNeed) -> Option<&RuleStats> {
+        if !self.stats.contains_key(&idx) {
+            if self.exhausted {
+                return None;
+            }
+            if self.stats.len() >= MAX_STATS_METADATA {
+                self.record_incomplete(CfIncomplete::WorkLimit);
+                return None;
+            }
+            if let Err(error) = reserve_map(&mut self.stats, &mut self.budget) {
+                self.record_incomplete(error);
+                return None;
+            }
+            let before = self.budget.bytes;
+            let stats = RuleStats::build(sh, &cf.ranges, need, &mut self.budget);
+            if let Err(error) = stats.as_ref() {
+                self.record_incomplete(*error);
+                // Partial builder payload has been dropped; consumed work is never refunded.
+                self.budget.bytes = before;
+            }
+            self.stats.insert(idx, stats);
+        }
+        self.stats.get(&idx).and_then(|stats| stats.as_ref().ok())
+    }
+
+    /// Conditional look of `c`, or `None` when no rule applies. Check `incomplete` as well.
     pub fn look(&mut self, wb: &Workbook, sheet: usize, c: CellRef) -> Option<CfLook> {
         let sh = wb.sheet(sheet)?;
         if sh.cond_formats.is_empty() {
@@ -246,7 +461,10 @@ impl CfCache {
         for (idx, cf) in rules {
             let first = RangeRef::top_left(&cf.ranges).unwrap_or(c);
             let st: &RuleStats = match stats_need(&cf.rule) {
-                Some(need) => &*self.stats.entry(idx).or_insert_with(|| RuleStats::build(sh, &cf.ranges, need)),
+                Some(need) => match self.statistics(idx, sh, cf, need) {
+                    Some(stats) => stats,
+                    None => continue,
+                },
                 None => &no_stats,
             };
             let text = v.display();
@@ -417,6 +635,165 @@ mod tests {
 
     use super::*;
 
+    fn bounded_book() -> Workbook {
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        for row in 0..500 {
+            sh.set_value(CellRef::new(row, 0), Value::Number(row as f64));
+        }
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::parse("A1:A500").unwrap()],
+            rule: CfRule::ColorScale { stops: vec![(CfValueKind::Min, Color::rgb(0, 0, 0)), (CfValueKind::Max, Color::rgb(200, 200, 200))] },
+            priority: 1,
+            stop_if_true: false,
+        });
+        wb
+    }
+
+    #[test]
+    fn statistics_refinement_charges_existing_text_when_hash_tables_grow() {
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        for row in 0..32 {
+            sh.set_value(CellRef::new(row, 0), Value::from(format!("{row:02}{}", "x".repeat(98))));
+        }
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::parse("A1:A32").unwrap()],
+            rule: CfRule::Duplicate { style: Box::default() },
+            priority: 1,
+            stop_if_true: false,
+        });
+        let mut cache = CfCache::new();
+        cache.budget.work_limit = 15_000;
+        cache.look(&wb, 0, CellRef::default());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::WorkLimit), "growth must charge rehashing prior keys, not just new strings");
+    }
+
+    #[test]
+    fn statistics_refinement_invalid_numbers_do_not_exhaust_unrelated_rules() {
+        let mut wb = bounded_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cond_formats[0].ranges = vec![RangeRef::parse("A1:A2").unwrap()];
+        sh.set_value(CellRef::new(1, 0), Value::Number(f64::NAN));
+        sh.set_value(CellRef::new(0, 1), Value::Number(0.0));
+        sh.set_value(CellRef::new(1, 1), Value::Number(10.0));
+        sh.cond_formats.push(CondFormat { ranges: vec![RangeRef::parse("B1:B2").unwrap()], ..sh.cond_formats[0].clone() });
+        let mut cache = CfCache::new();
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::InvalidNumber));
+        assert_eq!(cache.look(&wb, 0, CellRef::new(1, 1)).and_then(|l| l.scale_fill), Some([200, 200, 200]));
+        let work = cache.budget.work;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.budget.work, work, "invalid rule must retain its own failed result");
+    }
+
+    #[test]
+    fn statistics_memory_limit_drops_partial_numbers_and_caches_failure() {
+        let wb = bounded_book();
+        let mut cache = CfCache::new();
+        cache.budget.byte_limit = 4096;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::MemoryLimit));
+        let (bytes, work) = (cache.budget.bytes, cache.budget.work);
+        assert_eq!(bytes, hash_bytes::<usize, Result<RuleStats, CfIncomplete>>(cache.stats.capacity()), "partial numbers released");
+        assert!(cache.look(&wb, 0, CellRef::new(1, 0)).is_none());
+        assert_eq!((cache.budget.bytes, cache.budget.work), (bytes, work), "failed builds are not retried per cell");
+    }
+
+    #[test]
+    fn statistics_long_strings_are_bounded_and_prior_complete_rules_remain_usable() {
+        let mut wb = bounded_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 1), Value::from("x".repeat(2000)));
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::parse("B1").unwrap()],
+            rule: CfRule::Duplicate { style: Box::default() },
+            priority: 2,
+            stop_if_true: false,
+        });
+        let mut cache = CfCache::new();
+        cache.budget.byte_limit = 16 * 1024;
+        let first = cache.look(&wb, 0, CellRef::default());
+        assert!(first.is_some());
+        assert!(cache.look(&wb, 0, CellRef::new(0, 1)).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::MemoryLimit));
+        let work = cache.budget.work;
+        assert_eq!(cache.look(&wb, 0, CellRef::default()), first);
+        assert_eq!(cache.budget.work, work);
+        assert!(cache.budget.bytes <= cache.budget.byte_limit);
+    }
+
+    #[test]
+    fn statistics_count_string_and_hash_capacities_together() {
+        let mut wb = bounded_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        for row in 0..500 {
+            sh.set_value(CellRef::new(row, 0), Value::from(format!("key-{row}")));
+        }
+        sh.cond_formats[0].rule = CfRule::Duplicate { style: Box::default() };
+        let mut cache = CfCache::new();
+        cache.budget.byte_limit = 16 * 1024;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::MemoryLimit));
+        assert_eq!(cache.budget.bytes, hash_bytes::<usize, Result<RuleStats, CfIncomplete>>(cache.stats.capacity()));
+    }
+
+    #[test]
+    fn statistics_work_limit_charges_candidates_outside_the_envelope() {
+        let mut wb = bounded_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cond_formats[0].ranges = vec![RangeRef::parse("A1").unwrap()];
+        let mut cache = CfCache::new();
+        cache.budget.work_limit = 10;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::WorkLimit));
+        let work = cache.budget.work;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.budget.work, work);
+    }
+
+    #[test]
+    fn statistics_work_limit_charges_rejected_range_membership() {
+        let mut wb = bounded_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        let mut ranges = vec![RangeRef::parse("A500").unwrap(); 100];
+        ranges.push(RangeRef::parse("A1").unwrap());
+        sh.cond_formats[0].ranges = ranges;
+        let mut cache = CfCache::new();
+        cache.budget.work_limit = 150;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::WorkLimit));
+    }
+
+    #[test]
+    fn statistics_empty_and_reversed_ranges_do_not_enter_tree_range_queries() {
+        let wb = bounded_book();
+        let sh = wb.sheet(0).unwrap();
+        let reversed = RangeRef { start: CellRef::new(9, 2), end: CellRef::default() };
+        for ranges in [vec![], vec![reversed], vec![RangeRef::parse("Z1:Z3").unwrap()]] {
+            let stats = RuleStats::build(sh, &ranges, StatsNeed::Numbers, &mut StatsBudget::default()).unwrap();
+            assert!(stats.sorted.is_empty());
+        }
+        let stats = RuleStats::build(sh, &[reversed, RangeRef::parse("A1:A3").unwrap()], StatsNeed::Numbers, &mut StatsBudget::default()).unwrap();
+        assert_eq!(stats.sorted, vec![0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn statistics_metadata_exhaustion_is_bounded_and_does_not_discard_completed_entries() {
+        let mut wb = bounded_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cond_formats[0].ranges = vec![RangeRef::parse("A1").unwrap()];
+        let first = sh.cond_formats[0].clone();
+        sh.cond_formats = vec![first; MAX_STATS_METADATA + 1];
+        let mut cache = CfCache::new();
+        assert!(cache.look(&wb, 0, CellRef::default()).is_some());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::WorkLimit));
+        assert_eq!(cache.stats.len(), MAX_STATS_METADATA);
+        let work = cache.budget.work;
+        assert!(cache.look(&wb, 0, CellRef::default()).is_some());
+        assert_eq!(cache.budget.work, work);
+    }
+
     #[test]
     fn every_matching_rule_applies() {
         let mut s = crate::Session::new();
@@ -493,9 +870,9 @@ mod tests {
         let sh = d.wb.sheet(0).unwrap();
         for ranges in ["A1:B6", "A1:A3", "B2:B9", "D1:E4", "A1:A2"].map(|r| vec![RangeRef::parse(r).unwrap()]) {
             let full = all_stats_before(sh, &ranges);
-            let numbers = RuleStats::build(sh, &ranges, StatsNeed::Numbers);
+            let numbers = RuleStats::build(sh, &ranges, StatsNeed::Numbers, &mut StatsBudget::default()).unwrap();
             assert_eq!((numbers.sorted, numbers.avg.to_bits(), numbers.std.to_bits()), (full.sorted, full.avg.to_bits(), full.std.to_bits()));
-            assert_eq!(RuleStats::build(sh, &ranges, StatsNeed::Counts).counts, full.counts);
+            assert_eq!(RuleStats::build(sh, &ranges, StatsNeed::Counts, &mut StatsBudget::default()).unwrap().counts, full.counts);
         }
     }
 
@@ -549,7 +926,8 @@ mod tests {
             }
         }
         assert_eq!(SCANNED.with(|n| n.get()), 0);
-        // A rule that does read them scans its range once, however many cells are looked up.
+        // A statistics rule scans stored candidates once, including the other column rejected
+        // by its envelope. Repeated looks do not repeat those 20,000 candidate visits.
         s.execute("home.conditionalFormat", json!({"range": "A1:A10000", "rule": {"type": "top10", "preset": "redBorder"}})).unwrap();
         let d = s.doc().unwrap();
         let mut cache = CfCache::new();
@@ -557,7 +935,7 @@ mod tests {
         for r in 1..=50 {
             cache.look(&d.wb, 0, CellRef::parse(&format!("A{r}")).unwrap());
         }
-        assert_eq!(SCANNED.with(|n| n.get()), 10_000);
+        assert_eq!(SCANNED.with(|n| n.get()), 20_000);
     }
 
     #[test]

@@ -1,5 +1,35 @@
 # Decisions
 
+## Complete conditional-format statistics with explicit resource limits
+
+Statistics count each effective cell address once across the rule's Applies To ranges,
+including spills according to `Sheet::value_ref`. This union interpretation follows the
+public range scope; it is not an observed Excel oracle. Existing lowercase-display duplicate
+comparison, including contextual Unicode lowercase, stays unchanged.
+
+Each window retains only its current sheet's statistics, keyed by document identity, revision
+and actual sheet identity. Proven view transitions rebase matching current/parked caches;
+content edits, rules, recalculation and history changes invalidate them. Caches own no workbook
+or sheet snapshots.
+
+Statistics are limited to 64 million charged work units, 64 MiB of accounted retained/build
+capacity, 4096 cached rules and 4096 input ranges per rule. Sparse stored candidates, rejected
+candidates, range membership, strings and sorting all consume budget. Scanning stored cells
+directly avoids uncharged row traversal hidden by range iterators; a small rule in a very large
+unrelated sheet can therefore exhaust the work budget. Collection capacities, string keys,
+growth and lowercase temporaries are accounted conservatively. This is not a process-RSS or
+global OOM guarantee: standard whole-string lowercase/number formatting remains bounded but
+does not expose fallible allocation. Existing non-statistical predicate/render work is separate.
+
+An incomplete build drops its partial payload and retains a typed reason; it never supplies
+partial thresholds. Resource exhaustion stops further builds while previously complete entries
+remain usable. Invalid numeric rules fail individually, allowing unrelated statistics to finish.
+String-table growth charges rehashing earlier keys as well as processing new text. The grid reserves a visible
+warning row. Print/export commands use the additive checked PDF renderer and return an error
+before writing when required statistics are incomplete. The existing infallible Rust renderer
+keeps its tuple signature and content, adding exactly one diagnostic page if needed (at most
+2001 pages for the normally capped 2000-page layouts). No command success schema changes.
+
 ## Imported what-if tables are preserved as static content
 
 Keep native XLSX data-table definitions separately from executable formulas, with their caches

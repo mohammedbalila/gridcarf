@@ -10,6 +10,31 @@ use gridcraft_engine::core::CellRef;
 
 use crate::{Notice, SheetApp, backstage, dialogs, editor, grid, keytips, text_box};
 
+#[cfg(test)]
+mod cf_tests {
+    use super::*;
+
+    #[test]
+    fn cf_statistics_view_rebase_matches_current_and_parked_document_revisions() {
+        let mut session = gridcraft_engine::Session::new();
+        session.new_workbook();
+        let mut app = SheetApp::new(session, Default::default());
+        let doc = app.session.doc().unwrap();
+        let (uid, revision, sheet) = (doc.uid, doc.revision, doc.wb.active().unwrap().uid.get());
+        app.grid.cf.key = Some((uid, revision, sheet));
+        for (window, owner, rev) in [(100, uid, revision), (101, uid, revision.saturating_sub(1)), (102, uid + 1, revision)] {
+            let mut parked = WindowUi::default();
+            parked.grid.cf.key = Some((owner, rev, sheet));
+            app.parked.insert(window, parked);
+        }
+        app.rebase_document_view_traces(uid, revision, revision + 1);
+        assert_eq!(app.grid.cf.key, Some((uid, revision + 1, sheet)));
+        assert_eq!(app.parked[&100].grid.cf.key, Some((uid, revision + 1, sheet)));
+        assert_eq!(app.parked[&101].grid.cf.key, Some((uid, revision.saturating_sub(1), sheet)));
+        assert_eq!(app.parked[&102].grid.cf.key, Some((uid + 1, revision, sheet)));
+    }
+}
+
 /// One window's parked interface state (see the module docs).
 #[derive(Default)]
 pub struct WindowUi {
@@ -63,10 +88,11 @@ impl SheetApp {
                 .any(|w| w.editor.as_ref().is_some_and(|e| e.doc == uid) || w.text_box_editor.as_ref().is_some_and(|e| e.document() == uid))
     }
 
-    /// Only view storage's own revision transition is harmless to arrows. Match both document
-    /// and prior revision so traces invalidated by content edits stay stale, including parked ones.
+    /// Only a proven view transition is harmless to arrows and conditional statistics. Match
+    /// document and prior revision so content-invalidated caches stay stale, including parked ones.
     pub(crate) fn rebase_document_view_traces(&mut self, uid: u64, before_revision: u64, after_revision: u64) {
         for grid in std::iter::once(&mut self.grid).chain(self.parked.values_mut().map(|w| &mut w.grid)) {
+            grid.cf.rebase_view(uid, before_revision, after_revision);
             if let Some(trace) = grid.trace.as_mut()
                 && trace.uid == uid
                 && trace.revision == before_revision

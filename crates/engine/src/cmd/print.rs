@@ -90,9 +90,39 @@ pub(crate) const PX_TO_PT: f32 = 0.75;
 /// Most pages one export produces.
 pub const MAX_PAGES: usize = 2000;
 
-/// Renders laid-out sheets to a PDF.
+/// Renders laid-out sheets to a PDF. If conditional-format statistics are incomplete, retains
+/// all content and appends one diagnostic page (normal layouts: at most MAX_PAGES + 1).
+/// Call [`try_render_pdf`] to refuse incomplete formatting instead.
 pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str) -> (Vec<u8>, usize) {
+    let (mut doc, incomplete) = render_pdf_document(wb, layouts, file, path);
+    if let Some(reason) = incomplete {
+        let page = doc.add_page(612.0, 792.0);
+        page.text(36.0, 48.0, 12.0, Font::HelveticaBold, [0, 0, 0], "Conditional formatting is incomplete");
+        page.text(36.0, 72.0, 10.0, Font::Helvetica, [0, 0, 0], &reason.to_string());
+        page.text(36.0, 96.0, 10.0, Font::Helvetica, [0, 0, 0], "Workbook content is retained. Some conditional formatting was not applied.");
+    }
+    let n = doc.page_count();
+    (doc.finish(), n)
+}
+
+/// Renders only when the required conditional-format statistics are complete.
+pub fn try_render_pdf(
+    wb: &Workbook,
+    layouts: &[SheetLayout],
+    file: &str,
+    path: &str,
+) -> std::result::Result<(Vec<u8>, usize), crate::cf::CfIncomplete> {
+    let (doc, incomplete) = render_pdf_document(wb, layouts, file, path);
+    if let Some(reason) = incomplete {
+        return Err(reason);
+    }
+    let n = doc.page_count();
+    Ok((doc.finish(), n))
+}
+
+fn render_pdf_document(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str) -> (PdfDoc, Option<crate::cf::CfIncomplete>) {
     let mut doc = PdfDoc::new();
+    let mut incomplete = None;
     doc.info.title = if wb.props.title.is_empty() { file.to_string() } else { wb.props.title.clone() };
     doc.info.author = wb.props.author.clone();
     let total: usize = layouts.iter().map(|l| l.pages.len()).sum();
@@ -157,6 +187,7 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             };
             draw_header_footer(pg, lay, lay.settings.hf_page(pi == 0, page_no), &cx);
         }
+        incomplete = incomplete.or_else(|| cf.as_ref().and_then(crate::cf::CfCache::incomplete));
     }
     for link in pending_links {
         if let Some((target_page, x, y)) = printed_target(wb, &printed_blocks, link.sheet, &link.target)
@@ -166,8 +197,7 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             page.link_page(Rect::new(lx, ly, w, h), target_page, Point::new(x, y));
         }
     }
-    let n = doc.page_count();
-    (doc.finish(), n)
+    (doc, incomplete)
 }
 
 // ---------------------------------------------------------------- commands
@@ -177,7 +207,7 @@ fn build_pdf(s: &Session, p: &Json, cmd: &str) -> Result<(Vec<u8>, usize)> {
     let d = s.doc()?;
     let lays = layouts(&d.wb, &opts);
     let path = d.path.clone().unwrap_or_default();
-    Ok(render_pdf(&d.wb, &lays, &d.display_title(), &path))
+    try_render_pdf(&d.wb, &lays, &d.display_title(), &path).map_err(|reason| crate::EngineError::Other(reason.to_string()))
 }
 
 pub(crate) fn export_pdf(s: &mut Session, p: &Json) -> Result<Json> {

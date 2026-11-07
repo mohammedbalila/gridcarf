@@ -55,8 +55,21 @@ impl SheetApp {
             return r;
         }
         let before = self.session.active_window();
-        let view_from = matches!(id, "view.zoom" | "view.zoom100" | "view.zoomToSelection" | "sheet.activate" | "sheet.next" | "sheet.previous")
-            .then(|| crate::grid::Trace::key(self));
+        // These handlers change only view state; do not classify arbitrary view.* commands,
+        // whose transactional edit paths can also synchronize workbook content.
+        let view_from = matches!(
+            id,
+            "view.zoom"
+                | "view.zoom100"
+                | "view.zoomToSelection"
+                | "view.normal"
+                | "view.pageLayout"
+                | "view.pageBreakPreview"
+                | "sheet.activate"
+                | "sheet.next"
+                | "sheet.previous"
+        )
+        .then(|| crate::grid::Trace::key(self));
         let r = self.session.run(id, params);
         if let Some(from) = view_from {
             crate::grid::Trace::keep_through_view_change(self, from);

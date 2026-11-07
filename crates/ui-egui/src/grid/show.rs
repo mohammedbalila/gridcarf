@@ -15,8 +15,31 @@ use super::{
 #[cfg(test)]
 use super::{CellRef, Pos2};
 
+fn prepare_cf_warning(app: &mut SheetApp, ui: &mut egui::Ui, t: &Tokens) -> bool {
+    let cf_key = app.session.active().and_then(|d| d.wb.active().map(|sh| (d.uid, d.revision, sh.uid.get())));
+    app.grid.cf.prepare(cf_key);
+    let had_incomplete = app.grid.cf.cache.incomplete().is_some();
+    if let Some(reason) = app.grid.cf.cache.incomplete() {
+        // Reserve a row, rather than covering cells, their editors, or formula controls.
+        egui::Frame::NONE.fill(t.notice_warn_bg).inner_margin(6.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.colored_label(t.text, reason.to_string());
+        });
+    }
+    had_incomplete
+}
+
+fn retain_cf(app: &mut SheetApp, ui: &egui::Ui, cf: CfCache, had_incomplete: bool) {
+    if cf.incomplete().is_some() && !had_incomplete {
+        // A newly discovered limit gets its reserved warning row on the next frame.
+        ui.ctx().request_repaint();
+    }
+    app.grid.cf.cache = cf;
+}
+
 pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
+    let had_incomplete = prepare_cf_warning(app, ui, &t);
     let available = ui.available_rect_before_wrap();
     // A right-to-left sheet has its vertical scrollbar on the left.
     let rtl = app.session.active().and_then(|d| d.wb.active()).is_some_and(|s| s.right_to_left);
@@ -146,7 +169,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     painter.rect_filled(rect, 0.0, t.grid_bg);
     // Everything up to the headers is painted in logical (left-to-right) coordinates.
     let mirror_from = painter.add(egui::Shape::Noop);
-    let mut cf = CfCache::new();
+    let mut cf = std::mem::take(&mut app.grid.cf.cache);
     let quads = if geo.paper.is_some() {
         crate::paper_view::paint_pages(
             crate::paper_view::PagePaintInput {
@@ -168,6 +191,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             &mut cf,
         )
     };
+    retain_cf(app, ui, cf, had_incomplete);
     // Objects above cells. A hidden object can't stay selected: Delete or the Format pane would act
     // on something the user can't see.
     if crate::chartview::objects_hidden(&wb) {
@@ -856,6 +880,132 @@ mod trace_arrow_tests {
 
     fn select(app: &mut SheetApp, cell: &str) {
         app.run("selection.set", json!({"cell": cell})).unwrap();
+    }
+
+    fn paint_cf_frame(app: &mut SheetApp, ctx: &egui::Context) -> egui::FullOutput {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| show(app, ui));
+        output.textures_delta.clear();
+        output
+    }
+
+    #[test]
+    fn cf_statistics_unchanged_revision_scans_once_across_paints() {
+        let mut app = app();
+        app.run("range.setValues", json!({"range":"A1", "values":[[1],[10]]})).unwrap();
+        app.run("home.conditionalFormat", json!({"range":"A1:A2", "rule":{"type":"colorScale"}})).unwrap();
+        let ctx = egui::Context::default();
+        crate::grid::CF_CACHE_BUILDS.with(|count| count.set(0));
+        for _ in 0..3 {
+            paint_cf_frame(&mut app, &ctx);
+        }
+        assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), 1);
+    }
+
+    #[test]
+    fn cf_statistics_view_modes_reuse_the_same_statistics() {
+        let mut app = app();
+        app.run("range.setValues", json!({"range":"A1", "values":[[1],[10]]})).unwrap();
+        app.run("home.conditionalFormat", json!({"range":"A1:A2", "rule":{"type":"colorScale"}})).unwrap();
+        let ctx = egui::Context::default();
+        crate::grid::CF_CACHE_BUILDS.with(|count| count.set(0));
+        paint_cf_frame(&mut app, &ctx);
+        for mode in ["view.pageLayout", "view.pageBreakPreview", "view.normal"] {
+            app.run(mode, json!({})).unwrap();
+            paint_cf_frame(&mut app, &ctx);
+        }
+        assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), 1);
+        app.run("cell.set", json!({"cell":"A2", "input":"0"})).unwrap();
+        app.run("view.pageLayout", json!({})).unwrap();
+        paint_cf_frame(&mut app, &ctx);
+        assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), 2, "mode switch must not revive stale content");
+    }
+
+    #[test]
+    fn cf_statistics_view_reuse_never_revives_content_invalidated_statistics() {
+        let mut app = app();
+        app.run("range.setValues", json!({"range":"A1", "values":[[1],[10]]})).unwrap();
+        app.run("home.conditionalFormat", json!({"range":"A1:A2", "rule":{"type":"colorScale"}})).unwrap();
+        let ctx = egui::Context::default();
+        crate::grid::CF_CACHE_BUILDS.with(|count| count.set(0));
+        let wb = app.session.doc().unwrap().wb.clone();
+        let owners = Arc::strong_count(&wb);
+        paint_cf_frame(&mut app, &ctx);
+        assert_eq!(Arc::strong_count(&wb), owners, "cache must not retain the workbook owner");
+        app.run("view.zoom", json!({"percent":120})).unwrap();
+        app.run("selection.set", json!({"cell":"B3"})).unwrap();
+        app.store_view_state();
+        paint_cf_frame(&mut app, &ctx);
+        assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), 1);
+
+        // A view rebase after a content edit must not revalidate the pre-edit cache.
+        app.run("cell.set", json!({"cell":"A2", "input":"0"})).unwrap();
+        app.run("view.zoom", json!({"percent":150})).unwrap();
+        paint_cf_frame(&mut app, &ctx);
+        assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), 2);
+        let d = app.session.doc().unwrap();
+        assert_eq!(app.grid.cf.cache.look(&d.wb, 0, CellRef::new(1, 0)).and_then(|l| l.scale_fill), Some([0xF8, 0x69, 0x6B]));
+
+        for (expected, command, params) in [
+            (3, "home.conditionalFormat", json!({"range":"A1:A2", "rule":{"type":"dataBar"}})),
+            (4, "edit.undo", json!({})),
+            (5, "edit.redo", json!({})),
+            (6, "formulas.calculateNow", json!({})),
+        ] {
+            app.run(command, params).unwrap();
+            paint_cf_frame(&mut app, &ctx);
+            assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), expected, "{command}");
+        }
+        let token = app.session.group_begin("temporary").unwrap();
+        app.run("cell.set", json!({"cell":"A1", "input":"3"})).unwrap();
+        paint_cf_frame(&mut app, &ctx);
+        app.session.group_rollback(token).unwrap();
+        paint_cf_frame(&mut app, &ctx);
+        assert_eq!(crate::grid::CF_CACHE_BUILDS.with(|count| count.get()), 8);
+    }
+
+    #[test]
+    fn cf_statistics_distinguish_document_and_actual_sheet_identity() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        paint_cf_frame(&mut app, &ctx);
+        let first = app.grid.cf.key.unwrap();
+        app.run("home.insertSheet", json!({})).unwrap();
+        paint_cf_frame(&mut app, &ctx);
+        let second = app.grid.cf.key.unwrap();
+        assert_eq!(first.0, second.0);
+        assert_ne!(first.2, second.2);
+        app.run("file.new", json!({})).unwrap();
+        paint_cf_frame(&mut app, &ctx);
+        assert_ne!(second.0, app.grid.cf.key.unwrap().0);
+    }
+
+    #[test]
+    fn cf_incomplete_warning_is_visible_above_normal_and_page_layout_cells() {
+        for mode in ["normal", "pageLayout"] {
+            let mut app = app();
+            app.notice = Some(crate::Notice { text: "Existing document notice".into(), kind: crate::NoticeKind::Info, action: None });
+            app.run("cell.set", json!({"cell":"A1", "input":"content"})).unwrap();
+            app.run("home.conditionalFormat", json!({"range":"A1", "rule":{"type":"duplicate"}})).unwrap();
+            if mode == "pageLayout" {
+                app.run("view.pageLayout", json!({})).unwrap();
+            }
+            let wb = Arc::make_mut(&mut app.session.doc_mut().unwrap().wb);
+            wb.sheet_mut(0).unwrap().cond_formats[0].ranges = vec![RangeRef::parse("A1").unwrap(); 4097];
+            let ctx = egui::Context::default();
+            // The second frame reserves the warning row discovered during the first paint.
+            let mut output = None;
+            for _ in 0..2 {
+                output = Some(paint_cf_frame(&mut app, &ctx));
+            }
+            let warning = output.unwrap().shapes.into_iter().find_map(|s| match s.shape {
+                egui::Shape::Text(text) if text.galley.job.text.contains("Conditional formatting is incomplete") => Some(text),
+                _ => None,
+            });
+            let warning = warning.expect("persistent conditional-format warning must be painted");
+            assert_eq!(app.notice.as_ref().map(|notice| notice.text.as_str()), Some("Existing document notice"));
+            assert!(warning.pos.y + warning.galley.rect.height() <= app.grid.rect.unwrap().top(), "{mode}: warning covers cells");
+        }
     }
 
     /// What the ribbon's Trace Precedents / Trace Dependents buttons do.

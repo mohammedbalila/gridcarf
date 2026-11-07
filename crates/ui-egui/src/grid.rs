@@ -7,6 +7,12 @@ use std::sync::Arc;
 
 use egui::{Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use gridcraft_engine::cf::{CfCache, CfLook};
+
+#[cfg(test)]
+thread_local! {
+    /// Cache constructions by actual grid paints; retained repaints must not construct one.
+    static CF_CACHE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 use gridcraft_engine::core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
 use gridcraft_engine::model::{BorderLine, BorderStyle, Color, HAlign, LineIndex, PatternType, Sheet, Style, Underline, VAlign, Workbook};
 use serde_json::json;
@@ -223,18 +229,44 @@ impl Trace {
     /// cells: existing arrows remain valid (#3097). `before` is [`Trace::key`] from then.
     pub fn keep_through_view_change(app: &mut SheetApp, before: Option<(u64, u64)>) {
         let now = Trace::key(app);
-        if let Some(t) = app.grid.trace.as_mut()
-            && before == Some((t.uid, t.revision))
-            && let Some((uid, revision)) = now
-            && uid == t.uid
+        if let (Some((uid, before_revision)), Some((now_uid, after_revision))) = (before, now)
+            && uid == now_uid
         {
-            t.revision = revision;
+            app.rebase_document_view_traces(uid, before_revision, after_revision);
+        }
+    }
+}
+
+/// One current sheet revision per window, with no workbook or sheet owners retained.
+#[derive(Default)]
+pub(crate) struct CfState {
+    pub(crate) key: Option<(u64, u64, u64)>,
+    cache: CfCache,
+}
+
+impl CfState {
+    fn prepare(&mut self, key: Option<(u64, u64, u64)>) {
+        if self.key != key {
+            self.key = key;
+            self.cache = CfCache::new();
+            #[cfg(test)]
+            CF_CACHE_BUILDS.with(|count| count.set(count.get() + 1));
+        }
+    }
+
+    pub(crate) fn rebase_view(&mut self, uid: u64, before: u64, after: u64) {
+        if let Some((doc, revision, _)) = self.key.as_mut()
+            && *doc == uid
+            && *revision == before
+        {
+            *revision = after;
         }
     }
 }
 
 #[derive(Default)]
 pub struct GridState {
+    pub(crate) cf: CfState,
     pub drag: Drag,
     pub ensure_visible: bool,
     /// With `ensure_visible`: scroll to the moving end of the selection instead of the active cell

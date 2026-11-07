@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (imported native what-if definitions and static caches preserved; earlier: complete retained-history accounting; earlier: revision-scoped loss-aware saves; earlier: bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (complete bounded conditional-format statistics and repaint reuse; earlier: imported native what-if definitions and static caches preserved; earlier: complete retained-history accounting; earlier: revision-scoped loss-aware saves; earlier: bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -26,6 +26,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 15–25 h, plus owner time in Excel. [file-format-parity.md](file-format-parity.md)
 
 ### 2. Large workbooks don't open; recalc is single-threaded (P, H)
+- **Conditional formatting:** complete sparse statistics replace silent rectangular truncation and survive unchanged repaints. Statistics retain explicit work/capacity limits with a visible warning and checked-export refusal; very large unrelated sheet content can exhaust the work budget. Excel overlap/mixed-type oracle validation remains untested.
 - **Missing:** streaming read for ~100 MB XLSX; multi-threaded recalc; 100k-dependent edit under
   100 ms (was ~0.4 s); whole-sheet operations bounded.
 - **Evidence:** #175; no threading in `crates/calc`; PR #152 (whole-sheet Fill/Remove Duplicates

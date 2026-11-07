@@ -1,6 +1,6 @@
 # Compatibility baseline
 
-> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
 
 This baseline pins source `6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214`, before
 stabilization repairs. It covers four small synthetic cases, not general Excel
@@ -161,3 +161,15 @@ version control. No result here upgrades the repository's parity/readiness claim
 | 2026-11-07 | minor | Record M01 note-map sharing, undo/redo regressions and fresh release RSS separately from the baseline |
 | 2026-11-07 | minor | Record bounded C01 legacy XLSX repair separately from the pinned pre-fix diagnostics |
 | 2026-11-07 | minor | Pin source/toolchain and bounded synthetic fixture recipes before repairs |
+
+## F01 conditional-format statistics
+
+Synthetic regressions exercise far-tail values beyond the old two-million rectangular visits,
+overlapping/repeated ranges, effective spill values, and existing mixed-type/Unicode duplicate
+comparisons. The union interpretation is inferred from public range scope, not observed in Excel.
+Caches use document/revision/sheet identity without retaining workbook snapshots. Statistics have
+explicit work, capacity and metadata limits; incomplete results are disclosed in a reserved grid
+warning and checked PDF export refuses them before writing. The legacy infallible Rust renderer
+retains content with one diagnostic page. See [the decision](decisions.md#complete-conditional-format-statistics-with-explicit-resource-limits)
+for resource bounds and allocator limitations. Excel and Windows runtime oracle checks remain
+untested; no readiness estimate is raised by these synthetic checks.
