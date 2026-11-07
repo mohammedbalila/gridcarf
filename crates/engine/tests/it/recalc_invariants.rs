@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use gridcraft_core::{CellError, CellRef, Value};
+use gridcraft_core::{CellError, CellRef, RangeRef, Value};
 use gridcraft_engine::{Session, calc::Calc};
 use serde_json::{Value as Json, json};
 
@@ -209,4 +209,81 @@ fn legacy_mode_survives_edit_structure_and_history_recalculation() {
             }
         }
     }
+}
+
+fn assert_spill(s: &Session, anchor: &str, area: &str) {
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!(sh.spill_ranges.get(&CellRef::parse(anchor).unwrap()), Some(&RangeRef::parse(area).unwrap()));
+}
+
+#[test]
+fn own_spill_replacement_with_the_same_extent_reads_empty_inputs() {
+    let mut s = session();
+    set(&mut s, "A1", "=SEQUENCE(1,3,10)");
+    assert_eq!(value(&s, "B1"), Value::Number(11.0));
+    s.execute("cell.set", json!({"cell": "A1", "input": "=TRANSPOSE(B1:B3)"})).unwrap();
+    for cell in ["A1", "B1", "C1"] {
+        assert_eq!(value(&s, cell), Value::Number(0.0), "{cell}");
+    }
+    assert_spill(&s, "A1", "A1:C1");
+    assert_clean(&s, "same-extent replacement of own spill");
+}
+
+#[test]
+fn own_spill_repeated_edits_do_not_feed_output_back_into_inputs() {
+    let mut s = session();
+    set(&mut s, "J4", "6");
+    set(&mut s, "J5", "66");
+    set(&mut s, "I6", "=TRANSPOSE(J3:J8)");
+    for text in ["007", "008", "009"] {
+        s.execute("cell.set", json!({"cell": "J5", "input": format!("'{text}")})).unwrap();
+        for (cell, expected) in [
+            ("I6", Value::Number(0.0)),
+            ("J6", Value::Number(6.0)),
+            ("K6", Value::Text(text.into())),
+            ("L6", Value::Number(0.0)),
+            ("M6", Value::Number(0.0)),
+            ("N6", Value::Number(0.0)),
+        ] {
+            assert_eq!(value(&s, cell), expected, "{cell}, edit {text}");
+        }
+        assert_spill(&s, "I6", "I6:N6");
+        assert_clean(&s, "repeated self-overlapping TRANSPOSE");
+    }
+}
+
+#[test]
+fn own_spill_seed_7_minimized_public_replay() {
+    // Exact minimized seed 7 of the 200-seed / 200-step campaign at f4247561.
+    let mut s = session();
+    execute(&mut s, "file.new", json!({"sample": "budget"}));
+    execute(&mut s, "range.setValues", json!({"range":"H4","values":[["=SEQUENCE(1)*D17",6],[null,"66"],["=TRANSPOSE(I8:I13)",null]]}));
+    execute(&mut s, "home.insertCells", json!({"range":"F14:G18","shift":"column"}));
+    execute(&mut s, "home.deleteColumns", json!({"cols":"B:B"}));
+    execute(&mut s, "edit.replace", json!({"all":true,"what":"1","with":""}));
+    execute(&mut s, "cell.set", json!({"cell":"J5","input":"'007"}));
+    assert_eq!(value(&s, "L6"), Value::Number(0.0));
+    assert_eq!(value(&s, "J6"), Value::Number(6.0));
+    assert_eq!(value(&s, "K6"), Value::Text("007".into()));
+    assert_spill(&s, "I6", "I6:N6");
+}
+
+#[test]
+fn own_spill_seed_86_minimized_public_replay() {
+    // Exact minimized seed 86 at f4247561; the stored Python code is 2,140 quotes.
+    let mut s = session();
+    execute(&mut s, "file.new", json!({"sample": "grades"}));
+    execute(&mut s, "cell.set", json!({"cell":"A15","input":"=UNIQUE(A13:C18)"}));
+    assert_spill(&s, "A15", "A15:C16");
+    assert_eq!(value(&s, "A16"), Value::Error(CellError::Circ));
+    execute(&mut s, "python.set", json!({"cell":"A14","code": "\"".repeat(2140)}));
+    assert_eq!(value(&s, "A14"), Value::Error(CellError::Blocked));
+    assert_spill(&s, "A15", "A15:C17");
+    assert_eq!(value(&s, "A18"), Value::Empty);
+    execute(&mut s, "edit.autoFill", json!({"mode":"values","source":"C12:G13","target":"C12:H15"}));
+    assert_eq!(value(&s, "A14"), Value::Error(CellError::Blocked));
+    assert_eq!(value(&s, "A16"), Value::Error(CellError::Blocked));
+    assert_eq!(value(&s, "A17"), Value::Error(CellError::Circ));
+    assert_eq!(value(&s, "A18"), Value::Empty);
+    assert_spill(&s, "A15", "A15:C17");
 }

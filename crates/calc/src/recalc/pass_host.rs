@@ -29,6 +29,8 @@ pub(super) struct PassHost<'a> {
     cycle: bool,
     pub(super) cycles: Vec<Key>,
     depth: usize,
+    /// The innermost formula, whose persisted spill is obsolete while it is evaluated.
+    evaluating: Option<Key>,
     /// A formula needed at [`MAX_NESTED`] levels deep: the evaluations in progress are abandoned
     /// and it is calculated first.
     suspend: Option<Key>,
@@ -92,6 +94,7 @@ impl<'a> PassHost<'a> {
             cycle: false,
             cycles: vec![],
             depth: 0,
+            evaluating: None,
             suspend: None,
             waiting: HashSet::default(),
             abandoned: Vec::new(),
@@ -290,11 +293,13 @@ impl PassHost<'_> {
         }
         let expr = std::sync::Arc::clone(expr);
         let outer_out_of_stack = std::mem::replace(&mut self.out_of_stack, false);
+        let outer_evaluating = self.evaluating.replace(k);
         let v = {
             let mode = self.wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).map(|f| f.eval_mode).unwrap_or_default();
             let mut ev = Evaluator::new(self, k.0, k.1).with_mode(mode);
             ev.value(&expr)
         };
+        self.evaluating = outer_evaluating;
         let out_of_stack = std::mem::replace(&mut self.out_of_stack, outer_out_of_stack);
         if out_of_stack && self.depth > 1 && self.suspend.is_none() {
             // It ran out of the stack left below the formulas that read it: it is calculated
@@ -420,6 +425,19 @@ impl PassHost<'_> {
         };
         self.results.insert(k, v.clone());
         v
+    }
+
+    /// Only the evaluating formula's persisted output is obsolete input. Other owners remain
+    /// readable, and iterative calculation deliberately retains previous-value reads.
+    fn obsolete_own_spill(&self, sheet: usize) -> Option<RangeRef> {
+        if self.iterate {
+            return None;
+        }
+        let (owner_sheet, anchor) = self.evaluating?;
+        if owner_sheet != sheet {
+            return None;
+        }
+        self.wb.sheet(sheet)?.spill_ranges.get(&anchor).copied()
     }
 
     /// A formula's previous value for iterative calculation: from the last iteration, else the
@@ -556,7 +574,11 @@ impl Host for PassHost<'_> {
                 }
             }
         }
-        self.wb.sheet(sheet).map(|s| s.value(c)).unwrap_or_default()
+        let Some(sh) = self.wb.sheet(sheet) else { return Value::Empty };
+        if !sh.cells.has(c) && self.obsolete_own_spill(sheet).is_some_and(|range| range.contains(c)) {
+            return Value::Empty;
+        }
+        sh.value(c)
     }
     fn range_values(&mut self, sheet: usize, range: RangeRef) -> Vec<Value> {
         let (h, w) = (range.height() as usize, range.width() as usize);
@@ -573,7 +595,11 @@ impl Host for PassHost<'_> {
                 *slot = cell.value.clone();
             }
         }
+        let obsolete = self.obsolete_own_spill(sheet);
         let _seen = stored_spill_in(sh, range, &mut |c, v| {
+            if obsolete.is_some_and(|area| area.contains(c)) {
+                return true;
+            }
             let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
             if let Some(slot) = out.get_mut(i)
                 && slot.is_empty()

@@ -2438,3 +2438,46 @@ fn formulas_read_a_dirty_python_cell_after_it_is_laid_out() {
     assert_eq!((t.num("B1"), t.num("B2")), (5.0, 6.0));
     assert_eq!((t.num("A1"), t.num("A2"), t.num("A3")), (5.0, 100.0, 111.0));
 }
+
+#[test]
+fn own_spill_direct_reads_do_not_reuse_the_previous_output() {
+    let mut t = T::new();
+    t.set("E1", "1");
+    t.set("D1", "=E1");
+    t.set("A1", "=SEQUENCE(1,3)+D1+B1");
+    assert_eq!((t.num("A1"), t.num("B1"), t.num("C1")), (2.0, 3.0, 4.0));
+    for (input, expected) in [("2", (3.0, 4.0, 5.0)), ("3", (4.0, 5.0, 6.0))] {
+        t.set("E1", input);
+        assert_eq!((t.num("A1"), t.num("B1"), t.num("C1")), expected);
+        assert!(t.calc.last_recalc_cells <= 2, "{} evaluations", t.calc.last_recalc_cells);
+    }
+}
+
+#[test]
+fn own_spill_reads_preserve_real_cells_and_other_owners() {
+    for formula in ["=B1", "=SUM(B1:B1)"] {
+        let mut t = T::new();
+        t.set("A1", "=SEQUENCE(1,3)");
+        // A stored cell written over the old derived cache is an input, even before write-back.
+        t.wb.sheet_mut(0).unwrap().cells.set(c("B1"), Cell::value(Value::Number(7.0)));
+        t.set("A1", formula);
+        assert_eq!(t.num("A1"), 7.0, "{formula}");
+    }
+    let mut t = T::new();
+    t.set("E1", "=SEQUENCE(1,3,10)");
+    t.set("D1", "1");
+    t.set("A1", "=SEQUENCE(1,3)+F1+SUM(G1:G1)+D1");
+    t.set("D1", "2");
+    assert_eq!((t.num("A1"), t.num("B1"), t.num("C1")), (26.0, 27.0, 28.0));
+}
+
+#[test]
+fn own_spill_iterative_reads_keep_previous_value_behavior() {
+    for formula in ["=SEQUENCE(1,3)+B1+D1", "=SEQUENCE(1,3)+SUM(B1:B1)+D1"] {
+        let mut t = T::iterative(2, 0.001);
+        t.set("D1", "1");
+        t.set("A1", formula);
+        t.set("D1", "2");
+        assert_eq!((t.num("A1"), t.num("B1"), t.num("C1")), (6.0, 7.0, 8.0), "{formula}");
+    }
+}
