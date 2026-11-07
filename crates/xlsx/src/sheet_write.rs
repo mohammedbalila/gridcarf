@@ -226,6 +226,7 @@ struct CellWriteInput<'a> {
     header_override: Option<&'a String>,
     spill_value: Option<&'a Value>,
     dynamic_range: Option<&'a RangeRef>,
+    what_if: Option<&'a gridcraft_model::WhatIfTable>,
 }
 
 fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
@@ -585,11 +586,18 @@ struct SheetCellData<'a> {
 
 fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) {
     let SheetCellData { workbook, index, sheet, overrides, extra, dynamic } = data;
+    let what_if: BTreeMap<_, _> = sheet.what_if_tables.iter().map(|t| (t.anchor, t)).collect();
     // Cell storage is already row-major; sort only when extra cells need merging.
     let mut keys: Vec<(CellRef, Option<&Cell>)> = Vec::with_capacity(sheet.cells.len());
     keys.extend(sheet.cells.iter().map(|(c, cell)| (c, Some(cell))));
-    if !sheet.cell_pictures.is_empty() || !extra.is_empty() || !overrides.is_empty() || !keys.is_sorted_by_key(|(c, _)| *c) {
+    if !sheet.what_if_tables.is_empty()
+        || !sheet.cell_pictures.is_empty()
+        || !extra.is_empty()
+        || !overrides.is_empty()
+        || !keys.is_sorted_by_key(|(c, _)| *c)
+    {
         let mut all: BTreeSet<CellRef> = keys.iter().map(|(c, _)| *c).collect();
+        all.extend(sheet.what_if_tables.iter().map(|t| t.anchor));
         all.extend(sheet.cell_pictures.keys().copied());
         all.extend(extra.keys().copied());
         all.extend(overrides.keys().copied());
@@ -659,6 +667,7 @@ fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcr
                     header_override: ov,
                     spill_value: ex,
                     dynamic_range: array.as_ref(),
+                    what_if: what_if.get(&cell_ref).copied(),
                 },
                 sid,
                 out,
@@ -736,7 +745,7 @@ fn write_sheet_views(s: &mut String, sheet: &Sheet, selected: bool) {
 }
 
 fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) {
-    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic } = input;
+    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic, what_if } = input;
     let style = cell.map(|x| sid(x.style)).unwrap_or(0);
     s.push_str("<c r=\"");
     push_a1(s, c);
@@ -789,7 +798,7 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         out.dynamic_arrays = true;
     }
     let text = formula.map(|f| esc(&crate::fmla::to_file(f))).or_else(|| py_text.map(|t| esc(&t)));
-    if let Some(text) = text {
+    if text.is_some() || what_if.is_some() {
         let t = match &value {
             Value::Text(_) => " t=\"str\"",
             Value::Bool(_) => " t=\"b\"",
@@ -798,15 +807,40 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         };
         s.push_str(t);
         s.push('>');
-        match (formula.and_then(|f| f.array), dynamic) {
-            (Some(r), _) => {
-                let _ = write!(s, "<f t=\"array\" ref=\"{}\">{text}</f>", r.a1());
+        if let Some(table) = what_if {
+            let _ = write!(s, "<f t=\"dataTable\" ref=\"{}\"", table.range.a1());
+            for (key, value) in [("r1", table.input1), ("r2", table.input2)] {
+                if let Some(value) = value {
+                    let _ = write!(s, " {key}=\"{}\"", value.a1());
+                }
             }
-            (None, Some(r)) => {
-                let _ = write!(s, "<f t=\"array\" ref=\"{}\">{text}</f>", r.a1());
+            for (key, value) in [
+                ("dt2D", table.two_variable),
+                ("dtr", table.row_oriented),
+                ("del1", table.input1_deleted),
+                ("del2", table.input2_deleted),
+                ("ca", table.calculate),
+            ] {
+                if let Some(value) = value {
+                    let _ = write!(s, " {key}=\"{}\"", u8::from(value));
+                }
             }
-            _ => {
-                let _ = write!(s, "<f>{text}</f>");
+            if table.formula_text.is_empty() {
+                s.push_str("/>");
+            } else {
+                let _ = write!(s, ">{}</f>", esc(&table.formula_text));
+            }
+        } else if let Some(text) = text {
+            match (formula.and_then(|f| f.array), dynamic) {
+                (Some(r), _) => {
+                    let _ = write!(s, "<f t=\"array\" ref=\"{}\">{text}</f>", r.a1());
+                }
+                (None, Some(r)) => {
+                    let _ = write!(s, "<f t=\"array\" ref=\"{}\">{text}</f>", r.a1());
+                }
+                _ => {
+                    let _ = write!(s, "<f>{text}</f>");
+                }
             }
         }
         match &value {

@@ -43,8 +43,8 @@ fn synthetic_baseline_inputs_are_bounded() {
         "",
         "",
     );
-    // Validate the input record directly. Importing it first would erase the very
-    // unsupported content the later save-policy repair needs to inspect.
+    // Validate the source record independently of import/save, so a reader regression cannot
+    // erase the feature before this synthetic input is checked.
     let mut package = crate::package::Package::open(&whatif).unwrap();
     let sheet = package.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
     let table = sheet.child("sheetData").unwrap().kids("row").flat_map(|r| r.kids("c")).find(|c| c.attr("r") == Some("B2")).unwrap();

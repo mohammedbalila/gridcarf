@@ -620,7 +620,14 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
         return;
     }
     let dynamic = c.attr("cm").is_some();
-    let formula = c.child("f").and_then(|f| read_formula(cx, st, f, pos, dynamic));
+    let formula = c.child("f").and_then(|f| {
+        if f.attr("t") == Some("dataTable") {
+            read_what_if(cx, sheet, f, pos);
+            None
+        } else {
+            read_formula(cx, st, f, pos, dynamic)
+        }
+    });
     // A `PY(index,0|1)` formula is a Python cell whose code is a script of the Python part. The
     // older `PY("…",0|1)` form is read from the formula's own text: the formula parser would fold
     // line breaks in the code. A formula naming a script the part lacks keeps only its cached
@@ -660,6 +667,38 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
         None => value,
     };
     sheet.cells.set(pos, Cell { value, formula: formula.map(Arc::new), style, py });
+}
+
+/// ISO/IEC 29500 CT_CellFormula attributes (Microsoft CellFormula documentation).
+/// Keep native data tables outside Formula/Calc: evaluating TABLE would destroy the caches.
+fn read_what_if(cx: &mut Ctx<'_>, sheet: &mut Sheet, f: &El, anchor: CellRef) {
+    use gridcraft_model::{CompatibilityEffect, CompatibilityIssue, Editability, WhatIfTable};
+    let location = Some(format!("{}!{}", sheet.name, anchor.a1()));
+    let range = f.attr("ref").and_then(RangeRef::parse);
+    let invalid = range.is_none_or(|r| !r.contains(anchor))
+        || ["r1", "r2"].iter().any(|key| f.attr(key).is_some_and(|v| CellRef::parse(v).is_none()))
+        || ["dt2D", "dtr", "del1", "del2", "ca"].iter().any(|key| f.attr(key).is_some() && f.attr_bool(key).is_none());
+    let Some(range) = range.filter(|_| !invalid) else {
+        let message = "Invalid what-if definition was omitted; only its cached cells were kept.";
+        cx.report.issue(CompatibilityIssue::new("what-if data table", location, CompatibilityEffect::Omitted, Editability::Unavailable, message));
+        cx.notice(message);
+        return;
+    };
+    sheet.what_if_tables.push(WhatIfTable {
+        anchor,
+        range,
+        formula_text: f.text.clone(),
+        input1: f.attr("r1").and_then(CellRef::parse),
+        input2: f.attr("r2").and_then(CellRef::parse),
+        two_variable: f.attr_bool("dt2D"),
+        row_oriented: f.attr_bool("dtr"),
+        input1_deleted: f.attr_bool("del1"),
+        input2_deleted: f.attr_bool("del2"),
+        calculate: f.attr_bool("ca"),
+    });
+    let message = "What-if definitions and cached cells are preserved, but table results are static and are not recalculated, including after outside precedent edits.";
+    cx.report.issue(CompatibilityIssue::new("what-if data table", location, CompatibilityEffect::Static, Editability::PreservedOnly, message));
+    cx.notice(message);
 }
 
 fn read_formula(cx: &mut Ctx<'_>, st: &mut RowState, f: &El, pos: CellRef, dynamic: bool) -> Option<Formula> {
@@ -731,10 +770,6 @@ fn read_formula_text(cx: &mut Ctx<'_>, st: &mut RowState, f: &El, pos: CellRef, 
                 fm.array = Some(range);
             }
             Some(fm)
-        }
-        "dataTable" => {
-            cx.warn("what-if data tables are not supported; kept their values");
-            None
         }
         _ => {
             if text.is_empty() {

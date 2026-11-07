@@ -12,6 +12,27 @@ mod print;
 pub use pivot::{PivotCalcField, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotShowAs, PivotSort, PivotTable, PivotValue};
 pub use print::{EditRange, HfPage, LineInfo, Orientation, PageOrder, PrintSettings, SheetProtection, password_hash};
 
+/// Native OOXML `f t="dataTable"` definition, retained with ordinary cached cells.
+/// This is preservation metadata, not an executable TABLE formula. `range` covers only
+/// results; the input-value and formula headers sit immediately above/left of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhatIfTable {
+    pub anchor: CellRef,
+    pub range: RangeRef,
+    /// Decoded native formula text, kept inert and XML-escaped only when saving.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub formula_text: String,
+    /// Native r1/r2 addresses. Keep their native order rather than guessing a row/column mapping.
+    pub input1: Option<CellRef>,
+    pub input2: Option<CellRef>,
+    /// Optional booleans retain absent versus explicitly false attributes on save.
+    pub two_variable: Option<bool>,
+    pub row_oriented: Option<bool>,
+    pub input1_deleted: Option<bool>,
+    pub input2_deleted: Option<bool>,
+    pub calculate: Option<bool>,
+}
+
 // ---------------------------------------------------------------- tables
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

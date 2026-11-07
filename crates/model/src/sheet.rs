@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::cell::{Cell, CellPicture};
 use crate::features::{
     Anchor, AutoFilter, Chart, Comment, CondFormat, FormControl, Hyperlink, Image, LineInfo, ObjKind, ObjRef, PivotTable, PrintSettings, Shape,
-    ShapeKind, SheetProtection, Slicer, Sparkline, Table, Validation,
+    ShapeKind, SheetProtection, Slicer, Sparkline, Table, Validation, WhatIfTable,
 };
 use crate::store::CellStore;
 use crate::style::{Color, StyleId};
@@ -135,6 +135,9 @@ pub struct Sheet {
     pub cond_formats: Vec<CondFormat>,
     pub validations: Vec<Validation>,
     pub tables: Vec<Table>,
+    /// Imported what-if definitions. Cached cells stay static until live table evaluation exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub what_if_tables: Vec<WhatIfTable>,
     pub autofilter: Option<AutoFilter>,
     /// Shared by sheet snapshots; note edits detach through [`Sheet::comments_mut`].
     #[serde(with = "crate::cellmap::shared")]
@@ -216,6 +219,7 @@ impl Sheet {
             cond_formats: vec![],
             validations: vec![],
             tables: vec![],
+            what_if_tables: vec![],
             autofilter: None,
             comments: Arc::new(BTreeMap::new()),
             hyperlinks: BTreeMap::new(),

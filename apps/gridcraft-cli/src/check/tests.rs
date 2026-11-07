@@ -452,7 +452,8 @@ fn json_schema_keys() {
             "shapes",
             "styles",
             "printSettings",
-            "formulaModes"
+            "formulaModes",
+            "whatIfTables"
         ])
     );
     assert_eq!(keys(&f["roundTrip"]["categories"]["values"]), set(&["equal", "diffs", "examples"]));
@@ -810,4 +811,40 @@ fn check_ignores_default_line_styles_without_changed_inheritance() {
     sheet.cols.insert(0, LineInfo { style: Some(StyleId::DEFAULT), ..Default::default() });
     sheet.rows.insert(1, LineInfo { style: Some(StyleId::DEFAULT), ..Default::default() });
     assert_eq!(category_diffs(&a, &b, "styles"), 0);
+}
+
+#[test]
+fn what_if_definitions_have_a_semantic_category() {
+    let mut a = Workbook::new();
+    a.sheet_mut(0).unwrap().what_if_tables.push(gridcraft_engine::model::WhatIfTable {
+        formula_text: String::new(),
+        anchor: at("B2"),
+        range: gridcraft_engine::core::RangeRef::parse("B2:C3").unwrap(),
+        input1: Some(at("A10")),
+        input2: Some(at("A11")),
+        two_variable: Some(true),
+        row_oriented: Some(false),
+        input1_deleted: None,
+        input2_deleted: None,
+        calculate: Some(true),
+    });
+    let mut b = a.clone();
+    b.sheet_mut(0).unwrap().what_if_tables[0].input1 = Some(at("A12"));
+    assert_eq!(category_diffs(&a, &b, "whatIfTables"), 1);
+    b = a.clone();
+    b.sheet_mut(0).unwrap().what_if_tables[0].formula_text = "TABLE(A1,)".into();
+    assert_eq!(category_diffs(&a, &b, "whatIfTables"), 1);
+    b.sheet_mut(0).unwrap().what_if_tables.clear();
+    assert_eq!(category_diffs(&a, &b, "whatIfTables"), 1);
+    let mut second = a.sheet(0).unwrap().what_if_tables[0].clone();
+    second.anchor = at("E2");
+    second.range = gridcraft_engine::core::RangeRef::parse("E2:F3").unwrap();
+    a.sheet_mut(0).unwrap().what_if_tables.push(second);
+    b = a.clone();
+    b.sheet_mut(0).unwrap().what_if_tables.reverse();
+    assert_eq!(category_diffs(&a, &b, "whatIfTables"), 0, "definition storage order is not semantic");
+    let bytes = gridcraft_engine::io::save_bytes(&a, "whatif.xlsx").unwrap();
+    let rt = fidelity::round_trip(&a, &bytes, &Options::default());
+    assert_eq!(rt.error, None);
+    assert!(rt.categories.iter().any(|c| c.name == "whatIfTables" && c.diffs == 0));
 }

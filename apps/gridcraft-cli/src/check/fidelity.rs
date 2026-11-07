@@ -2,7 +2,7 @@ use super::calc::formula_text;
 use super::package::{REBUILT_KINDS, relationship_kinds, validate_package};
 use super::{BTreeMap, SourcePackage};
 use super::{BTreeSet, Category, Cell, CellError, CellRef, Diffs, Options, RoundTrip, Sheet, Value, Workbook, number_text, quote_sheet};
-use gridcraft_engine::model::{Formula, FormulaEvalMode, Style, StyleId};
+use gridcraft_engine::model::{Formula, FormulaEvalMode, Style, StyleId, WhatIfTable};
 
 // ---------------------------------------------------------------- round trip
 
@@ -90,6 +90,13 @@ fn diff_payload<T: PartialEq + ?Sized>(d: &mut Diffs, sheet: &str, a: &T, b: &T)
     }
 }
 
+/// Independent native definitions are identified by master cell, not XML/storage order.
+fn what_if_list(sheet: &Sheet) -> Vec<&WhatIfTable> {
+    let mut tables: Vec<_> = sheet.what_if_tables.iter().collect();
+    tables.sort_by_key(|table| table.anchor);
+    tables
+}
+
 /// Resolve style table indices before comparing: interning order isn't document content.
 fn style<'a>(wb: &'a Workbook, sheet: &Sheet, cell: CellRef) -> &'a Style {
     wb.styles.get(sheet.style_id(cell))
@@ -161,6 +168,7 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
     let mut hyperlinks = Diffs::new("hyperlinks", m);
     let mut pivots = Diffs::new("pivots", m);
     let mut slicers = Diffs::new("slicers", m);
+    let mut what_if_tables = Diffs::new("whatIfTables", m);
     let mut controls = Diffs::new("controls", m);
     let mut pictures = Diffs::new("pictures", m);
     let mut shapes = Diffs::new("shapes", m);
@@ -225,6 +233,7 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
         } else if let Some((x, y)) = cfa.iter().zip(&cfb).find(|(x, y)| x != y) {
             cond_formats.push(|| format!("{name}: {x} → {y}"));
         }
+        diff_payload(&mut what_if_tables, &name, &what_if_list(sa), &what_if_list(sb));
         diff_payload(&mut validations, &name, &sa.validations, &sb.validations);
         let chart_list = |s: &Sheet| {
             s.charts
@@ -349,6 +358,7 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
         hyperlinks.done(),
         pivots.done(),
         slicers.done(),
+        what_if_tables.done(),
         controls.done(),
         pictures.done(),
         shapes.done(),

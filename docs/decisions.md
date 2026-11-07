@@ -1,5 +1,19 @@
 # Decisions
 
+## Imported what-if tables are preserved as static content
+
+Keep native XLSX data-table definitions separately from executable formulas, with their caches
+in ordinary cells. Optional native flags retain absence as well as explicit false. The static
+compatibility issue remains after preservation: outside precedent edits can leave results stale.
+Direct result/header/input changes and address-invalidating structure are refused at the existing
+transactional edit boundary. Exact recorded reference rewrites and sheet renames may adjust
+formula headers while native coordinates stay fixed. Native text remains verbatim; structural
+edits require a pure-adjustment proof that its references stay unchanged, and unparseable text
+conservatively prevents such edits. The actual sheet-copy owner checks native text before giving
+it a new owner: local/empty text can copy, but source-qualified or unparseable text is refused.
+Whole-sheet reorder/delete retain owner semantics. Result ranges
+also block dynamic spills, including empty cached cells. This does not enable TABLE evaluation.
+
 ## Undoable invocations own their nested history
 
 Outside the existing undo-group boundaries, a changed undoable invocation retains

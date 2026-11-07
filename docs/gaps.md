@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (complete retained-history accounting; earlier: revision-scoped loss-aware saves; earlier: bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (imported native what-if definitions and static caches preserved; earlier: complete retained-history accounting; earlier: revision-scoped loss-aware saves; earlier: bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -133,6 +133,10 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   data model (`data.fromWeb`, `data.relationships` missing). **Estimate:** 60–100 h.
 
 ### 13. Analysis tools: Solver, Analysis ToolPak, Forecast Sheet (F)
+- Imported XLSX what-if tables preserve their native definitions and cached results. Results remain
+  static, including after edits to outside precedents; live TABLE evaluation is not implemented.
+  Direct result/header/input edits and structural edits that would invalidate their addresses are
+  refused. Synthetic preservation tests are covered; an Excel-authored oracle remains untested.
 - Forecast Sheet (`data.forecastSheet`) and the FORECAST.ETS family are in, including Forecast
   Start (hindcast, #785).
 - Solver (`data.solver`, #327) has Simplex LP with integer/binary branch and bound, a local
@@ -201,6 +205,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | Preserve native XLSX what-if definitions/caches and guard invalidating direct edits; live recalculation and Excel verification remain outstanding |
 | 2026-11-07 | minor | Record bounded note-history sharing repair and its remaining limits |
 | 2026-11-07 | minor | Bounded legacy XLSX calculation/save fix; external Excel and full legacy parity remain unverified |
 | 2026-11-07 | minor | Link the bounded compatibility baseline and record the reproduced legacy-import calculation failure; no fixes or parity estimate changes |

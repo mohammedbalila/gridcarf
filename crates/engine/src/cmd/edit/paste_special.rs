@@ -367,6 +367,8 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
             } else {
                 gridcraft_formula::adjust::Edit::MoveToSheet { from: src, to_sheet: dest_name.clone(), to_row: at.row, to_col: at.col }
             };
+            // The commit preflight needs the move even when its source/destination cells are blank.
+            cx.edits.push((src_sheet_name.clone(), e.clone()));
             rewrite_all_formulas(&mut cx.wb, &src_sheet_name, &e)?;
             cx.structural = true;
         }

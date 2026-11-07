@@ -301,6 +301,7 @@ fields!(
         cond_formats,
         validations,
         tables,
+        what_if_tables,
         autofilter,
         comments,
         hyperlinks,
@@ -338,6 +339,7 @@ fields!(
         view
     ]
 );
+fields!(crate::WhatIfTable, [formula_text], [anchor, range, input1, input2, two_variable, row_oriented, input1_deleted, input2_deleted, calculate]);
 fields!(
     Workbook,
     [
@@ -759,6 +761,25 @@ mod tests {
         styles.intern(Style { font: Font { name: "x".repeat(32 * 1024), ..Default::default() }, ..Default::default() });
         // The index owns another Font.name, even though the Style values compare equal.
         assert!(styles.retained_bytes_against(&StyleTable::default()) >= 64 * 1024);
+    }
+
+    #[test]
+    fn what_if_definition_capacity_is_charged() {
+        let mut old = Sheet::new("Old");
+        old.what_if_tables = Vec::with_capacity(4096);
+        old.what_if_tables.push(crate::WhatIfTable {
+            anchor: CellRef::new(1, 1),
+            range: gridcraft_core::RangeRef::cell(CellRef::new(1, 1)),
+            formula_text: String::with_capacity(64 * 1024),
+            input1: None,
+            input2: None,
+            two_variable: None,
+            row_oriented: None,
+            input1_deleted: None,
+            input2_deleted: None,
+            calculate: None,
+        });
+        assert!(old.retained_bytes_against(&Sheet::new("New")) >= 4096 * size_of::<crate::WhatIfTable>() + 64 * 1024);
     }
 
     #[test]

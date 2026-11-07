@@ -419,6 +419,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     if wb.calc.precision_as_displayed {
         round_edited_as_displayed(&d.wb, &mut wb, &mut changed, structural);
     }
+    whatif::check_imported_tables(&d.wb, &wb, &edits)?;
     if let Some(log) = d.touched.as_mut() {
         for (si, c) in changed.iter().take(TOUCH_LOG_LIMIT.saturating_sub(log.len())) {
             if let Some(sh) = wb.sheet(*si) {

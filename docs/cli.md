@@ -1,6 +1,6 @@
 # gridcraft-cli
 
-Last updated: 2026-11-07 — semantic save-loss checks and version 2 report coverage.
+Last updated: 2026-11-07 — semantic save-loss checks, version 2 report coverage, and native what-if preservation comparison.
 
 Headless GridCraft: inspect, convert, evaluate, script and serve MCP without a window. Errors go to stderr with a
 non-zero exit code.
@@ -100,6 +100,7 @@ The categories are:
   (scope, formula, visibility and comment), `condFormats` (complete rules in priority order).
 - `tables`, `validations`, `charts`, `comments`, `hyperlinks`, `pivots`: complete modeled payloads, including
   table options, validation formulas/messages, chart titles/axes/series, comment text/history and link targets.
+- `whatIfTables` (native definitions and inert formula text; result cells remain in `values`),
 - `slicers`, `controls`, `pictures` (floating and cell pictures, including image bytes and alt text), `shapes`,
   `styles` (full cell, row, column, default and named styles, and theme bindings), `printSettings`, `formulaModes` (evaluation
   semantics and legacy array extents).

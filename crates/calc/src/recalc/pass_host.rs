@@ -145,6 +145,7 @@ fn spill_blocked(host: &mut PassHost<'_>, (sheet, anchor): Key, a: &Array) -> bo
         || range.end.col >= gridcraft_core::MAX_COLS
         || sh.merges.iter().any(|m| m.intersects(&range))
         || sh.tables.iter().any(|t| t.range.contains(anchor))
+        || sh.what_if_tables.iter().any(|t| t.range.intersects(&range))
         || sh.cells.iter_range(range).any(|(c, cell)| c != anchor && (!cell.value.is_empty() || cell.formula.is_some()))
     {
         return true;
@@ -195,6 +196,7 @@ pub(super) fn spills_as_before(sheet: &gridcraft_model::Sheet, anchor: CellRef, 
     RangeRef::new(anchor, end) == range
         && !sheet.merges.iter().any(|m| m.intersects(&range))
         && !sheet.tables.iter().any(|t| t.range.contains(anchor))
+        && !sheet.what_if_tables.iter().any(|t| t.range.intersects(&range))
         && range
             .iter()
             .enumerate()
@@ -591,7 +593,8 @@ impl Host for PassHost<'_> {
         let blocked = end.row >= gridcraft_core::MAX_ROWS
             || end.col >= gridcraft_core::MAX_COLS
             || sh.cells.iter_range(range).any(|(c, cell)| c != anchor && (cell.formula.is_some() || !cell.value.is_empty()))
-            || sh.merges.iter().any(|m| m.intersects(&range));
+            || sh.merges.iter().any(|m| m.intersects(&range))
+            || sh.what_if_tables.iter().any(|t| t.range.intersects(&range));
         (!blocked).then_some(range)
     }
     fn cell_value(&mut self, sheet: usize, c: CellRef) -> Value {

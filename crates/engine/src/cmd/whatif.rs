@@ -433,3 +433,169 @@ fn data_table(s: &mut Session, p: &Json) -> Result<Json> {
 
 #[cfg(test)]
 mod tests;
+
+const IMPORTED_TABLE_EDIT: &str = "Imported what-if tables keep static cached results; edits to their results, headers or inputs and address-changing operations are not supported.";
+
+/// A copied sheet has no previous owner with its new UID. Prove native text does not need
+/// source-owner rebinding at the copy command itself, without changing ordinary formula copying.
+pub(super) fn check_imported_table_copy(source: &Sheet, name: &str) -> Result<()> {
+    for table in &source.what_if_tables {
+        if table.formula_text.trim().is_empty() {
+            continue;
+        }
+        let Ok(expr) = gridcraft_formula::parse(&table.formula_text) else {
+            return Err(EngineError::Other(IMPORTED_TABLE_EDIT.into()));
+        };
+        if gridcraft_formula::adjust::rename_sheet(expr.clone(), &source.name, name) != expr {
+            return Err(EngineError::Other(IMPORTED_TABLE_EDIT.into()));
+        }
+    }
+    Ok(())
+}
+
+/// Cached data tables have no live evaluation yet. Refuse content/address changes before the
+/// candidate workbook is published, using the same transactional boundary as array protection.
+/// Outside precedents are intentionally not tracked; the import compatibility issue says so.
+pub(super) fn check_imported_tables(
+    old: &gridcraft_model::Workbook,
+    new: &gridcraft_model::Workbook,
+    edits: &[(String, gridcraft_formula::adjust::Edit)],
+) -> Result<()> {
+    use gridcraft_formula::adjust::{self, Edit};
+    if old.sheets.iter().all(|sh| sh.what_if_tables.is_empty()) {
+        return Ok(());
+    }
+    let renames: Vec<_> = old
+        .sheets
+        .iter()
+        .filter_map(|prior| {
+            let next = new.sheets.iter().find(|sh| sh.uid.get() == prior.uid.get())?;
+            (prior.name != next.name).then_some((prior.name.as_str(), next.name.as_str()))
+        })
+        .collect();
+    let removed: Vec<_> =
+        old.sheets.iter().filter(|prior| !new.sheets.iter().any(|sh| sh.uid.get() == prior.uid.get())).map(|sh| sh.name.as_str()).collect();
+    let old_names: Vec<_> = if removed.is_empty() { Vec::new() } else { old.sheets.iter().map(|sh| sh.name.clone()).collect() };
+    let rewrite = |mut expr: gridcraft_formula::Expr, host: &str| {
+        for (target, edit) in edits {
+            expr = adjust::adjust(expr, host, target, edit);
+        }
+        for &(prior, next) in &renames {
+            expr = adjust::rename_sheet(expr, prior, next);
+        }
+        expr
+    };
+    for before in &old.sheets {
+        if before.what_if_tables.is_empty() {
+            continue;
+        }
+        // A whole owner deletion removes its native definitions too. Sheet identity also
+        // survives renaming/reordering, unlike its name or vector position.
+        let Some(after) = new.sheets.iter().find(|sh| sh.uid.get() == before.uid.get()) else { continue };
+        let refuse = || EngineError::Other(IMPORTED_TABLE_EDIT.into());
+        if before.what_if_tables != after.what_if_tables {
+            return Err(refuse());
+        }
+        let changed = before.cells.diff(&after.cells);
+        let content_matches = |cell| {
+            let formulas = before.cell(cell).and_then(|c| c.formula.as_ref()).zip(after.cell(cell).and_then(|c| c.formula.as_ref()));
+            if formulas.is_some_and(|(a, b)| a.eval_mode != b.eval_mode || a.dynamic != b.dynamic) {
+                return false;
+            }
+            if super::same_content(before.cell(cell), after.cell(cell)) {
+                return true;
+            }
+            // Admit only the exact reference transformation recorded by the command, without
+            // treating that rewrite as a direct header edit. Native coordinates stay guarded.
+            let Some((a, b)) = formulas else { return false };
+            let Some(expr) = a.expr() else { return false };
+            (!edits.is_empty() || !renames.is_empty()) && a.array == b.array && b.expr().is_some_and(|actual| actual == rewrite(expr, &before.name))
+        };
+        for table in &before.what_if_tables {
+            let ranges = protected_table_ranges(table);
+            if edits.iter().any(|(sheet, edit)| {
+                (sheet == &before.name && ranges.iter().any(|r| edit_affects_range(edit, *r)))
+                    || matches!(edit, Edit::MoveToSheet { from, to_sheet, to_row, to_col }
+                        if to_sheet == &before.name && ranges.iter().any(|r| move_destination(*from, *to_row, *to_col).intersects(r)))
+            }) {
+                return Err(refuse());
+            }
+            // Native text is inert, but may still contain addresses. Pure adjustment can prove
+            // its references unchanged; an unparseable or changed expression is not such proof.
+            // Keep the original text verbatim rather than inventing native TABLE rewrite rules.
+            if !table.formula_text.trim().is_empty() && (!edits.is_empty() || !renames.is_empty() || !removed.is_empty()) {
+                let Ok(expr) = gridcraft_formula::parse(&table.formula_text) else { return Err(refuse()) };
+                let mut expected = rewrite(expr.clone(), &before.name);
+                for name in &removed {
+                    expected = adjust::delete_sheet(expected, name, &old_names);
+                }
+                if expected != expr {
+                    return Err(refuse());
+                }
+            }
+            for &cell in &changed {
+                if ranges.iter().any(|r| r.contains(cell)) && !content_matches(cell) {
+                    return Err(refuse());
+                }
+            }
+            if before.cell_pictures != after.cell_pictures
+                && before
+                    .cell_pictures
+                    .keys()
+                    .chain(after.cell_pictures.keys())
+                    .any(|c| ranges.iter().any(|r| r.contains(*c)) && before.cell_pictures.get(c) != after.cell_pictures.get(c))
+            {
+                return Err(refuse());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn protected_table_ranges(table: &gridcraft_model::WhatIfTable) -> Vec<RangeRef> {
+    let r = table.range;
+    let mut ranges = vec![r, RangeRef::cell(table.anchor)];
+    // Microsoft Support's one-variable layouts have formula headers above (column-oriented)
+    // or left (row-oriented), and substitution values on the other edge. Both edges matter.
+    // Two-variable tables also use the top-left corner as the formula. One-variable corners
+    // are unused. At worksheet edges protect only existing cells, without wrapping indices.
+    if let Some(row) = r.start.row.checked_sub(1) {
+        ranges.push(RangeRef::new(CellRef::new(row, r.start.col), CellRef::new(row, r.end.col)));
+    }
+    if let Some(col) = r.start.col.checked_sub(1) {
+        ranges.push(RangeRef::new(CellRef::new(r.start.row, col), CellRef::new(r.end.row, col)));
+        if table.two_variable == Some(true)
+            && let Some(row) = r.start.row.checked_sub(1)
+        {
+            ranges.push(RangeRef::cell(CellRef::new(row, col)));
+        }
+    }
+    ranges.extend([table.input1, table.input2].into_iter().flatten().map(RangeRef::cell));
+    ranges
+}
+
+fn edit_affects_range(edit: &gridcraft_formula::adjust::Edit, protected: RangeRef) -> bool {
+    use gridcraft_formula::adjust::{Axis, Edit};
+    match edit {
+        Edit::Insert { axis, at, count } | Edit::Delete { axis, at, count } => {
+            *count > 0
+                && match axis {
+                    Axis::Rows => protected.end.row >= *at,
+                    Axis::Cols => protected.end.col >= *at,
+                }
+        }
+        Edit::InsertCells { axis, range } | Edit::DeleteCells { axis, range } => {
+            let shifted = match axis {
+                Axis::Rows => RangeRef::new(range.start, CellRef::new(gridcraft_core::MAX_ROWS - 1, range.end.col)),
+                Axis::Cols => RangeRef::new(range.start, CellRef::new(range.end.row, gridcraft_core::MAX_COLS - 1)),
+            };
+            shifted.intersects(&protected)
+        }
+        Edit::Move { from, to_row, to_col } => from.intersects(&protected) || move_destination(*from, *to_row, *to_col).intersects(&protected),
+        Edit::MoveToSheet { from, .. } => from.intersects(&protected),
+    }
+}
+
+fn move_destination(from: RangeRef, row: u32, col: u32) -> RangeRef {
+    RangeRef::new(CellRef::new(row, col), CellRef::new(row.saturating_add(from.height() - 1), col.saturating_add(from.width() - 1)))
+}

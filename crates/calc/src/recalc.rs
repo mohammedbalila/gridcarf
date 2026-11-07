@@ -588,6 +588,8 @@ fn spill_is_blocked(sheet: &gridcraft_model::Sheet, anchor: CellRef, range: Rang
         || range.iter().any(|cell| cell != anchor && (sheet.cells.has(cell) || sheet.spill.contains_key(&cell)))
         || sheet.merges.iter().any(|merge| merge.intersects(&range))
         || sheet.tables.iter().any(|table| table.range.contains(anchor))
+        // Imported what-if result cells are owned even when their cached value is blank.
+        || sheet.what_if_tables.iter().any(|table| table.range.intersects(&range))
 }
 
 fn fill_spill(sheet: &mut gridcraft_model::Sheet, anchor: CellRef, range: RangeRef, array: &Array) {
