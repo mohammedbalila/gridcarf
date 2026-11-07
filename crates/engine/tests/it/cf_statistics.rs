@@ -3,7 +3,7 @@
 
 use gridcraft_engine::{
     Session,
-    cf::CfCache,
+    cf::{CfCache, CfIncomplete},
     core::{CellError, CellRef, RangeRef, Value},
     model::{Cell, CfRule, CfValueKind, Color, CondFormat, Formula, Style, Workbook},
 };
@@ -190,4 +190,183 @@ fn stored_and_spilled_values_use_the_existing_effective_value_precedence() {
     assert_eq!(cache.look(&wb, 0, cell("A2")).and_then(|l| l.scale_fill), Some([100, 100, 100]));
     assert_eq!(cache.look(&wb, 0, cell("A3")).and_then(|l| l.scale_fill), Some([200, 200, 200]));
     assert!(cache.look(&wb, 0, cell("A4")).is_none());
+}
+
+fn large_finite_book(rule: CfRule) -> Workbook {
+    let mut wb = Workbook::new();
+    for (row, n) in [0.0, 5e154, 1e155].into_iter().enumerate() {
+        wb.sheet_mut(0).unwrap().set_value(CellRef::new(row as u32, 0), Value::Number(n));
+    }
+    add_rule(&mut wb, &["A1:A3"], rule);
+    wb
+}
+
+#[test]
+fn large_finite_scale_uses_min_max_without_unused_variance() {
+    let wb = large_finite_book(scale());
+    let mut cache = CfCache::new();
+    assert_eq!(cache.look(&wb, 0, cell("A2")).and_then(|l| l.scale_fill), Some([100, 100, 100]));
+    assert_eq!(cache.incomplete(), None);
+}
+
+#[test]
+fn large_finite_bar_uses_min_max_without_unused_variance() {
+    let wb = large_finite_book(CfRule::DataBar {
+        min: CfValueKind::Min,
+        max: CfValueKind::Max,
+        color: Color::rgb(0, 0, 0),
+        gradient: false,
+        show_value: true,
+    });
+    let mut cache = CfCache::new();
+    assert_eq!(cache.look(&wb, 0, cell("A3")).and_then(|l| l.bar).map(|bar| bar.0), Some(1.0));
+    assert_eq!(cache.incomplete(), None);
+}
+
+#[test]
+fn large_finite_top_rank_does_not_require_variance() {
+    let wb = large_finite_book(CfRule::Top10 { bottom: false, percent: false, rank: 1, style: Box::default() });
+    let mut cache = CfCache::new();
+    assert!(cache.look(&wb, 0, cell("A3")).and_then(|l| l.style).is_some());
+    assert!(cache.look(&wb, 0, cell("A2")).is_none());
+    assert_eq!(cache.incomplete(), None);
+}
+
+#[test]
+fn large_finite_mean_only_rule_does_not_require_variance() {
+    let wb = large_finite_book(CfRule::AboveAverage { below: false, equal: false, std_dev: 0, style: Box::default() });
+    let mut cache = CfCache::new();
+    assert!(cache.look(&wb, 0, cell("A3")).and_then(|l| l.style).is_some());
+    assert!(cache.look(&wb, 0, cell("A1")).is_none());
+    assert_eq!(cache.incomplete(), None);
+}
+
+#[test]
+fn required_nonfinite_mean_or_deviation_remains_incomplete() {
+    for (values, std_dev) in [([0.0, 1e155], 1), ([1e308, 1.5e308], 0)] {
+        let mut wb = Workbook::new();
+        for (row, n) in values.into_iter().enumerate() {
+            wb.sheet_mut(0).unwrap().set_value(CellRef::new(row as u32, 0), Value::Number(n));
+        }
+        add_rule(&mut wb, &["A1:A2"], CfRule::AboveAverage { below: false, equal: false, std_dev, style: Box::default() });
+        let mut cache = CfCache::new();
+        assert!(cache.look(&wb, 0, cell("A2")).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::InvalidNumber));
+    }
+}
+
+#[test]
+fn large_finite_scale_does_not_require_an_overflowing_mean() {
+    let mut wb = Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(cell("A1"), Value::Number(1e308));
+    wb.sheet_mut(0).unwrap().set_value(cell("A2"), Value::Number(1.5e308));
+    add_rule(&mut wb, &["A1:A2"], scale());
+    let mut cache = CfCache::new();
+    assert_eq!(cache.look(&wb, 0, cell("A2")).and_then(|l| l.scale_fill), Some([200, 200, 200]));
+    assert_eq!(cache.incomplete(), None);
+}
+
+fn opposite_finite_book(rule: CfRule) -> Workbook {
+    let mut wb = large_finite_book(rule);
+    for (row, n) in [-1e308, 0.0, 1e308].into_iter().enumerate() {
+        wb.sheet_mut(0).unwrap().set_value(CellRef::new(row as u32, 0), Value::Number(n));
+    }
+    wb
+}
+
+#[test]
+fn opposite_finite_scale_rejects_overflowing_interpolation_span() {
+    let mut wb = opposite_finite_book(scale());
+    add_rule(&mut wb, &["A1:A3"], CfRule::Top10 { bottom: false, percent: false, rank: 1, style: Box::default() });
+    let mut cache = CfCache::new();
+    assert!(cache.look(&wb, 0, cell("A2")).is_none(), "overflow must not silently turn the midpoint black");
+    assert_eq!(cache.incomplete(), Some(CfIncomplete::InvalidNumber));
+    assert!(cache.look(&wb, 0, cell("A3")).and_then(|l| l.style).is_some(), "unrelated ranking still applies");
+}
+
+#[test]
+fn opposite_finite_bar_never_emits_a_nan_fraction() {
+    let wb = opposite_finite_book(CfRule::DataBar {
+        min: CfValueKind::Min,
+        max: CfValueKind::Max,
+        color: Color::rgb(0, 0, 0),
+        gradient: false,
+        show_value: true,
+    });
+    let mut cache = CfCache::new();
+    let look = cache.look(&wb, 0, cell("A3"));
+    assert!(look.as_ref().and_then(|l| l.bar).is_none_or(|bar| bar.0.is_finite()));
+    assert!(look.is_none());
+    assert_eq!(cache.incomplete(), Some(CfIncomplete::InvalidNumber));
+}
+
+#[test]
+fn opposite_finite_top_rank_does_not_require_a_span() {
+    let wb = opposite_finite_book(CfRule::Top10 { bottom: false, percent: false, rank: 1, style: Box::default() });
+    let mut cache = CfCache::new();
+    assert!(cache.look(&wb, 0, cell("A3")).and_then(|l| l.style).is_some());
+    assert!(cache.look(&wb, 0, cell("A2")).is_none());
+    assert_eq!(cache.incomplete(), None);
+}
+
+#[test]
+fn opposite_finite_percent_and_percentile_thresholds_must_be_finite() {
+    for threshold in [CfValueKind::Percent(50.0), CfValueKind::Percentile(50.0)] {
+        let mut wb = Workbook::new();
+        wb.sheet_mut(0).unwrap().set_value(cell("A1"), Value::Number(-1e308));
+        wb.sheet_mut(0).unwrap().set_value(cell("A2"), Value::Number(1e308));
+        add_rule(
+            &mut wb,
+            &["A1:A2"],
+            CfRule::IconSet {
+                set: "3Arrows".into(),
+                thresholds: vec![CfValueKind::Min, threshold, CfValueKind::Max],
+                reverse: false,
+                show_value: true,
+            },
+        );
+        let mut cache = CfCache::new();
+        assert!(cache.look(&wb, 0, cell("A2")).is_none());
+        assert_eq!(cache.incomplete(), Some(CfIncomplete::InvalidNumber));
+    }
+}
+
+#[test]
+fn opposite_finite_formula_threshold_failure_does_not_poison_other_looks() {
+    let wb = opposite_finite_book(CfRule::DataBar {
+        min: CfValueKind::Number(-1e308),
+        max: CfValueKind::Formula("IF(ROW()=1,1E308,0)".into()),
+        color: Color::rgb(0, 0, 0),
+        gradient: false,
+        show_value: true,
+    });
+    let mut cache = CfCache::new();
+    assert!(cache.look(&wb, 0, cell("A1")).is_none());
+    assert_eq!(cache.incomplete(), Some(CfIncomplete::InvalidNumber));
+    assert_eq!(cache.look(&wb, 0, cell("A2")).and_then(|l| l.bar).map(|bar| bar.0), Some(1.0));
+}
+
+#[test]
+fn finite_degenerate_geometry_preserves_existing_fallbacks() {
+    for (lo, hi) in [(0.0, 0.0), (5.0, 0.0)] {
+        let mut wb = large_finite_book(CfRule::ColorScale {
+            stops: vec![(CfValueKind::Number(lo), Color::rgb(0, 0, 0)), (CfValueKind::Number(hi), Color::rgb(200, 200, 200))],
+        });
+        add_rule(
+            &mut wb,
+            &["A1:A3"],
+            CfRule::DataBar {
+                min: CfValueKind::Number(lo),
+                max: CfValueKind::Number(hi),
+                color: Color::rgb(0, 0, 0),
+                gradient: false,
+                show_value: true,
+            },
+        );
+        let mut cache = CfCache::new();
+        let look = cache.look(&wb, 0, cell("A2")).unwrap();
+        assert_eq!(look.scale_fill, Some([0, 0, 0]));
+        assert_eq!(look.bar.map(|bar| bar.0), Some(1.0));
+        assert_eq!(cache.incomplete(), None);
+    }
 }

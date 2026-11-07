@@ -115,15 +115,15 @@ struct RuleStats {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StatsNeed {
     Numbers,
+    Average { deviation: bool },
     Counts,
 }
 
 fn stats_need(rule: &CfRule) -> Option<StatsNeed> {
     match rule {
         CfRule::Duplicate { .. } | CfRule::Unique { .. } => Some(StatsNeed::Counts),
-        CfRule::Top10 { .. } | CfRule::AboveAverage { .. } | CfRule::ColorScale { .. } | CfRule::DataBar { .. } | CfRule::IconSet { .. } => {
-            Some(StatsNeed::Numbers)
-        }
+        CfRule::AboveAverage { std_dev, .. } => Some(StatsNeed::Average { deviation: *std_dev != 0 }),
+        CfRule::Top10 { .. } | CfRule::ColorScale { .. } | CfRule::DataBar { .. } | CfRule::IconSet { .. } => Some(StatsNeed::Numbers),
         _ => None,
     }
 }
@@ -172,11 +172,20 @@ impl RuleStats {
         let levels = usize::BITS - len.saturating_sub(1).leading_zeros();
         budget.charge(len.saturating_mul(levels as usize).saturating_add(len.saturating_mul(2)))?;
         stats.sorted.sort_unstable_by(f64::total_cmp);
-        let n = len.max(1) as f64;
-        stats.avg = stats.sorted.iter().sum::<f64>() / n;
-        stats.std = (stats.sorted.iter().map(|x| (x - stats.avg).powi(2)).sum::<f64>() / n).sqrt();
-        if !stats.avg.is_finite() || !stats.std.is_finite() {
-            return Err(CfIncomplete::InvalidNumber);
+        // Only AboveAverage consumes moments. Overflow in unused moments must not reject
+        // otherwise finite min/max, percentile or ranking results.
+        if let StatsNeed::Average { deviation } = need {
+            let n = len.max(1) as f64;
+            stats.avg = stats.sorted.iter().sum::<f64>() / n;
+            if !stats.avg.is_finite() {
+                return Err(CfIncomplete::InvalidNumber);
+            }
+            if deviation {
+                stats.std = (stats.sorted.iter().map(|x| (x - stats.avg).powi(2)).sum::<f64>() / n).sqrt();
+                if !stats.std.is_finite() {
+                    return Err(CfIncomplete::InvalidNumber);
+                }
+            }
         }
         Ok(stats)
     }
@@ -198,7 +207,7 @@ impl RuleStats {
             return Ok(());
         };
         match need {
-            StatsNeed::Numbers => {
+            StatsNeed::Numbers | StatsNeed::Average { .. } => {
                 if let Value::Number(number) = value {
                     if !number.is_finite() {
                         return Err(CfIncomplete::InvalidNumber);
@@ -302,6 +311,44 @@ fn threshold(wb: &Workbook, sheet: usize, at: CellRef, st: &RuleStats, k: &CfVal
         CfValueKind::Percentile(p) => percentile(&st.sorted, *p),
         CfValueKind::Formula(f) => gridcraft_calc::evaluate(wb, sheet, at, f).to_number().unwrap_or(0.0),
     }
+}
+
+/// Preserve finite degenerate spans, but never use overflowed interpolation arithmetic.
+fn geometry_fraction(n: f64, lo: f64, hi: f64, degenerate: f64) -> Option<f64> {
+    if !n.is_finite() || !lo.is_finite() || !hi.is_finite() {
+        return None;
+    }
+    if hi <= lo {
+        return Some(degenerate);
+    }
+    let span = hi - lo;
+    let offset = n - lo;
+    let fraction = offset / span;
+    (span.is_finite() && offset.is_finite() && fraction.is_finite()).then_some(fraction)
+}
+
+fn scale_color(n: f64, points: &[(f64, [u8; 3])]) -> Option<[u8; 3]> {
+    if !n.is_finite() || points.iter().any(|(threshold, _)| !threshold.is_finite()) {
+        return None;
+    }
+    Some(match points {
+        [(a, ca), (b, cb)] => lerp(*ca, *cb, geometry_fraction(n, *a, *b, 0.0)?),
+        [(a, ca), (m, cm), (b, cb)] => {
+            if n <= *m {
+                lerp(*ca, *cm, geometry_fraction(n, *a, *m, 0.0)?)
+            } else {
+                lerp(*cm, *cb, geometry_fraction(n, *m, *b, 1.0)?)
+            }
+        }
+        _ => [255, 255, 255],
+    })
+}
+
+fn bar_fraction(n: f64, lo: f64, hi: f64) -> Option<f64> {
+    if !lo.is_finite() {
+        return None;
+    }
+    geometry_fraction(n, lo.min(0.0), hi, 1.0).map(|fraction| fraction.clamp(0.0, 1.0))
 }
 
 fn lerp(a: [u8; 3], b: [u8; 3], t: f64) -> [u8; 3] {
@@ -469,6 +516,7 @@ impl CfCache {
             };
             let text = v.display();
             let context = RuleEval { wb, sheet, cell: c, first, value: &v, text: &text, stats: st };
+            let mut invalid_geometry = false;
             let matched_style = simple_rule_style(&context, &cf.rule).or_else(|| match &cf.rule {
                 CfRule::Top10 { bottom, percent, rank, style } => match v.as_f64() {
                     Some(n) if !st.sorted.is_empty() => {
@@ -501,16 +549,9 @@ impl CfCache {
                             .iter()
                             .map(|(k, col)| (threshold(wb, sheet, c, st, k), col.resolve(&wb.theme).unwrap_or([255, 255, 255])))
                             .collect();
-                        let rgb = match pts.as_slice() {
-                            [(a, ca), (b, cb)] => lerp(*ca, *cb, if b > a { (n - a) / (b - a) } else { 0.0 }),
-                            [(a, ca), (m, cm), (b, cb)] => {
-                                if n <= *m {
-                                    lerp(*ca, *cm, if m > a { (n - a) / (m - a) } else { 0.0 })
-                                } else {
-                                    lerp(*cm, *cb, if b > m { (n - m) / (b - m) } else { 1.0 })
-                                }
-                            }
-                            _ => [255, 255, 255],
+                        let Some(rgb) = scale_color(n, &pts) else {
+                            invalid_geometry = true;
+                            return None;
                         };
                         if out.scale_fill.is_none() {
                             out.scale_fill = Some(rgb);
@@ -523,8 +564,10 @@ impl CfCache {
                     if let Some(n) = v.as_f64() {
                         let lo = threshold(wb, sheet, c, st, min);
                         let hi = threshold(wb, sheet, c, st, max);
-                        let lo = if lo > 0.0 { 0.0 } else { lo };
-                        let frac = if hi > lo { ((n - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 };
+                        let Some(frac) = bar_fraction(n, lo, hi) else {
+                            invalid_geometry = true;
+                            return None;
+                        };
                         if out.bar.is_none() {
                             out.bar = Some((
                                 (frac as f32) * 0.9 + 0.1 * (frac > 0.0) as u8 as f32,
@@ -552,6 +595,10 @@ impl CfCache {
                             }
                         };
                         let cuts: Vec<f64> = lower.iter().map(|t| threshold(wb, sheet, c, st, t)).collect();
+                        if !n.is_finite() || cuts.iter().any(|cut| !cut.is_finite()) {
+                            invalid_geometry = true;
+                            return None;
+                        }
                         let mut idx = cuts.iter().filter(|cut| n >= **cut).count();
                         if *reverse {
                             idx = k - 1 - idx.min(k - 1);
@@ -566,6 +613,12 @@ impl CfCache {
                 }
                 _ => None,
             });
+            if invalid_geometry {
+                // Formula thresholds depend on the painted cell. Keep complete statistics
+                // usable for other cells/rules while disclosing this failed evaluation.
+                self.record_incomplete(CfIncomplete::InvalidNumber);
+                continue;
+            }
             if let Some(st) = matched_style {
                 any = true;
                 // Every matching rule applies; where two set the same part, the rule with the
@@ -871,7 +924,11 @@ mod tests {
         for ranges in ["A1:B6", "A1:A3", "B2:B9", "D1:E4", "A1:A2"].map(|r| vec![RangeRef::parse(r).unwrap()]) {
             let full = all_stats_before(sh, &ranges);
             let numbers = RuleStats::build(sh, &ranges, StatsNeed::Numbers, &mut StatsBudget::default()).unwrap();
-            assert_eq!((numbers.sorted, numbers.avg.to_bits(), numbers.std.to_bits()), (full.sorted, full.avg.to_bits(), full.std.to_bits()));
+            assert_eq!(numbers.sorted, full.sorted);
+            let average = RuleStats::build(sh, &ranges, StatsNeed::Average { deviation: false }, &mut StatsBudget::default()).unwrap();
+            assert_eq!((average.avg.to_bits(), average.std), (full.avg.to_bits(), 0.0));
+            let deviation = RuleStats::build(sh, &ranges, StatsNeed::Average { deviation: true }, &mut StatsBudget::default()).unwrap();
+            assert_eq!((deviation.avg.to_bits(), deviation.std.to_bits()), (full.avg.to_bits(), full.std.to_bits()));
             assert_eq!(RuleStats::build(sh, &ranges, StatsNeed::Counts, &mut StatsBudget::default()).unwrap().counts, full.counts);
         }
     }

@@ -975,3 +975,54 @@ fn equations_print_with_the_symbol_font() {
     // A glyph no standard font has is a [?] box.
     assert!(contains(&pdf, "(?) Tj"));
 }
+
+fn large_finite_cf_session() -> Session {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range":"A1", "values":[[0.0], [5e154], [1e155]]})).unwrap();
+    s.execute("cell.set", json!({"cell":"B1", "input":"Finite workbook content"})).unwrap();
+    s.execute("home.conditionalFormat", json!({"range":"A1:A3", "rule":{"type":"colorScale"}})).unwrap();
+    s
+}
+
+#[test]
+fn cf_large_finite_checked_pdf_succeeds_without_unused_variance() {
+    let mut s = large_finite_cf_session();
+    let wb = &s.doc().unwrap().wb;
+    let lays = layouts(wb, &PrintOptions::default());
+    let (bytes, pages) = try_render_pdf(wb, &lays, "book", "").unwrap();
+    assert_eq!(pages, 1);
+    assert!(contains(&bytes, "Finite workbook content"));
+    let (bytes, pages) = pdf_of(&mut s, json!({}));
+    assert_eq!(pages, 1);
+    assert!(contains(&bytes, "Finite workbook content"));
+}
+
+#[test]
+fn cf_large_finite_legacy_pdf_does_not_add_false_diagnostic() {
+    let s = large_finite_cf_session();
+    let wb = &s.doc().unwrap().wb;
+    let lays = layouts(wb, &PrintOptions::default());
+    let (bytes, pages) = render_pdf(wb, &lays, "book", "");
+    assert!(contains(&bytes, "Finite workbook content"));
+    assert_eq!(pages, 1);
+    assert!(!contains(&bytes, "Conditional formatting is incomplete"));
+}
+
+#[test]
+fn cf_opposite_finite_geometry_failure_is_disclosed_by_pdf_paths() {
+    let mut s = large_finite_cf_session();
+    s.execute("range.setValues", json!({"range":"A1", "values":[[-1e308], [0.0], [1e308]]})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().cond_formats[0].rule = gridcraft_model::CfRule::ColorScale {
+        stops: vec![
+            (gridcraft_model::CfValueKind::Min, gridcraft_model::Color::rgb(0, 0, 0)),
+            (gridcraft_model::CfValueKind::Max, gridcraft_model::Color::rgb(200, 200, 200)),
+        ],
+    };
+    let lays = layouts(wb, &PrintOptions::default());
+    assert_eq!(try_render_pdf(wb, &lays, "book", "").unwrap_err(), crate::cf::CfIncomplete::InvalidNumber);
+    let (bytes, pages) = render_pdf(wb, &lays, "book", "");
+    assert_eq!(pages, 2);
+    assert!(contains(&bytes, "Finite workbook content"));
+    assert!(contains(&bytes, "Conditional formatting is incomplete"));
+}
