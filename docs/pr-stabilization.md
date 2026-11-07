@@ -7,6 +7,39 @@ This integration branch starts from the reviewed stabilization source containing
 evaluation modes, loss-aware saves, retained-history accounting, calculation/undo repairs and
 native imported what-if definition preservation. Each repair keeps those contracts intact.
 
+## Six implementation commits and verification
+
+The six implementation commits below start from base
+`b31400f431232f351c3d8e21365353b3a82e5111` and end at implementation head
+`f674c107cdca0d70b25cb98e22c95feaa50a707c`. A later documentation publication
+commit is outside this implementation range. Each row records the cumulative native
+test totals from that commit's successful `cargo xtask ci` run on macOS; the focused
+test commands and regression scope appear in the corresponding repair section below.
+
+| Task | Repair / source PR | Local implementation commit | Native passed | Failed | Ignored |
+|---|---|---|---:|---:|---:|
+| PR01 | Negative fractional GCD/LCM arguments — #2072 | `a9fb70b4c31f746517c27989c4cc4827e2ca921c` | 3710 | 0 | 1 |
+| PR02 | Shape typeface XML attributes — #2196 | `c977607fe25bd33751dfbe2311cb79663d59d253` | 3711 | 0 | 1 |
+| PR03 | Borrow cached expressions — #2693 | `e3fe0f7959f3094b08196f0a0bc5be1a75a39735` | 3715 | 0 | 1 |
+| PR04 | Bound MCP stdio input — #2326 | `98efa93b8f9166e231e0751e4d8cb2e9c7a4df56` | 3721 | 0 | 1 |
+| PR05 | PivotTable accumulator budget — #2327 | `c70ed3c2cc1bafe09c8a48b618d824dec0d48e5c` | 3728 | 0 | 1 |
+| PR06 | Stored calculated-column formula renames — #3391 | `f674c107cdca0d70b25cb98e22c95feaa50a707c` | 3733 | 0 | 1 |
+
+All ten CI gates passed at each implementation commit, including compile checks for
+all 12 shared WASM packages. The final implementation run recorded 3733 native tests
+passed, zero failed and one existing calculation timing test ignored by default.
+
+From a checkout containing these commits, reproduce the exact implementation diff with:
+
+~~~sh
+git diff --binary b31400f431232f351c3d8e21365353b3a82e5111..f674c107cdca0d70b25cb98e22c95feaa50a707c
+~~~
+
+This batch did not verify native Windows execution, live Excel observations or reopening,
+GUI smoke behavior, process RSS/allocation/performance measurements, the extended release
+200×200 campaign on this branch, or the combined source with the original session's
+subsequent changes. The synthetic Rust and WASM checks do not establish those results.
+
 ## Negative fractional GCD and LCM arguments
 
 [GCD/LCM repair source: PR #2072](https://github.com/storytold/gridcraft/pull/2072),
