@@ -185,7 +185,7 @@ pub(super) fn read_comments(x: &El, sheet: &mut Sheet) {
             text = rest.strip_prefix('\n').unwrap_or(rest).to_string();
         }
         sheet
-            .comments
+            .comments_mut()
             .insert(cell, Comment { author, text, replies: vec![], threaded: false, resolved: false, visible: false, dates: vec![], note_box: None });
     }
 }
@@ -205,7 +205,7 @@ pub(super) fn read_note_shapes(x: &El, sheet: &mut Sheet, depth: usize) {
         let num = |k: &str| cd.child(k).and_then(|v| v.text.trim().parse::<u32>().ok());
         let (Some(row), Some(col)) = (num("Row"), num("Column")) else { continue };
         let cell = CellRef::new(row, col);
-        let Some(c) = sheet.comments.get_mut(&cell) else { continue };
+        let Some(c) = sheet.comments_mut().get_mut(&cell) else { continue };
         if cd.child("Visible").is_some() && !c.threaded {
             c.visible = true;
         }
@@ -256,7 +256,7 @@ pub(super) fn read_threaded(cx: &Ctx<'_>, x: &El, sheet: &mut Sheet) {
                     by_id.insert(id.to_string(), cell);
                 }
                 let dates = if date.is_empty() { vec![] } else { vec![date] };
-                sheet.comments.insert(
+                sheet.comments_mut().insert(
                     cell,
                     Comment { author, text, replies: vec![], threaded: true, resolved: t.flag("done", false), visible: false, dates, note_box: None },
                 );
@@ -266,7 +266,7 @@ pub(super) fn read_threaded(cx: &Ctx<'_>, x: &El, sheet: &mut Sheet) {
     // Replies in file order; ones whose thread is missing are dropped.
     for (parent, author, text, date) in replies {
         if let Some(c) = by_id.get(&parent)
-            && let Some(cm) = sheet.comments.get_mut(c)
+            && let Some(cm) = sheet.comments_mut().get_mut(c)
         {
             if !date.is_empty() {
                 // `dates[0]` is the thread, `dates[i + 1]` reply i; unknown dates stay empty.

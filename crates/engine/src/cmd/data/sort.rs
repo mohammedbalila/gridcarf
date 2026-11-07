@@ -218,11 +218,13 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         // Every cell of the body is the destination of exactly one source cell, so clearing the
         // body and inserting the permuted entries is the same permutation the cells went through.
         for c in body.iter() {
-            shm.comments.remove(&c);
+            if shm.comments.contains_key(&c) {
+                shm.comments_mut().remove(&c);
+            }
             shm.hyperlinks.remove(&c);
         }
         for (at, cm) in side {
-            shm.comments.insert(at, cm);
+            shm.comments_mut().insert(at, cm);
         }
         for (at, h) in links {
             shm.hyperlinks.insert(at, h);

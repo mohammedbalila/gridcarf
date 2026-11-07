@@ -492,7 +492,7 @@ fn feature_book() -> Workbook {
     use gridcraft_engine::model::*;
     let mut wb = slicer_book();
     let sheet = wb.sheet_mut(0).unwrap();
-    sheet.comments.insert(
+    sheet.comments_mut().insert(
         at("A1"),
         Comment {
             author: "Author".into(),
@@ -573,7 +573,7 @@ fn check_detects_payload_changes() {
     use gridcraft_engine::model::PivotLayout;
     let a = feature_book();
     let changes: &[SheetChange] = &[
-        ("comments", |s| s.comments.get_mut(&at("A1")).unwrap().text = "Changed".into()),
+        ("comments", |s| s.comments_mut().get_mut(&at("A1")).unwrap().text = "Changed".into()),
         ("hyperlinks", |s| s.hyperlinks.get_mut(&at("A2")).unwrap().target = "https://example.com/second".into()),
         ("charts", |s| s.charts[0].title = Some("Changed".into())),
         ("charts", |s| s.charts[0].x_title = Some("New axis".into())),

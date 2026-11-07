@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -30,6 +30,10 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   100 ms (was ~0.4 s); whole-sheet operations bounded.
 - **Evidence:** #175; no threading in `crates/calc`; PR #152 (whole-sheet Fill/Remove Duplicates
   out of memory), PR #151 (current region past 10,000 rows).
+- **Bounded fix:** notes share their map across unrelated cell edits and undo snapshots.
+  The [compatibility baseline](compatibility-baseline.md#post-baseline-repair-note-history-storage-m01)
+  records deterministic sharing checks and release RSS at 80/140 edits. Note edits may
+  still clone the note map; this does not resolve the larger workbook/recalc gaps.
 - **Impact:** finance and data users routinely have big workbooks.
 - **Estimate:** 25–40 h. [target-app-parity.md](target-app-parity.md#performance), [hardware-parity.md](hardware-parity.md)
 
@@ -191,6 +195,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | Record bounded note-history sharing repair and its remaining limits |
 | 2026-11-07 | minor | Bounded legacy XLSX calculation/save fix; external Excel and full legacy parity remain unverified |
 | 2026-11-07 | minor | Link the bounded compatibility baseline and record the reproduced legacy-import calculation failure; no fixes or parity estimate changes |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |

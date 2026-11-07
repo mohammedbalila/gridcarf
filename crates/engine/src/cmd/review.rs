@@ -121,7 +121,7 @@ fn convert_notes(s: &mut Session, _: &Json) -> Result<Json> {
     edit(s, |cx| {
         let mut n = 0usize;
         for i in &sheets {
-            for c in cx.sheet_mut(*i)?.comments.values_mut().filter(|c| !c.threaded) {
+            for c in cx.sheet_mut(*i)?.comments_mut().values_mut().filter(|c| !c.threaded) {
                 c.threaded = true;
                 c.visible = false;
                 n += 1;

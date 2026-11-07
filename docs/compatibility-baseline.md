@@ -1,6 +1,6 @@
 # Compatibility baseline
 
-> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (C01 bounded legacy formula repair; V01 baseline retained)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
 
 This baseline pins source `6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214`, before
 stabilization repairs. It covers four small synthetic cases, not general Excel
@@ -121,6 +121,31 @@ functions, SUMPRODUCT nested arrays, JSON defaults, shared formulas and dirty ed
 The baseline diagnostic table above remains the observation of its pinned pre-fix source.
 This bounded repair does not claim full legacy parity or Excel oracle verification.
 
+## Post-baseline repair: note-history storage (M01)
+
+Sheet snapshots now share the note map through `Arc`; editing notes detaches it.
+Regression tests retain 64 notes of 32,767 characters through 80 distinct B1 edits,
+undo/redo, and 140 edits with 100 retained undo steps. They verify map and text
+allocation identity, unchanged content, independent note edits, and sharing across
+operations outside notes, including multi-area copy and cut/paste. Existing A1-keyed
+JSON maps remain readable and keep the same wire shape.
+
+Fresh release CLI processes on the baseline host used the same Rust-generated inputs
+and 0, 20, 80 and 140 B1 edits, each followed by `history.list`:
+
+| Edits | Plain peak RSS (bytes) | Notes peak RSS (bytes) | Undo depth |
+|---|---:|---:|---:|
+| 0 | 9,928,704 | 16,629,760 | 0 |
+| 20 | 10,649,600 | 17,301,504 | 20 |
+| 80 | 11,091,968 | 17,793,024 | 80 |
+| 140 | 11,321,344 | 17,973,248 | 100 |
+
+All eight processes exited 0. Notes at 80 and 140 edits stayed below the proposed
+64 MiB host-specific target. RSS is a single-run diagnostic, not a portable allocation
+bound; the deterministic sharing assertions establish that unrelated edits retain
+one note map. Actual note edits may still clone that whole map. The pre-fix baseline
+table above remains unchanged. No broader cell-store or metadata sharing claim is made.
+
 ## Limitations
 
 Excel is unavailable: **Excel open, repair prompts, recalculate, refresh and
@@ -133,5 +158,6 @@ version control. No result here upgrades the repository's parity/readiness claim
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | Record M01 note-map sharing, undo/redo regressions and fresh release RSS separately from the baseline |
 | 2026-11-07 | minor | Record bounded C01 legacy XLSX repair separately from the pinned pre-fix diagnostics |
 | 2026-11-07 | minor | Pin source/toolchain and bounded synthetic fixture recipes before repairs |

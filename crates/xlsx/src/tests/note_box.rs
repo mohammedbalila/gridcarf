@@ -66,8 +66,8 @@ fn a_notes_box_moves_with_its_note() {
     // A row and a column inserted before the note move it to C3; its box follows it.
     let (mut wb, _) = read_xlsx(&package()).unwrap();
     let s = wb.sheet_mut(0).unwrap();
-    let c = s.comments.remove(&b2()).unwrap();
-    s.comments.insert(CellRef::new(2, 2), c);
+    let c = s.comments_mut().remove(&b2()).unwrap();
+    s.comments_mut().insert(CellRef::new(2, 2), c);
     let vml = written_vml(&write_xlsx(&wb).unwrap());
     assert!(vml.contains("<x:Anchor>2, 10, 1, 2, 6, 32, 6, 8</x:Anchor>"), "{vml}");
 }
@@ -77,8 +77,8 @@ fn a_box_that_would_start_before_the_sheet_is_clamped_to_it() {
     // The B2 note's box starts one row above it; moved to A1 that row doesn't exist.
     let (mut wb, _) = read_xlsx(&package()).unwrap();
     let s = wb.sheet_mut(0).unwrap();
-    let c = s.comments.remove(&b2()).unwrap();
-    s.comments.insert(CellRef::new(0, 0), c);
+    let c = s.comments_mut().remove(&b2()).unwrap();
+    s.comments_mut().insert(CellRef::new(0, 0), c);
     let vml = written_vml(&write_xlsx(&wb).unwrap());
     assert!(vml.contains("<x:Anchor>0, 10, 0, 2, 4, 32, 4, 8</x:Anchor>"), "{vml}");
 }
@@ -96,7 +96,7 @@ fn a_new_note_gets_the_default_box() {
         dates: vec![],
         note_box: None,
     };
-    wb.sheet_mut(0).unwrap().comments.insert(b2(), note);
+    wb.sheet_mut(0).unwrap().comments_mut().insert(b2(), note);
     let vml = written_vml(&write_xlsx(&wb).unwrap());
     assert!(vml.contains("<x:Anchor>2, 15, 1, 2, 4, 15, 5, 16</x:Anchor>") && vml.contains("width:108pt;height:59.25pt"), "{vml}");
 }

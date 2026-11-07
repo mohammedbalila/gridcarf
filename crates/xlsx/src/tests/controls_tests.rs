@@ -33,7 +33,7 @@ fn book() -> Workbook {
     let mut wb = Workbook::default();
     wb.sheets.clear();
     let mut sh = Sheet::new("Data");
-    sh.comments.insert(at("A1"), note("Me", "a note"));
+    sh.comments_mut().insert(at("A1"), note("Me", "a note"));
     sh.controls.push(FormControl {
         id: 1,
         kind: ControlKind::Slider,
@@ -141,7 +141,7 @@ fn many_shapes_take_several_id_blocks() {
     wb.sheets.push(sh.into());
     wb.sheets.push(Sheet::new("Next").into());
     if let Some(s) = wb.sheet_mut(1) {
-        s.comments.insert(at("B2"), note("x", "y"));
+        s.comments_mut().insert(at("B2"), note("x", "y"));
     }
     let bytes = write_xlsx(&wb).unwrap();
     let mut pkg = Package::open(&bytes).unwrap();
@@ -414,7 +414,7 @@ fn vml_shapes_are_also_found_by_their_spid() {
 fn the_properties_part_wins_over_the_vml() {
     let mut wb = book();
     if let Some(s) = wb.sheet_mut(0) {
-        s.comments.clear();
+        s.comments_mut().clear();
         s.controls.truncate(1);
     }
     let bytes = write_xlsx(&wb).unwrap();

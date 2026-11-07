@@ -154,8 +154,8 @@ fn hostile_threaded_comments_persons_and_note_vml() {
         dates: vec![],
         note_box: None,
     };
-    s.comments.insert(CellRef::new(0, 0), c(true));
-    s.comments.insert(CellRef::new(1, 1), c(false));
+    s.comments_mut().insert(CellRef::new(0, 0), c(true));
+    s.comments_mut().insert(CellRef::new(1, 1), c(false));
     let good = write_xlsx(&wb).unwrap();
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(good)).unwrap();
     let mut parts: Vec<(String, Vec<u8>)> = vec![];

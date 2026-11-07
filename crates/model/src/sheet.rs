@@ -136,8 +136,9 @@ pub struct Sheet {
     pub validations: Vec<Validation>,
     pub tables: Vec<Table>,
     pub autofilter: Option<AutoFilter>,
-    #[serde(with = "crate::cellmap")]
-    pub comments: BTreeMap<CellRef, Comment>,
+    /// Shared by sheet snapshots; note edits detach through [`Sheet::comments_mut`].
+    #[serde(with = "crate::cellmap::shared")]
+    pub comments: Arc<BTreeMap<CellRef, Comment>>,
     #[serde(with = "crate::cellmap")]
     pub hyperlinks: BTreeMap<CellRef, Hyperlink>,
     pub charts: Vec<Chart>,
@@ -216,7 +217,7 @@ impl Sheet {
             validations: vec![],
             tables: vec![],
             autofilter: None,
-            comments: BTreeMap::new(),
+            comments: Arc::new(BTreeMap::new()),
             hyperlinks: BTreeMap::new(),
             charts: vec![],
             images: vec![],
@@ -233,6 +234,11 @@ impl Sheet {
             view: SheetViewMode::Normal,
             preserved: None,
         }
+    }
+
+    /// Detach the note map only when editing notes, preserving other snapshots.
+    pub fn comments_mut(&mut self) -> &mut BTreeMap<CellRef, Comment> {
+        Arc::make_mut(&mut self.comments)
     }
 
     pub fn cell(&self, c: CellRef) -> Option<&Cell> {

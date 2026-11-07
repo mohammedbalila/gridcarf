@@ -709,7 +709,7 @@ pub(crate) fn paint_overlays(input: OverlayInput<'_>) {
     // Notes: shown on hover (or always when marked visible).
     let hover = app.grid.hover_cell;
     let all_notes = app.session.show_all_notes;
-    for (c, cm) in &sh.comments {
+    for (c, cm) in sh.comments.iter() {
         let show = cm.visible || (all_notes && !cm.threaded) || hover == Some(*c);
         if !show || app.grid.drag != Drag::None {
             continue;

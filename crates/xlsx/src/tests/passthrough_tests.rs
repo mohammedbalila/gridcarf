@@ -315,7 +315,7 @@ fn edited_workbooks_keep_consistent_relationships() {
     wb.sheets.insert(0, Arc::new(Sheet::new("New")));
     let s = wb.sheet_mut(1).unwrap();
     s.name = "Renamed".into();
-    s.comments.clear();
+    s.comments_mut().clear();
     s.set_value(gridcraft_core::CellRef::new(5, 5), gridcraft_core::Value::Number(3.0));
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();

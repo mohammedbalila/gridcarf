@@ -1,5 +1,14 @@
 # Decisions
 
+## Share note storage between sheet snapshots
+
+`Sheet::comments` is an `Arc<BTreeMap<CellRef, Comment>>`. Note edits use
+`Sheet::comments_mut` to detach the map, so undo versions remain independent while
+unrelated cell edits share the payload. Operations that cannot affect notes avoid
+requesting mutable access. JSON keeps its existing A1-keyed object shape through
+the cell-map serde helpers. This change is limited to notes; other sheet metadata
+keeps its current storage.
+
 ## Bound repeated XLSX column expansion (#1022)
 
 Limit each worksheet to 1,000,000 nondefault column assignments across all `<cols>` blocks.

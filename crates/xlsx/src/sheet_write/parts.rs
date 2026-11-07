@@ -222,7 +222,7 @@ pub(super) fn comments_xml(sheet: &Sheet, ids: &BTreeMap<CellRef, Vec<String>>) 
         None => c.author.clone(),
     };
     let mut authors: Vec<String> = vec![];
-    for (cell, c) in &sheet.comments {
+    for (cell, c) in sheet.comments.iter() {
         let a = author_of(cell, c);
         if !authors.contains(&a) {
             authors.push(a);
@@ -239,7 +239,7 @@ pub(super) fn comments_xml(sheet: &Sheet, ids: &BTreeMap<CellRef, Vec<String>>) 
         let _ = write!(s, "<author>{}</author>", esc(a));
     }
     s.push_str("</authors><commentList>");
-    for (cell, c) in &sheet.comments {
+    for (cell, c) in sheet.comments.iter() {
         let a = author_of(cell, c);
         let aid = authors.iter().position(|x| *x == a).unwrap_or(0);
         let mut text = c.text.clone();

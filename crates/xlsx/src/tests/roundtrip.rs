@@ -207,7 +207,7 @@ fn sample() -> Workbook {
     s.hyperlinks.insert(at("A2"), Hyperlink { target: "https://example.com/?a=1&b=2".into(), tooltip: Some("go".into()), external: true });
     s.hyperlinks.insert(at("A3"), Hyperlink { target: "'Data & Stuff'!B2".into(), tooltip: None, external: false });
     s.hyperlinks.insert(at("A4"), Hyperlink { target: "mailto:me@example.com".into(), tooltip: None, external: true });
-    s.comments.insert(
+    s.comments_mut().insert(
         at("B2"),
         Comment {
             author: "Ann".into(),
@@ -220,7 +220,7 @@ fn sample() -> Workbook {
             note_box: None,
         },
     );
-    s.comments.insert(
+    s.comments_mut().insert(
         at("C3"),
         Comment {
             author: "Bob".into(),
@@ -233,7 +233,7 @@ fn sample() -> Workbook {
             note_box: None,
         },
     );
-    s.comments.insert(
+    s.comments_mut().insert(
         at("D4"),
         Comment {
             author: "Ann & Co".into(),
@@ -246,7 +246,7 @@ fn sample() -> Workbook {
             note_box: None,
         },
     );
-    s.comments.insert(
+    s.comments_mut().insert(
         at("E5"),
         Comment {
             author: "Cy".into(),
@@ -466,7 +466,7 @@ fn sample() -> Workbook {
     wb.sheets.push(Arc::new(s2));
     let mut s3 = Sheet::new("2024");
     s3.visibility = Visibility::VeryHidden;
-    s3.comments.insert(
+    s3.comments_mut().insert(
         at("A1"),
         Comment {
             author: "Bob".into(),
@@ -807,7 +807,7 @@ fn cell_text_carriage_returns_survive_xlsx_roundtrip() {
     let mut formula = Cell::formula(Formula::new("A1"));
     formula.value = Value::text("Cached\r\ntext");
     sheet.cells.set(at("B1"), formula);
-    sheet.comments.insert(
+    sheet.comments_mut().insert(
         at("A1"),
         Comment {
             author: "Tester".into(),
@@ -1064,7 +1064,7 @@ fn bad_comment_dates_are_left_out() {
         dates: vec!["\"/><evil".into()],
         note_box: None,
     };
-    s.comments.insert(at("A1"), c);
+    s.comments_mut().insert(at("A1"), c);
     let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
     let c = &back.sheets[0].comments[&at("A1")];
     assert!(c.threaded && c.dates.is_empty());

@@ -78,7 +78,9 @@ pub(super) fn remove_duplicates(s: &mut Session, p: &Json) -> Result<Json> {
         for row in start..=r.end.row {
             for c in r.start.col..=r.end.col {
                 let at = CellRef::new(row, c);
-                shm.comments.remove(&at);
+                if shm.comments.contains_key(&at) {
+                    shm.comments_mut().remove(&at);
+                }
                 shm.hyperlinks.remove(&at);
             }
         }
@@ -91,7 +93,7 @@ pub(super) fn remove_duplicates(s: &mut Session, p: &Json) -> Result<Json> {
         }
         shm.cell_pictures.extend(pictures);
         for (at, cm) in notes {
-            shm.comments.insert(at, cm);
+            shm.comments_mut().insert(at, cm);
         }
         for (at, h) in links {
             shm.hyperlinks.insert(at, h);

@@ -82,7 +82,9 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
             // with the block: the destination is written from the clipboard snapshot taken
             // before the cut, so removing them here loses nothing and leaves the old place
             // clean instead of leaving one merged block and one note behind.
-            source.comments.retain(|c, _| !src.contains(*c));
+            if source.comments.keys().any(|c| src.contains(*c)) {
+                source.comments_mut().retain(|c, _| !src.contains(*c));
+            }
             source.hyperlinks.retain(|c, _| !src.contains(*c));
             source.merges.retain(|m| !src.contains_range(m));
             for (c, _) in &taken {
@@ -304,12 +306,12 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
                     match what {
                         What::Comments => {
                             if let Some(cm) = src_sheet.comments.get(&sc).cloned() {
-                                cx.sheet_mut(dest_sheet)?.comments.insert(dest, cm);
+                                cx.sheet_mut(dest_sheet)?.comments_mut().insert(dest, cm);
                             }
                         }
                         What::All => {
                             if let Some(cm) = src_sheet.comments.get(&sc).cloned() {
-                                cx.sheet_mut(dest_sheet)?.comments.insert(dest, cm);
+                                cx.sheet_mut(dest_sheet)?.comments_mut().insert(dest, cm);
                             }
                             if let Some(h) = src_sheet.hyperlinks.get(&sc).cloned() {
                                 cx.sheet_mut(dest_sheet)?.hyperlinks.insert(dest, h);

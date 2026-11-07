@@ -1406,7 +1406,7 @@ fn comment(s: &mut Session, p: &Json, threaded: bool) -> Result<Json> {
     let named = str_param(p, "author").map(str::to_string);
     let author = named.clone().unwrap_or_else(|| s.prefs.user_name.clone());
     edit(s, |cx| {
-        let comments = &mut cx.sheet_mut(sheet)?.comments;
+        let comments = cx.sheet_mut(sheet)?.comments_mut();
         // Writing a note on a cell that has one edits it, as Excel's Edit Note does: the box, the
         // replies, the dates and who wrote it stay. A note replaces a comment and vice versa.
         if let Some(c) = comments.get_mut(&at).filter(|c| c.threaded == threaded) {
@@ -1439,7 +1439,7 @@ fn reply_comment(s: &mut Session, p: &Json) -> Result<Json> {
     let text = str_param(p, "text").unwrap_or("").to_string();
     let author = str_param(p, "author").map(str::to_string).unwrap_or_else(|| s.prefs.user_name.clone());
     edit(s, |cx| {
-        let c = cx.sheet_mut(sheet)?.comments.get_mut(&at).ok_or_else(|| EngineError::Other("There's no comment in this cell.".into()))?;
+        let c = cx.sheet_mut(sheet)?.comments_mut().get_mut(&at).ok_or_else(|| EngineError::Other("There's no comment in this cell.".into()))?;
         c.replies.push((author.clone(), text.clone()));
         Ok(Json::Null)
     })
@@ -1450,7 +1450,10 @@ fn resolve_comment(s: &mut Session, p: &Json) -> Result<Json> {
     let at = cell_param_on(s, p, "cell", sheet)?.unwrap_or(s.doc()?.selection.active);
     let v = bool_param(p, "resolved").unwrap_or(true);
     edit(s, |cx| {
-        if let Some(c) = cx.sheet_mut(sheet)?.comments.get_mut(&at) {
+        let sh = cx.sheet_mut(sheet)?;
+        if sh.comments.get(&at).is_some_and(|c| c.resolved != v)
+            && let Some(c) = sh.comments_mut().get_mut(&at)
+        {
             c.resolved = v;
         }
         Ok(Json::Null)
@@ -1461,7 +1464,10 @@ fn delete_comment(s: &mut Session, p: &Json) -> Result<Json> {
     let sheet = target_sheet(s, p)?;
     let ranges = target_ranges(s, p)?;
     edit(s, |cx| {
-        cx.sheet_mut(sheet)?.comments.retain(|c, _| !ranges.iter().any(|r| r.contains(*c)));
+        let sh = cx.sheet_mut(sheet)?;
+        if sh.comments.keys().any(|c| ranges.iter().any(|r| r.contains(*c))) {
+            sh.comments_mut().retain(|c, _| !ranges.iter().any(|r| r.contains(*c)));
+        }
         Ok(Json::Null)
     })
 }
@@ -1470,7 +1476,10 @@ fn show_note(s: &mut Session, p: &Json) -> Result<Json> {
     let sheet = target_sheet(s, p)?;
     let at = cell_param_on(s, p, "cell", sheet)?.unwrap_or(s.doc()?.selection.active);
     edit(s, |cx| {
-        if let Some(c) = cx.sheet_mut(sheet)?.comments.get_mut(&at) {
+        let sh = cx.sheet_mut(sheet)?;
+        if sh.comments.contains_key(&at)
+            && let Some(c) = sh.comments_mut().get_mut(&at)
+        {
             c.visible = !c.visible;
         }
         Ok(Json::Null)

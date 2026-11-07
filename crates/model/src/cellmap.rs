@@ -21,6 +21,21 @@ pub fn deserialize<'de, D: Deserializer<'de>, V: Deserialize<'de>>(d: D) -> Resu
     Ok(out)
 }
 
+/// The same A1-keyed wire shape for maps shared between sheet snapshots.
+pub mod shared {
+    use std::sync::Arc;
+
+    use super::{BTreeMap, CellRef, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, V: Serialize>(map: &Arc<BTreeMap<CellRef, V>>, s: S) -> Result<S::Ok, S::Error> {
+        super::serialize(map, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, V: Deserialize<'de>>(d: D) -> Result<Arc<BTreeMap<CellRef, V>>, D::Error> {
+        super::deserialize(d).map(Arc::new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{Comment, Hyperlink, Sheet};
@@ -31,7 +46,7 @@ mod tests {
         let mut s = Sheet::new("S");
         let a1 = CellRef::new(0, 0);
         let c3 = CellRef::new(2, 2);
-        s.comments.insert(
+        s.comments_mut().insert(
             a1,
             Comment {
                 author: "Example".into(),
@@ -46,6 +61,16 @@ mod tests {
         );
         s.hyperlinks.insert(c3, Hyperlink { target: "Sheet1!A1".into(), tooltip: Some("jump".into()), external: false });
         let json = serde_json::to_string(&s)?;
+        let wire: serde_json::Value = serde_json::from_str(&json)?;
+        assert_eq!(wire["comments"]["A1"]["text"], "note");
+        assert_eq!(wire["hyperlinks"]["C3"]["target"], "Sheet1!A1");
+        assert_eq!(wire["comments"].as_object().unwrap().len(), 1);
+        // Historical JSON uses plain A1-keyed objects, without a sharing wrapper.
+        let mut old = serde_json::to_value(Sheet::new("Old"))?;
+        old["comments"] =
+            serde_json::json!({"B2": {"author": "Old", "text": "legacy", "threaded": false, "resolved": false, "visible": false, "replies": []}});
+        let old: Sheet = serde_json::from_value(old)?;
+        assert_eq!(old.comments[&CellRef::new(1, 1)].text, "legacy");
         let back: Sheet = serde_json::from_str(&json)?;
         assert_eq!(back.comments, s.comments);
         assert_eq!(back.hyperlinks, s.hyperlinks);

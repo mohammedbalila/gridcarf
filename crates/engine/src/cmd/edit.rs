@@ -339,8 +339,8 @@ fn clear(s: &mut Session, p: &Json, what: &str) -> Result<Json> {
                     _ => {}
                 }
             }
-            if matches!(what, "all" | "comments") {
-                sh.comments.retain(|c, _| !cleared(*c));
+            if matches!(what, "all" | "comments") && sh.comments.keys().any(|c| cleared(*c)) {
+                sh.comments_mut().retain(|c, _| !cleared(*c));
             }
             if matches!(what, "all" | "hyperlinks") {
                 sh.hyperlinks.retain(|c, _| !cleared(*c));
