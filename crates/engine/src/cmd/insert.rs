@@ -10,7 +10,7 @@ use gridcraft_model::{
 };
 use serde_json::{Value as Json, json};
 
-use super::sheet::{rewrite, shift_cell_features};
+use super::sheet::{check_merge_shift, rewrite, shift_cell_features};
 use super::{
     CommandSpec, EngineError, PROTECTED, Result, Session, anchor_mode_name, anchor_mode_param, bad, bool_param, cell_param, cell_param_on, cmd, edit,
     f64_param, has_doc, locked_cell_error, ok, split_sheet, str_param, target_range, target_ranges, target_sheet, u32_param,
@@ -306,6 +306,9 @@ fn insert_table(s: &mut Session, p: &Json) -> Result<Json> {
     if !header && d.wb.sheet(sheet).is_some_and(moves_a_table) {
         return Err(EngineError::Other("This operation isn't allowed: it would shift cells in a table on your worksheet.".into()));
     }
+    if !header && let Some(sh) = d.wb.sheet(sheet) {
+        check_merge_shift(sh, &Edit::InsertCells { axis: Axis::Rows, range: RangeRef::new(r.start, CellRef::new(r.start.row, r.end.col)) })?;
+    }
     let style = str_param(p, "style").unwrap_or("TableStyleMedium2").to_string();
     let id = d.wb.next_object_id();
     edit(s, |cx| {
@@ -415,6 +418,29 @@ fn find_table(s: &Session, p: &Json) -> Result<(usize, usize)> {
 fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json> {
     let (si, ti) = find_table(s, p)?;
     let on = bool_param(p, "on");
+    if which == "totals"
+        && let Some(sh) = s.doc()?.wb.sheet(si)
+        && let Some(t) = sh.tables.get(ti)
+        && !t.totals_row
+        && on.unwrap_or(true)
+    {
+        if t.range.end.row.saturating_add(1) >= MAX_ROWS {
+            return Err(EngineError::Other("There's no room below the table for the total row.".into()));
+        }
+        let candidate = RangeRef::new(t.range.start, CellRef::new(t.range.end.row + 1, t.range.end.col));
+        if sh.tables.iter().enumerate().any(|(i, other)| i != ti && other.range.intersects(&candidate)) {
+            return Err(EngineError::Other("A table can't overlap another table.".into()));
+        }
+        let row = RangeRef::new(CellRef::new(candidate.end.row, candidate.start.col), candidate.end);
+        // Totals writes or clears every destination column, including columns without a totals
+        // expression. Derived spill/CSE results own their cells even when no stored cell exists.
+        if sh.cells.iter_range(row).any(|(_, cell)| cell.has_content())
+            || sh.spill_ranges.values().any(|r| r.intersects(&row))
+            || sh.cells.iter().any(|(_, cell)| cell.formula.as_ref().and_then(|f| f.array).is_some_and(|r| !r.is_single() && r.intersects(&row)))
+        {
+            return Err(EngineError::Other("The total row would overwrite existing data.".into()));
+        }
+    }
     edit(s, |cx| {
         let sh = cx.sheet_mut(si)?;
         let Some(t) = sh.tables.get_mut(ti) else { return Ok(Json::Null) };
@@ -422,9 +448,6 @@ fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json> {
             "totals" => {
                 let v = on.unwrap_or(!t.totals_row);
                 if v != t.totals_row {
-                    if v && t.range.end.row.saturating_add(1) >= MAX_ROWS {
-                        return Err(EngineError::Other("There's no room below the table for the total row.".into()));
-                    }
                     t.totals_row = v;
                     if v {
                         t.range.end.row += 1;

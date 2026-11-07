@@ -494,6 +494,7 @@ fn insert_cells(s: &mut Session, p: &Json) -> Result<Json> {
     let sheet = target_sheet(s, p)?;
     if let Some(sh) = s.doc()?.wb.sheet(sheet) {
         check_table_shift(sh, &e)?;
+        check_merge_shift(sh, &e)?;
         // Refuse to push data off the sheet: cells in the last `width`/`height` positions would be dropped.
         let doomed = if shift == "right" {
             RangeRef::new(CellRef::new(r.start.row, r.start.col.max(MAX_COLS.saturating_sub(r.width()))), CellRef::new(r.end.row, MAX_COLS - 1))
@@ -534,6 +535,7 @@ fn delete_cells(s: &mut Session, p: &Json) -> Result<Json> {
     let sheet = target_sheet(s, p)?;
     if let Some(sh) = s.doc()?.wb.sheet(sheet) {
         check_table_shift(sh, &e)?;
+        check_merge_shift(sh, &e)?;
     }
     let left = shift == "left";
     let out = edit(s, |cx| {
@@ -842,6 +844,35 @@ pub(crate) fn check_table_shift(sh: &Sheet, e: &Edit) -> Result<()> {
         };
         if !ok {
             return Err(EngineError::Other("This operation isn't allowed: it would shift cells in a table on your worksheet.".into()));
+        }
+    }
+    Ok(())
+}
+
+/// A cell shift must carry a merge's whole transverse span. Formula-reference mapping leaves
+/// wider ranges unchanged, which would strand the merge's anchor or create overlapping merges.
+pub(crate) fn check_merge_shift(sh: &Sheet, e: &Edit) -> Result<()> {
+    let (axis, r) = match *e {
+        Edit::InsertCells { axis, range } | Edit::DeleteCells { axis, range } => (axis, range),
+        _ => return Ok(()),
+    };
+    for m in &sh.merges {
+        let partial = match axis {
+            Axis::Rows => {
+                m.end.row >= r.start.row
+                    && m.start.col <= r.end.col
+                    && m.end.col >= r.start.col
+                    && (r.start.col > m.start.col || r.end.col < m.end.col)
+            }
+            Axis::Cols => {
+                m.end.col >= r.start.col
+                    && m.start.row <= r.end.row
+                    && m.end.row >= r.start.row
+                    && (r.start.row > m.start.row || r.end.row < m.end.row)
+            }
+        };
+        if partial {
+            return Err(EngineError::Other("This operation isn't allowed: it would shift only part of a merged cell.".into()));
         }
     }
     Ok(())
