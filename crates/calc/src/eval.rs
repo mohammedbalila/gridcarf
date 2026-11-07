@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gridcraft_core::{Array, CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, compare};
 use gridcraft_formula::{BinOp, Expr, Reference, SheetSel, StructItem, StructRef, UnOp};
 use gridcraft_functions::{Arg, Ctx};
-use gridcraft_model::Workbook;
+use gridcraft_model::{FormulaEvalMode, Workbook};
 
 mod array;
 mod call;
@@ -129,6 +129,7 @@ pub struct Evaluator<'h> {
     pub sheet: usize,
     pub at: CellRef,
     env: Vec<(String, Ev)>,
+    mode: FormulaEvalMode,
     depth: usize,
     /// LAMBDA calls in progress.
     calls: usize,
@@ -183,6 +184,7 @@ impl Ctx for FnCtx<'_, '_> {
             sheet: area.sheet,
             at,
             env,
+            mode: self.ev.mode,
             depth: self.ev.depth,
             calls: self.ev.calls,
             stack_top: self.ev.stack_top,
@@ -210,12 +212,19 @@ impl Ctx for FnCtx<'_, '_> {
 
 impl<'h> Evaluator<'h> {
     pub fn new(host: &'h mut dyn Host, sheet: usize, at: CellRef) -> Self {
-        Evaluator { host, sheet, at, env: Vec::new(), depth: 0, calls: 0, stack_top: 0, fuel: LAMBDA_FUEL }
+        Evaluator { host, sheet, at, env: Vec::new(), mode: FormulaEvalMode::Array, depth: 0, calls: 0, stack_top: 0, fuel: LAMBDA_FUEL }
     }
 
-    /// Evaluates to a value (references are dereferenced; multi-cell → array).
+    /// Selects formula semantics; direct evaluation defaults to array evaluation.
+    pub fn with_mode(mut self, mode: FormulaEvalMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Evaluates a value context, intersecting references for legacy scalar formulas.
     pub fn value(&mut self, e: &Expr) -> Value {
         let ev = self.eval(e);
+        let ev = self.scalar_context(ev);
         self.deref(ev)
     }
 
@@ -499,17 +508,7 @@ impl<'h> Evaluator<'h> {
         }
         if op == UnOp::At {
             let ev = self.eval(x);
-            return match ev {
-                Ev::R(areas) => match areas.as_slice() {
-                    [a] => match self.implicit_intersect(a) {
-                        Some(c) => Ev::V(self.host.cell_value(a.sheet, c)),
-                        None => err(CellError::Value),
-                    },
-                    _ => err(CellError::Value),
-                },
-                Ev::V(v) => Ev::V(v.scalar()),
-                l => l,
-            };
+            return self.intersect(ev);
         }
         let v = self.value(x);
         let sys = self.host.workbook().date_system;
@@ -524,6 +523,32 @@ impl<'h> Evaluator<'h> {
             op == UnOp::Plus,
             sys,
         ))
+    }
+
+    fn scalar_context(&mut self, ev: Ev) -> Ev {
+        if self.mode == FormulaEvalMode::Legacy { self.intersect(ev) } else { ev }
+    }
+
+    fn intersect(&mut self, ev: Ev) -> Ev {
+        match ev {
+            Ev::R(areas) => match areas.as_slice() {
+                [a] => match self.implicit_intersect(a) {
+                    Some(c) => Ev::V(self.host.cell_value(a.sheet, c)),
+                    None => err(CellError::Value),
+                },
+                _ => err(CellError::Value),
+            },
+            Ev::V(v) => Ev::V(v.scalar()),
+            l => l,
+        }
+    }
+
+    /// Array-consuming contexts keep nested operators and scalar calls array-aware.
+    fn eval_array(&mut self, e: &Expr) -> Ev {
+        let saved = std::mem::replace(&mut self.mode, FormulaEvalMode::Array);
+        let result = self.eval(e);
+        self.mode = saved;
+        result
     }
 
     fn implicit_intersect(&self, a: &Area) -> Option<CellRef> {

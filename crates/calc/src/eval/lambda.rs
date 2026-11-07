@@ -1,6 +1,6 @@
 use super::MAX_LAMBDA_CALLS;
 use super::array::{broadcast_len, single};
-use super::{Array, CellError, Ev, Evaluator, Expr, Lambda, MAX_CELLS, Value, err};
+use super::{Array, CellError, Ev, Evaluator, Expr, FormulaEvalMode, Lambda, MAX_CELLS, Value, err};
 use std::sync::Arc;
 
 impl<'h> Evaluator<'h> {
@@ -80,6 +80,14 @@ impl<'h> Evaluator<'h> {
     }
 
     pub(super) fn higher_order(&mut self, name: &str, args: &[Expr]) -> Ev {
+        // The helper's input arrays and LAMBDA bodies stay array-aware inside legacy formulas.
+        let saved = std::mem::replace(&mut self.mode, FormulaEvalMode::Array);
+        let result = self.higher_order_array(name, args);
+        self.mode = saved;
+        result
+    }
+
+    fn higher_order_array(&mut self, name: &str, args: &[Expr]) -> Ev {
         let as_array = |v: Value| -> Arc<Array> {
             match v {
                 Value::Array(a) => a,

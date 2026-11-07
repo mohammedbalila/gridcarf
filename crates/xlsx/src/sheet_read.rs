@@ -650,7 +650,11 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
 
 fn read_formula(cx: &mut Ctx<'_>, st: &mut RowState, f: &El, pos: CellRef, dynamic: bool) -> Option<Formula> {
     // Keep the file's dynamic-array mark, so saving never turns the formula into a legacy one.
-    read_formula_text(cx, st, f, pos, dynamic).map(|fm| Formula { dynamic, ..fm })
+    read_formula_text(cx, st, f, pos, dynamic).map(|fm| {
+        let eval_mode =
+            if dynamic || fm.array.is_some() { gridcraft_model::FormulaEvalMode::Array } else { gridcraft_model::FormulaEvalMode::Legacy };
+        Formula { dynamic, eval_mode, ..fm }
+    })
 }
 
 fn read_formula_text(cx: &mut Ctx<'_>, st: &mut RowState, f: &El, pos: CellRef, dynamic: bool) -> Option<Formula> {

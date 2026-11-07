@@ -22,13 +22,13 @@ merged. Those locales retain their existing formula fallback; this change adds o
 
 ## Preserve array evaluation when exporting formulas (#64)
 
-GridCraft evaluates ordinary formulas with array semantics even when the final result occupies one cell. XLSX export marks actual spills and formulas whose results may differ under legacy implicit intersection as dynamic, using the spill range or a single-cell array reference. Legacy CSE array ranges keep their existing representation.
+GridCraft evaluates newly entered formulas with array semantics even when the final result occupies one cell. XLSX export marks actual spills and formulas whose results may differ under legacy implicit intersection as dynamic, using the spill range or a single-cell array reference. Legacy CSE array ranges keep their existing representation.
 
 The exporter inspects the parsed formula without evaluating it. It distinguishes range-taking functions such as `SUM` from scalar arguments and operators: `SUM(A1:A3)` and `A1*2` stay ordinary, while `SUM(A1:A3*B1:B3)` and `SQRT(A1:A3)` retain array evaluation. Legacy array-aware contexts such as `SUMPRODUCT` do not need an extra marker. Explicit `@` scalarizes its result without hiding array-sensitive operations inside it.
 
 Names are resolved using workbook/sheet scope, and structured references distinguish one table-row cell from a column. Literal `INDIRECT` and `INDEX` arguments permit tighter classification; unresolved reference dimensions are conservatively treated as potentially multiple cells. Name/AST traversal is bounded, with array preservation as the fallback. This is an export classifier, not a claim of exact Excel metadata parity for every function or user-defined function. It stays within the format crate's existing dependencies and does not change calculation or import behavior.
 
-This is a writer policy; interpreting implicit intersection in imported legacy formulas remains separate work. See Microsoft's [Formula vs. Formula2 documentation](https://learn.microsoft.com/en-us/office/vba/excel/concepts/cells-and-ranges/range-formula-vs-formula2).
+This is the writer policy for array-mode formulas. Imported legacy formulas follow the evaluation-mode decision below. See Microsoft's [Formula vs. Formula2 documentation](https://learn.microsoft.com/en-us/office/vba/excel/concepts/cells-and-ranges/range-formula-vs-formula2).
 
 ## Static cell pictures
 
@@ -124,3 +124,27 @@ so there the caps and the fuzzed input space are the protection. `crates/math/te
 gate on every test run, so a version bump has to pass it. RaTeX positions glyphs with KaTeX
 font metrics; GridCraft never bundles the KaTeX fonts, so glyphs are drawn with system fonts
 and a glyph no font has is drawn as a `[?]` box.
+
+## Preserve imported XLSX evaluation semantics (C01, 2026-11-07)
+
+`Formula.eval_mode` separates calculation semantics from `Formula.dynamic`, which remains
+an export marker. The additive JSON field is `"Array"` or `"Legacy"`; missing fields and
+`Formula::new`/`from_expr` default to `Array`, preserving older GridCraft JSON and newly
+entered formula behavior. Ordinary and shared XLSX formulas import as `Legacy`; dynamic
+cell metadata or a CSE array record selects `Array`. Formula movement, fill, sort and
+reference rewrites retain the mode; entering a replacement formula selects `Array`.
+
+Each dirty formula uses its mode through `Evaluator::with_mode`. The default evaluator
+used by direct evaluation, conditional formats and validation remains array-aware.
+Legacy scalar arguments, arithmetic operands and final results use the existing `@`
+intersection rules. Function registry masks preserve range parameters and the documented
+multi-cell rejection of value parameters. Array-consuming contexts such as SUMPRODUCT,
+INDEX's source and LAMBDA helpers keep nested array calculations. CSE/dynamic formulas
+retain their existing array behavior. Export does not promote a legacy formula merely
+because its expression contains a range; existing CSE and dynamic export markers retain
+their roles.
+
+Synthetic Session/XLSX tests cover SQRT at row 2, shared formulas, scalar and range
+contexts, round trips, JSON compatibility and recalculation after edits. These bounded
+checks do not establish complete legacy function parity; other file formats are unchanged.
+Excel open/repair/recalculate and an external workbook corpus remain untested.

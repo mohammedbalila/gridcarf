@@ -168,6 +168,7 @@ impl<'h> Evaluator<'h> {
             return err(CellError::Value);
         }
         let value = self.arg_ev(args, 0).unwrap_or(Ev::V(Value::Empty));
+        let value = self.scalar_context(value);
         let na_only = name == "IFNA";
         let catches = |error: CellError| !na_only || error == CellError::NA;
         match &value {
@@ -312,7 +313,11 @@ impl<'h> Evaluator<'h> {
             _ => None,
         };
         for (i, a) in args.iter().enumerate() {
-            let mut ev = self.eval(a);
+            let array_context = matches!(
+                name,
+                "SUMPRODUCT" | "MMULT" | "MINVERSE" | "MDETERM" | "TRANSPOSE" | "FREQUENCY" | "LINEST" | "LOGEST" | "TREND" | "GROWTH"
+            );
+            let mut ev = if array_context { self.eval_array(a) } else { self.eval(a) };
             if lambda_at == Some(i)
                 && let Ev::L(l) = &ev
             {
@@ -335,6 +340,11 @@ impl<'h> Evaluator<'h> {
                 {
                     ev = Ev::R(vec![Area { sheet: area.sheet, range: resized_sum_range(area.range, h, w) }]);
                 }
+            }
+            // Value parameters deliberately reject multi-cell references in either mode.
+            // Range parameters retain references; scalar parameters intersect before lifting.
+            if spec.is_scalar_arg(i) && !spec.is_value_arg(i) && !array_context {
+                ev = self.scalar_context(ev);
             }
             let from_ref = matches!(ev, Ev::R(_));
             let value = match ev {

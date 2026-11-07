@@ -21,6 +21,10 @@ impl Shape {
 }
 
 pub(crate) fn needs_array(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula) -> bool {
+    // Imported legacy formulas must not be promoted just because scalar arguments contain ranges.
+    if formula.eval_mode == gridcraft_model::FormulaEvalMode::Legacy {
+        return false;
+    }
     let Some(expr) = formula.expr_arc() else { return false };
     // The budget covers every node of a formula as long as Excel allows (8,192 characters make
     // at most about 8,200 nodes), so only names that expand a lot fall back to array evaluation.

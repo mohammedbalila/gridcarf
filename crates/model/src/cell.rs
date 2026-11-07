@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 use crate::python::PyCode;
 use crate::style::StyleId;
 
+/// Evaluation semantics, independent of XLSX dynamic-array export metadata.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FormulaEvalMode {
+    /// New GridCraft formulas, dynamic arrays and legacy Ctrl+Shift+Enter formulas.
+    #[default]
+    Array,
+    /// Ordinary imported XLSX formulas use implicit intersection in scalar contexts.
+    Legacy,
+}
+
 /// A parsed formula. `text` is the canonical formula text without the leading `=`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Formula {
@@ -24,6 +34,9 @@ pub struct Formula {
     /// rewritten in GridCraft start without it, and the writer decides from their shape.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dynamic: bool,
+    /// Missing in older JSON: retain GridCraft's existing array evaluation by default.
+    #[serde(default)]
+    pub eval_mode: FormulaEvalMode,
 }
 
 impl Formula {
@@ -32,12 +45,18 @@ impl Formula {
     pub fn new(text: &str) -> Formula {
         let body = text.strip_prefix('=').unwrap_or(text);
         match gridcraft_formula::parse(body) {
-            Ok(e) => Formula { text: gridcraft_formula::print(&e), expr: Some(Arc::new(e)), array: None, dynamic: false },
-            Err(_) => Formula { text: body.to_string(), expr: None, array: None, dynamic: false },
+            Ok(e) => Formula {
+                text: gridcraft_formula::print(&e),
+                expr: Some(Arc::new(e)),
+                array: None,
+                dynamic: false,
+                eval_mode: FormulaEvalMode::Array,
+            },
+            Err(_) => Formula { text: body.to_string(), expr: None, array: None, dynamic: false, eval_mode: FormulaEvalMode::Array },
         }
     }
     pub fn from_expr(e: Expr) -> Formula {
-        Formula { text: gridcraft_formula::print(&e), expr: Some(Arc::new(e)), array: None, dynamic: false }
+        Formula { text: gridcraft_formula::print(&e), expr: Some(Arc::new(e)), array: None, dynamic: false, eval_mode: FormulaEvalMode::Array }
     }
     /// The parsed expression, re-parsing after deserialization.
     pub fn expr(&self) -> Option<Expr> {

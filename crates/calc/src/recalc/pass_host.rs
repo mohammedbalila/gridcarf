@@ -291,7 +291,8 @@ impl PassHost<'_> {
         let expr = std::sync::Arc::clone(expr);
         let outer_out_of_stack = std::mem::replace(&mut self.out_of_stack, false);
         let v = {
-            let mut ev = Evaluator::new(self, k.0, k.1);
+            let mode = self.wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).map(|f| f.eval_mode).unwrap_or_default();
+            let mut ev = Evaluator::new(self, k.0, k.1).with_mode(mode);
             ev.value(&expr)
         };
         let out_of_stack = std::mem::replace(&mut self.out_of_stack, outer_out_of_stack);

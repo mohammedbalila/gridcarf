@@ -89,7 +89,7 @@ impl<'h> Evaluator<'h> {
         if args.is_empty() || args.len() > 4 {
             return err(CellError::Value);
         }
-        let src = self.eval(&args[0]);
+        let src = self.eval_array(&args[0]);
         let mut arg = |i: usize| match args.get(i) {
             None | Some(Expr::Missing) => None,
             Some(e) => Some(self.value(e)),

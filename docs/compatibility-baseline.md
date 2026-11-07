@@ -1,10 +1,10 @@
 # Compatibility baseline
 
-> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (V01 synthetic baseline)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (C01 bounded legacy formula repair; V01 baseline retained)
 
 This baseline pins source `6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214`, before
 stabilization repairs. It covers four small synthetic cases, not general Excel
-compatibility. Production behavior is unchanged. Recipes and input hashes live in
+compatibility. V01 did not change production behavior; later repairs are recorded below. Recipes and input hashes live in
 [`tools/compatibility/manifest.json`](../tools/compatibility/manifest.json);
 [`tools/compatibility/README.md`](../tools/compatibility/README.md) explains regeneration.
 
@@ -112,6 +112,15 @@ reported conflicts (`mergeable_state=dirty`). Recheck before implementing repair
 this snapshot does not claim ownership or authorize duplicate fixes. No public
 issue comments or remote changes were made.
 
+## Post-baseline repair: legacy XLSX evaluation (C01)
+
+Ordinary/shared XLSX formulas now carry a separate legacy evaluation mode. The synthetic
+SQRT case returns B2 = 2 with B3:B4 empty, and saving/reopening keeps an ordinary formula.
+Modern and CSE controls retain array evaluation. Session tests also cover range-taking
+functions, SUMPRODUCT nested arrays, JSON defaults, shared formulas and dirty edits.
+The baseline diagnostic table above remains the observation of its pinned pre-fix source.
+This bounded repair does not claim full legacy parity or Excel oracle verification.
+
 ## Limitations
 
 Excel is unavailable: **Excel open, repair prompts, recalculate, refresh and
@@ -124,4 +133,5 @@ version control. No result here upgrades the repository's parity/readiness claim
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | Record bounded C01 legacy XLSX repair separately from the pinned pre-fix diagnostics |
 | 2026-11-07 | minor | Pin source/toolchain and bounded synthetic fixture recipes before repairs |

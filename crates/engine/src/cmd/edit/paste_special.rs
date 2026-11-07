@@ -170,10 +170,11 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
                             let (dr, dc) = (dest.row as i64 - sc.row as i64, dest.col as i64 - sc.col as i64);
                             moved.array = f.array.and_then(|a| Some(RangeRef::new(a.start.offset(dr, dc)?, a.end.offset(dr, dc)?)));
                             moved.dynamic = f.dynamic;
+                            moved.eval_mode = f.eval_mode;
                             return Some(std::sync::Arc::new(moved));
                         }
                         let moved = gridcraft_formula::adjust::shift_relative(e, dest.row as i64 - sc.row as i64, dest.col as i64 - sc.col as i64);
-                        Some(std::sync::Arc::new(Formula { dynamic: f.dynamic, ..Formula::from_expr(moved) }))
+                        Some(std::sync::Arc::new(Formula { dynamic: f.dynamic, eval_mode: f.eval_mode, ..Formula::from_expr(moved) }))
                     };
                     let moved_py = |cell: &Cell| -> Result<Option<std::sync::Arc<gridcraft_model::PyCode>>> {
                         let Some(py) = cell.py.clone() else { return Ok(None) };
@@ -295,7 +296,7 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
                                 }
                             {
                                 let text = format!("=({}){sym}{}", f.text, gridcraft_core::number_to_text(y));
-                                new.formula = Some(std::sync::Arc::new(Formula::new(&text)));
+                                new.formula = Some(std::sync::Arc::new(Formula { eval_mode: f.eval_mode, ..Formula::new(&text) }));
                                 new.value = Value::Empty;
                             }
                         }
@@ -542,6 +543,7 @@ pub(crate) fn rewrite_all_formulas(wb: &mut gridcraft_model::Workbook, target: &
                 let mut nf = Formula::from_expr(new);
                 nf.array = array;
                 nf.dynamic = f.dynamic;
+                nf.eval_mode = f.eval_mode;
                 cell.formula = Some(std::sync::Arc::new(nf));
             }
         }
