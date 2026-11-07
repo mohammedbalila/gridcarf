@@ -1,6 +1,6 @@
 # PR stabilization repairs
 
-> Last updated: 2026-11-07. Bounded fixes adapted from existing public GridCraft pull requests.
+> Last updated: 2026-11-08. Bounded fixes adapted from existing public GridCraft pull requests.
 > These repairs do not establish full Excel compatibility.
 
 This integration branch starts from the reviewed stabilization source containing legacy formula
@@ -229,3 +229,53 @@ cargo xtask ci
 
 These are test-fixture ownership checks. Native Windows, live Excel, process RSS
 and broad external-corpus fidelity remain untested.
+
+
+## M03-A: Preserve sheet scroll identity and release closed-window state
+
+Revision: 2026-11-08 (Asia/Dubai).
+
+Scroll positions now follow the window and actual sheet UID, so inserting, moving,
+deleting and restoring sheets cannot assign one sheet's scroll to another. Saving
+maps those UIDs back to current sheet indices, including inactive AutoSave, while
+preserving the document's live window, selection and guarded trace/conditional-format
+revision updates. This adapts the narrow identity repair from
+[PR #3507](https://github.com/storytold/gridcraft/pull/3507), commit
+`1688b43ae225fc4f89879d57ebacba66c7908a5a`, around the existing document-scoped save path.
+
+The existing window lifecycle seam now drops closed windows' parked UI and scroll
+entries before returning for an unchanged active window. Hidden logic-only ticks
+therefore release parked conditional-format statistics and dialogs even when the
+surviving window remains current. Deleted-sheet positions remain available to Undo
+until the window closes; broader history-reachability eviction is a separate task.
+
+Regressions cover inserted/reordered sheets, delete-to-Undo and saved views,
+independent windows, inactive/hidden AutoSave and stationary-window cleanup.
+Ordinary active-cell storage and an empty session without a window are preservation
+controls. An orphan active document without any window is not constructible through
+the current public API and is not exercised; its defensive save path is unchanged.
+
+A small synthetic collector paints actual two-cell color-scale output, parks a
+dialog, positively checks clipboard and format-painter owners, explicitly clears
+both, closes each target by ID, and runs two no-paint logic ticks. All 16 warm-up
+and 1,000 measured cycles complete before the final lifetime assertion. Before the
+repair, the last target remained parked and scroll entries grew to 1,017. After it,
+each post-warm-up checkpoint retains one sentinel document/window/scroll entry,
+zero parked entries and zero target conditional-format cache instances. Both maps
+retain capacity for three entries. These are counts and inline-capacity estimates,
+not exact heap or RSS measurements; internal conditional-cache capacity is not measured.
+
+~~~sh
+cargo test --locked -p gridcraft-ui-egui --test it scroll_position
+cargo test --locked -p gridcraft-ui-egui --test it autosave_failures
+cargo test --locked -p gridcraft-ui-egui --test it trace_navigation
+cargo test --locked -p gridcraft-ui-egui --lib window_ui -- --nocapture
+cargo test --locked -p gridcraft-ui-egui --lib grid::show::trace_arrow_tests
+cargo xtask ci
+~~~
+
+The existing offscreen sales sample was rendered and visually inspected on macOS.
+Full weak-payload and clipboard-retained lifetime controls, dead-cell textures,
+history-reachable sheet eviction, release/RSS campaigns, native Windows and live
+Excel observations remain separate gates. This bounded change does not complete
+M03, V03, recovery or general platform/Excel compatibility.

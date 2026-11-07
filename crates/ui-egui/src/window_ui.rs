@@ -151,6 +151,11 @@ impl SheetApp {
     /// in (a window never seen before starts fresh). A closed window's state is dropped.
     pub fn follow_active_window(&mut self) {
         let active = self.session.active_window();
+        // A parked window can close without changing the current window, including on a
+        // logic-only tick. Its UI and scroll state must go before the no-transition return.
+        let session = &self.session;
+        self.parked.retain(|w, _| session.window(*w).is_some());
+        self.views.retain(|&(w, _), _| session.window(w).is_some());
         // A window hidden while parked (from another window's View › Hide) isn't drawn either:
         // its waiting key tip request goes, as it does for a window hidden as it is left.
         let session = &self.session;
@@ -181,8 +186,6 @@ impl SheetApp {
             self.swap_window_ui(&mut incoming);
         }
         self.ui_window = active;
-        let session = &self.session;
-        self.parked.retain(|w, _| session.window(*w).is_some());
     }
 
     /// Activates window `id` (it becomes the most recently active) with its interface state.
@@ -227,5 +230,130 @@ impl SheetApp {
     /// Whether a window other than the current one has a cell or text-box draft open.
     pub fn parked_window_with_draft(&self) -> Option<u64> {
         self.parked.iter().filter(|(_, w)| w.editor.is_some() || w.text_box_editor.is_some()).map(|(id, _)| *id).min()
+    }
+}
+
+#[cfg(test)]
+mod closed_view_state_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sentinel() -> (SheetApp, egui::Context, u64, u64) {
+        let mut session = gridcraft_engine::Session::new();
+        session.new_workbook();
+        let mut app = SheetApp::new(session, Default::default());
+        app.ui.autosave = false;
+        app.use_prepared_fonts();
+        app.follow_active_window();
+        app.view_mut().unwrap().scroll.y = 40.0;
+        let window = app.session.active_window().unwrap();
+        let doc = app.session.doc().unwrap().uid;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::pinned_font_definitions());
+        crate::theme::apply(&ctx, false);
+        (app, ctx, window, doc)
+    }
+
+    fn target_cycle(app: &mut SheetApp, ctx: &egui::Context, sentinel: u64, sentinel_doc: u64) -> u64 {
+        app.run("file.new", json!({})).unwrap();
+        let target = app.session.active_window().unwrap();
+        let target_doc = app.session.doc().unwrap().uid;
+        app.run("range.setValues", json!({"range":"A1", "values":[[1],[10]]})).unwrap();
+        app.run("home.conditionalFormat", json!({"range":"A1:A2", "rule":{"type":"colorScale"}})).unwrap();
+        let mut output = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))), ..Default::default() },
+            |ui| crate::grid::show(app, ui),
+        );
+        // These are the actual two endpoint fills from the statistics-backed color scale.
+        for color in [egui::Color32::from_rgb(0xF8, 0x69, 0x6B), egui::Color32::from_rgb(0x63, 0xBE, 0x7B)] {
+            assert!(
+                output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == color)),
+                "CF endpoint was not painted: {color:?}"
+            );
+        }
+        output.textures_delta.clear();
+        drop(output);
+        assert_eq!(app.grid.cf.key.unwrap().0, target_doc);
+        app.view_mut().unwrap().scroll.y = 100.0;
+        app.open_dialog("zoom", json!({}));
+        assert!(app.dialog.is_some());
+        app.run("edit.copy", json!({"range":"A1:A2"})).unwrap();
+        app.run("edit.formatPainter", json!({})).unwrap();
+        assert!(app.session.clipboard.is_some() && app.session.format_painter.is_some());
+        app.enter_window(sentinel);
+        assert_eq!(app.parked[&target].grid.cf.key.unwrap().0, target_doc);
+        assert!(app.parked[&target].dialog.is_some());
+        app.run("edit.clearClipboard", json!({})).unwrap();
+        assert!(app.session.clipboard.is_none() && app.session.format_painter.is_none());
+        app.session.hide_window(target);
+        assert_eq!(app.session.active_window(), Some(sentinel));
+        assert_eq!(app.ui_window(), Some(sentinel));
+        let closed = app.run("window.close", json!({"window":target, "force":true})).unwrap();
+        assert_eq!(closed["closed"], true);
+        assert!(app.session.window(target).is_none());
+        assert!(app.session.document_index(target_doc).is_none());
+        // The hidden/no-paint path must prune even though engine and UI remain current.
+        for _ in 0..2 {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
+            assert_eq!(app.session.active_window(), Some(sentinel));
+            assert_eq!(app.ui_window(), Some(sentinel));
+            assert_eq!(app.session.doc().unwrap().uid, sentinel_doc);
+        }
+        target
+    }
+
+    #[test]
+    fn m03a_closed_parked_target_releases_state_without_active_window_transition() {
+        let (mut app, ctx, window, doc) = sentinel();
+        let target = target_cycle(&mut app, &ctx, window, doc);
+        assert!(!app.parked.contains_key(&target), "closed target retains populated CF cache and dialog");
+        assert!(app.views.keys().all(|(w, _)| *w == window), "closed target retains scroll state");
+        assert_eq!(app.view().scroll.y, 40.0);
+    }
+
+    fn sample(app: &SheetApp, phase: &str, cycle: usize, sentinel: u64, sentinel_doc: u64) {
+        let target_cf = app.parked.values().filter(|w| w.grid.cf.key.is_some_and(|k| k.0 != sentinel_doc)).count();
+        // Capacity times the inline key/value size is only a lower-bound storage estimate:
+        // it excludes hash control bytes, allocator overhead and all nested allocations.
+        let parked_inline = app.parked.capacity() * std::mem::size_of::<(u64, WindowUi)>();
+        let view_inline =
+            app.views.capacity() * app.views.iter().next().map_or(0, |(key, value)| std::mem::size_of_val(key) + std::mem::size_of_val(value));
+        println!(
+            "M03A_SAMPLE phase={phase} cycle={cycle} docs={} windows={} parked_len={} parked_capacity={} views_len={} views_capacity={} target_cf_keys={} target_cache_instances={} parked_inline_capacity_bytes={} views_inline_capacity_bytes={} sentinel_window={} sentinel_doc={} ui_window={:?} engine_window={:?}",
+            app.session.documents().len(),
+            app.session.windows().len(),
+            app.parked.len(),
+            app.parked.capacity(),
+            app.views.len(),
+            app.views.capacity(),
+            target_cf,
+            target_cf,
+            parked_inline,
+            view_inline,
+            sentinel,
+            sentinel_doc,
+            app.ui_window(),
+            app.session.active_window()
+        );
+    }
+
+    #[test]
+    fn m03a_collects_all_1000_cycles_before_asserting_closed_state_is_released() {
+        let (mut app, ctx, window, doc) = sentinel();
+        sample(&app, "before_warmup", 0, window, doc);
+        for _ in 0..16 {
+            target_cycle(&mut app, &ctx, window, doc);
+        }
+        sample(&app, "measured", 0, window, doc);
+        for cycle in 1..=1000 {
+            target_cycle(&mut app, &ctx, window, doc);
+            if [100, 250, 500, 750, 1000].contains(&cycle) {
+                sample(&app, "measured", cycle, window, doc);
+            }
+        }
+        println!("M03A_COLLECTION_COMPLETE warmup=16 measured=1000");
+        assert_eq!(app.session.documents().len(), 1);
+        assert_eq!(app.session.windows().len(), 1);
+        assert_eq!((app.parked.len(), app.views.len()), (0, 1), "all closed target UI/scroll state must be released");
     }
 }

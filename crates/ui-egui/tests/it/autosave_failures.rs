@@ -287,9 +287,10 @@ fn inactive_save_flushes_the_live_view_instead_of_mru_or_visible_window() {
     let first = app.session.active_window().unwrap();
     let second = app.session.new_window().unwrap();
     app.run("selection.set", json!({"cell":"E51"})).unwrap();
-    app.views.insert((first, 0), SheetView { scroll: egui::vec2(0.0, 0.0) });
+    let sheet = app.session.doc().unwrap().wb.active().unwrap().uid.get();
+    app.views.insert((first, sheet), SheetView { scroll: egui::vec2(0.0, 0.0) });
     let y = app.session.doc().unwrap().wb.active().unwrap().row_top(50) as f32;
-    app.views.insert((second, 0), SheetView { scroll: egui::vec2(0.0, y) });
+    app.views.insert((second, sheet), SheetView { scroll: egui::vec2(0.0, y) });
     app.session.activate_window(first);
     app.session.hide_window(second);
     app.session.show_window(second);
@@ -565,4 +566,44 @@ fn inactive_autosave_does_not_rebase_traces_across_new_source_metadata() {
     assert!(trace.revision > before_view, "the pure stored-view change was rebased");
     assert!(trace.revision < d.revision, "the separate save metadata change still invalidates the trace");
     assert_eq!(trace.arrows, arrows);
+}
+
+#[test]
+fn m03a_inactive_autosave_maps_reordered_scroll_to_sheet_identity() {
+    use gridcraft_engine::core::CellRef;
+    let dir = directory("m03a-reordered-views");
+    let path = dir.join("views.xlsx");
+    let mut session = Session::new();
+    session.new_workbook();
+    let mut app = crate::common::app(session);
+    app.ui.autosave = false;
+    app.run("home.insertSheet", json!({"name":"Two"})).unwrap();
+    for (sheet, row) in [("Sheet1", 50), ("Two", 10)] {
+        app.run("sheet.activate", json!({"sheet":sheet})).unwrap();
+        let y = app.session.doc().unwrap().wb.active().unwrap().row_top(row) as f32;
+        app.view_mut().unwrap().scroll.y = y;
+    }
+    app.run("sheet.move", json!({"sheet":"Two", "to":0})).unwrap();
+    app.run("sheet.activate", json!({"sheet":"Two"})).unwrap();
+    app.run("selection.set", json!({"cell":"E11"})).unwrap();
+    app.session.doc_mut().unwrap().path = Some(path.to_str().unwrap().into());
+    let uid = app.session.doc().unwrap().uid;
+    let source = app.session.active_window().unwrap();
+    app.run("file.new", json!({})).unwrap();
+    let sentinel = app.session.active_window();
+    app.session.hide_window(source);
+    let windows = window_context(&app.session);
+    app.ui.autosave = true;
+    tick(&mut app);
+    assert_eq!(app.session.active_window(), sentinel);
+    assert_eq!(app.ui_window(), sentinel);
+    assert_eq!(window_context(&app.session), windows);
+    assert_eq!(app.session.document_view_window(uid), Some(source));
+    let (wb, _) = gridcraft_engine::io::open_bytes("views.xlsx", &std::fs::read(&path).unwrap()).unwrap();
+    for (name, row) in [("Sheet1", 50), ("Two", 10)] {
+        let sh = wb.sheets.iter().find(|sh| sh.name == name).unwrap();
+        assert_eq!(sh.view_top_left, CellRef::new(row, 0), "inactive AutoSave mapped {name} to the wrong scroll");
+    }
+    assert_eq!(wb.active().unwrap().name, "Two");
+    assert_eq!(wb.active().unwrap().view_active, CellRef::new(10, 4));
 }
