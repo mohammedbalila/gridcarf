@@ -21,6 +21,9 @@ pub(super) struct PassHost<'a> {
     in_progress: HashSet<Key>,
     /// New spills found during the pass: anchor → array.
     pub(super) spills: HashMap<Key, std::sync::Arc<Array>>,
+    /// Later owners whose persisted output overlaps an earlier attempted array. Kept even when
+    /// that attempt is blocked, so the allocator can renegotiate only these derived footprints.
+    pub(super) displaced: HashMap<Key, RangeRef>,
     /// Used range per sheet: the workbook doesn't change during a pass, and working it out walks
     /// every row, so once per sheet rather than once per range read.
     used: HashMap<usize, Option<RangeRef>>,
@@ -51,6 +54,9 @@ pub(super) struct PassHost<'a> {
     /// looks at none of it).
     #[cfg(test)]
     pub(super) spill_visits: usize,
+    /// Persisted owners inspected for potential collisions (disjoint attempts inspect none).
+    #[cfg(test)]
+    pub(super) collision_owner_visits: usize,
     /// The formulas in `cycles`.
     cycle_seen: HashSet<Key>,
     /// Iterative calculation: a circular reference reads the cell's previous value instead of
@@ -88,6 +94,7 @@ impl<'a> PassHost<'a> {
             pending: exprs.keys().copied().collect(),
             in_progress: HashSet::default(),
             spills: HashMap::default(),
+            displaced: HashMap::default(),
             used: HashMap::default(),
             rng,
             now,
@@ -103,6 +110,8 @@ impl<'a> PassHost<'a> {
             suspensions: 0,
             #[cfg(test)]
             spill_visits: 0,
+            #[cfg(test)]
+            collision_owner_visits: 0,
             cycle_seen: HashSet::default(),
             iterate: false,
             prev: HashMap::default(),
@@ -129,25 +138,53 @@ impl<'a> PassHost<'a> {
 /// Whether an array result at `k` can't spill: it is in a table, or its area runs off the sheet,
 /// overlaps merged cells, holds other cells, or another formula's spill (unless that formula is
 /// recalculated in this pass, and so may spill elsewhere now).
-fn spill_blocked(host: &PassHost<'_>, (sheet, anchor): Key, a: &Array) -> bool {
+fn spill_blocked(host: &mut PassHost<'_>, (sheet, anchor): Key, a: &Array) -> bool {
     let Some(sh) = host.wb.sheet(sheet) else { return false };
-    let end =
-        CellRef::new(anchor.row.saturating_add((a.rows as u32).saturating_sub(1)), anchor.col.saturating_add((a.cols as u32).saturating_sub(1)));
-    let range = RangeRef::new(anchor, end);
-    let own = sh.spill_ranges.get(&anchor);
-    let spilled_over = |c: CellRef| {
-        !own.is_some_and(|o| o.contains(c))
-            && sh.spill_ranges.iter().any(|(o, r)| {
-                // A formula or Python cell recalculated in this pass lays its array out again.
-                *o != anchor && r.contains(c) && !host.exprs.contains_key(&(sheet, *o)) && !host.python.contains_key(&(sheet, *o))
-            })
-    };
-    end.row >= gridcraft_core::MAX_ROWS
-        || end.col >= gridcraft_core::MAX_COLS
+    let range = array_area(anchor, a);
+    if range.end.row >= gridcraft_core::MAX_ROWS
+        || range.end.col >= gridcraft_core::MAX_COLS
         || sh.merges.iter().any(|m| m.intersects(&range))
         || sh.tables.iter().any(|t| t.range.contains(anchor))
         || sh.cells.iter_range(range).any(|(c, cell)| c != anchor && (!cell.value.is_empty() || cell.formula.is_some()))
-        || sh.spill.range(range.start..=range.end).any(|(c, _)| range.contains(*c) && spilled_over(*c))
+    {
+        return true;
+    }
+    let own = sh.spill_ranges.get(&anchor);
+    if own.is_some_and(|old| old.contains(range.start) && old.contains(range.end)) {
+        return false;
+    }
+    // Most new arrays are disjoint. Look up sparse occupancy before scanning owners, and never
+    // walk the attempted rectangle's empty cells. Unchanged/shrinking arrays skip both walks.
+    let mut occupied = false;
+    stored_spill_in(sh, range, &mut |c, _| {
+        if own.is_some_and(|old| old.contains(c)) {
+            return true;
+        }
+        occupied = true;
+        false
+    });
+    if !occupied {
+        return false;
+    }
+    let mut blocked = false;
+    for (owner, old) in &sh.spill_ranges {
+        #[cfg(test)]
+        {
+            host.collision_owner_visits += 1;
+        }
+        if *owner == anchor || !old.intersects(&range) {
+            continue;
+        }
+        let key = (sheet, *owner);
+        // Earlier persisted winners remain blockers. Only forward priority edges can displace
+        // an owner; otherwise a losing attempt would clear and requeue its winner every round.
+        if !host.iterate && (anchor.row, anchor.col) < (owner.row, owner.col) {
+            host.displaced.insert(key, *old);
+        }
+        // A formula or Python cell recalculated in this pass lays its array out again.
+        blocked |= !host.exprs.contains_key(&key) && !host.python.contains_key(&key);
+    }
+    blocked
 }
 
 /// Whether `arr`, anchored at `anchor`, would spill exactly what the sheet already holds over
@@ -165,7 +202,7 @@ pub(super) fn spills_as_before(sheet: &gridcraft_model::Sheet, anchor: CellRef, 
 }
 
 /// The area an array anchored at `anchor` covers.
-fn array_area(anchor: CellRef, a: &Array) -> RangeRef {
+pub(super) fn array_area(anchor: CellRef, a: &Array) -> RangeRef {
     let end =
         CellRef::new(anchor.row.saturating_add((a.rows as u32).saturating_sub(1)), anchor.col.saturating_add((a.cols as u32).saturating_sub(1)));
     RangeRef::new(anchor, end)
@@ -386,8 +423,8 @@ impl PassHost<'_> {
             v => v,
         };
         // An array that can't spill is #SPILL! for the formulas evaluated after it in this pass too.
-        let v = match self.spills.get(&k) {
-            Some(a) if spill_blocked(self, k, a) => {
+        let v = match self.spills.get(&k).cloned() {
+            Some(a) if spill_blocked(self, k, &a) => {
                 self.spills.remove(&k);
                 Value::Error(CellError::Spill)
             }
@@ -416,8 +453,8 @@ impl PassHost<'_> {
             }
             v => v,
         };
-        let v = match self.spills.get(&k) {
-            Some(a) if spill_blocked(self, k, a) => {
+        let v = match self.spills.get(&k).cloned() {
+            Some(a) if spill_blocked(self, k, &a) => {
                 self.spills.remove(&k);
                 Value::Error(CellError::Spill)
             }

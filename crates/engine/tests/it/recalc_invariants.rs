@@ -287,3 +287,75 @@ fn own_spill_seed_86_minimized_public_replay() {
     assert_eq!(value(&s, "A18"), Value::Empty);
     assert_spill(&s, "A15", "A15:C17");
 }
+
+fn assert_collision_winner(s: &Session) {
+    for (cell, expected) in [
+        ("B1", Value::Number(1.0)),
+        ("B2", Value::Number(2.0)),
+        ("B3", Value::Number(3.0)),
+        ("A2", Value::Error(CellError::Spill)),
+        ("C2", Value::Empty),
+        ("D2", Value::Error(CellError::Spill)),
+        ("E2", Value::Number(0.0)),
+        ("F2", Value::Error(CellError::Ref)),
+    ] {
+        assert_eq!(value(s, cell), expected, "{cell}");
+    }
+    assert_spill(s, "B1", "B1:B3");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(!sh.spill_ranges.contains_key(&CellRef::parse("A2").unwrap()));
+    assert_eq!(sh.spill.len(), 2);
+    assert_clean(s, "row-major spill collision winner");
+}
+
+#[test]
+fn spill_collision_creation_order_readers_and_restoration() {
+    for reverse in [false, true] {
+        let mut s = session();
+        for (cell, input) in [("D2", "=A2*10"), ("E2", "=C2"), ("F2", "=SUM(A2#)")] {
+            set(&mut s, cell, input);
+        }
+        let mut arrays = [("A2", "=SEQUENCE(1,3)"), ("B1", "=SEQUENCE(3)")];
+        if reverse {
+            arrays.reverse();
+        }
+        for (cell, input) in arrays {
+            // Check independent literals before the clean-calculation oracle.
+            s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+        }
+        assert_collision_winner(&s);
+        execute(&mut s, "edit.undo", json!({}));
+        execute(&mut s, "edit.redo", json!({}));
+        assert_collision_winner(&s);
+        execute(&mut s, "edit.clearContents", json!({"range": "B1"}));
+        for (cell, n) in [("A2", 1.0), ("B2", 2.0), ("C2", 3.0), ("D2", 10.0), ("E2", 3.0), ("F2", 6.0)] {
+            assert_eq!(value(&s, cell), Value::Number(n), "restored {cell}");
+        }
+        assert_eq!(value(&s, "B3"), Value::Empty);
+        assert_spill(&s, "A2", "A2:C2");
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().spill_ranges.len(), 1);
+        execute(&mut s, "edit.undo", json!({}));
+        assert_collision_winner(&s);
+        execute(&mut s, "edit.redo", json!({}));
+        assert_spill(&s, "A2", "A2:C2");
+    }
+}
+
+#[test]
+fn spill_collision_seed_82_minimized_public_replay() {
+    // Exact two-command minimized seed 82, budget, campaign source f4247561.
+    let mut s = session();
+    execute(&mut s, "file.new", json!({"sample": "budget"}));
+    execute(&mut s, "cell.set", json!({"cell":"E17","input":"=UNIQUE(K10:M11)"}));
+    assert_spill(&s, "E17", "E17:G17");
+    s.execute("range.setValues", json!({"range":"E13","values":[[-3,null],[true,null],[51,"203"],["#N/A","=TRANSPOSE(K14:O18)"]]})).unwrap();
+    assert_eq!(value(&s, "F16"), Value::Number(0.0));
+    assert_eq!(value(&s, "E17"), Value::Error(CellError::Spill));
+    assert_spill(&s, "F16", "F16:J20");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(!sh.spill_ranges.contains_key(&CellRef::parse("E17").unwrap()));
+    for c in RangeRef::parse("F16:J20").unwrap().iter() {
+        assert_eq!(sh.value(c), Value::Number(0.0), "{c}");
+    }
+    assert_clean(&s, "exact seed 82 minimized replay");
+}

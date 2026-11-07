@@ -2481,3 +2481,81 @@ fn own_spill_iterative_reads_keep_previous_value_behavior() {
         assert_eq!((t.num("A1"), t.num("B1"), t.num("C1")), (6.0, 7.0, 8.0), "{formula}");
     }
 }
+
+#[test]
+fn spill_collision_reallocates_only_the_affected_owners() {
+    let mut t = T::new();
+    for row in 20..148 {
+        t.set(&format!("Y{row}"), "=SEQUENCE(1,2)");
+    }
+    t.set("A2", "=SEQUENCE(1,3)");
+    t.set("A4", "=SEQUENCE(1,3)");
+    t.set("B1", "=SEQUENCE(5)");
+    assert_eq!(t.num("B1"), 1.0);
+    assert_eq!(t.num("B5"), 5.0);
+    for cell in ["A2", "A4"] {
+        assert_eq!(t.get(cell), Value::Error(CellError::Spill));
+    }
+    for cell in ["C2", "C4"] {
+        assert_eq!(t.get(cell), Value::Empty);
+    }
+    assert_eq!(t.num("Z147"), 2.0);
+    assert!(t.calc.last_recalc_cells < 20, "{} evaluations for three competing arrays", t.calc.last_recalc_cells);
+}
+
+#[test]
+fn spill_collision_discovers_owners_through_a_losing_attempt() {
+    let mut t = T::new();
+    t.set("D1", "=SEQUENCE(3,1,10)");
+    t.set("A2", "=SEQUENCE(1,IF(B1=1,4,3))");
+    t.set("B1", "=SEQUENCE(3)");
+    assert_eq!(t.num("B2"), 2.0);
+    assert_eq!(t.num("D2"), 11.0);
+    assert_eq!(t.get("A2"), Value::Error(CellError::Spill));
+    assert_eq!(t.get("C2"), Value::Empty);
+    let incremental = t.wb.clone();
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.wb.sheet(0).unwrap().spill, incremental.sheet(0).unwrap().spill);
+    assert_eq!(t.wb.sheet(0).unwrap().spill_ranges, incremental.sheet(0).unwrap().spill_ranges);
+}
+
+#[test]
+fn spill_collision_keeps_real_and_grid_blockers_authoritative() {
+    for merged in [false, true] {
+        let mut t = T::new();
+        t.set("A2", "=SEQUENCE(1,3)");
+        if merged {
+            t.wb.sheet_mut(0).unwrap().merges.push(gridcraft_core::RangeRef::parse("B3:C3").unwrap());
+        } else {
+            t.set("B3", "99");
+        }
+        t.set("B1", "=SEQUENCE(3)");
+        assert_eq!(t.get("B1"), Value::Error(CellError::Spill));
+        assert_eq!([t.num("A2"), t.num("B2"), t.num("C2")], [1.0, 2.0, 3.0]);
+    }
+    let mut t = T::new();
+    t.set("A1048576", "=SEQUENCE(1,3)");
+    t.set("B1048575", "=SEQUENCE(3)");
+    assert_eq!(t.get("B1048575"), Value::Error(CellError::Spill));
+    assert_eq!([t.num("A1048576"), t.num("B1048576"), t.num("C1048576")], [1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn spill_collision_closure_follows_new_geometry_without_requeueing_a_stable_loser() {
+    let mut t = T::new();
+    t.set("B3", "=SEQUENCE(1,3,20)");
+    t.set("C2", "=SEQUENCE(IF(D2=2,3,1),2,10)+0*C3");
+    t.set("D1", "=SEQUENCE(2)");
+    // D1 displaces C2; evaluating C2 against D1 discovers B3 through its enlarged attempt.
+    // C2 loses to D1, so B3 can keep its independent footprint.
+    assert_eq!([t.num("D1"), t.num("D2"), t.num("B3"), t.num("C3"), t.num("D3")], [1.0, 2.0, 20.0, 21.0, 22.0]);
+    assert_eq!(t.get("C2"), Value::Error(CellError::Spill));
+    assert_eq!(t.get("C4"), Value::Empty);
+    let incremental = t.wb.clone();
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.wb.sheet(0).unwrap().spill, incremental.sheet(0).unwrap().spill);
+    assert_eq!(t.wb.sheet(0).unwrap().spill_ranges, incremental.sheet(0).unwrap().spill_ranges);
+    t.set("C2", "=SEQUENCE(IF(D2=2,3,1),2,10)+0*C3");
+    assert_eq!(t.get("C2"), Value::Error(CellError::Spill));
+    assert!(t.calc.last_recalc_cells <= 4, "{} evaluations for a stable losing attempt", t.calc.last_recalc_cells);
+}

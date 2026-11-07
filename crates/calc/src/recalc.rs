@@ -25,7 +25,7 @@ mod pass_host;
 use graph::Intervals;
 pub use graph::{FxHasher, Graph, Key};
 use graph::{HashMap, HashSet, Node, Taken};
-use pass_host::{PassHost, spills_as_before};
+use pass_host::{PassHost, array_area, spills_as_before};
 
 /// Calculation state kept beside a workbook.
 #[derive(Clone, Debug)]
@@ -284,6 +284,14 @@ impl Calc {
                 }
             }
         }
+        // Removing an anchor frees all its children too. A blocked competitor can start below
+        // the cleared anchor while still overlapping that old footprint.
+        for &(si, range) in &cleared {
+            match emptied.iter_mut().find(|k| k.0 == si) {
+                Some(k) => k.1 = CellRef::new(k.1.row.max(range.end.row), k.1.col.max(range.end.col)),
+                None => emptied.push((si, range.end)),
+            }
+        }
         // An emptied cell can unblock an anchor any distance above or to the left of it.
         for (si, end) in emptied {
             for &(s, c) in self.graph.nodes.keys() {
@@ -373,22 +381,28 @@ impl Calc {
             if dirty.is_empty() {
                 break;
             }
-            // Row-major order is a good topological guess; on-demand evaluation fixes the rest.
-            dirty.sort_by_key(|(s, c)| (*s, c.row, c.col));
-            let mut exprs: HashMap<Key, std::sync::Arc<Expr>> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
-            for k in &dirty {
-                if let Some(e) = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).and_then(|f| f.expr_arc()) {
-                    exprs.insert(*k, e);
-                }
-            }
-            let python: HashMap<Key, Value> = dirty
-                .iter()
-                .filter_map(|k| wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.py.as_ref()).and_then(|p| p.result_value()).map(|v| (*k, v)))
-                .collect();
             let now = self.now();
-            let mut rng = self.rng;
             let tp = prof_now();
-            let (results, spills, cycles) = {
+            let mut included: HashSet<Key> = dirty.iter().copied().collect();
+            let mut displaced = HashMap::default();
+            let (results, spills, cycles) = loop {
+                // Row-major order is a good topological guess; on-demand evaluation fixes the rest.
+                dirty.sort_by_key(|(s, c)| (*s, c.row, c.col));
+                let mut exprs: HashMap<Key, std::sync::Arc<Expr>> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
+                for k in &dirty {
+                    if let Some(e) = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).and_then(|f| f.expr_arc()) {
+                        exprs.insert(*k, e);
+                    }
+                }
+                let python: HashMap<Key, Value> = dirty
+                    .iter()
+                    .filter_map(|k| {
+                        wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.py.as_ref()).and_then(|p| p.result_value()).map(|v| (*k, v))
+                    })
+                    .collect();
+                // Discovery retries use the same clock and RNG seed. Only the accepted pass
+                // advances the RNG; all actual evaluations still count toward work statistics.
+                let mut rng = self.rng;
                 let mut host = PassHost::new(wb, &exprs, &mut rng, now).with_python(python);
                 host.iterate = wb.calc.iterative;
                 for k in &dirty {
@@ -400,21 +414,51 @@ impl Calc {
                         eprintln!("  iterative calculation: {} passes over {} formulas", passes, host.tainted.len());
                     }
                 }
-                (host.results, host.spills, host.cycles)
+                self.last_recalc_cells += host.results.len();
+                let mut added = Vec::new();
+                let mut areas = Vec::new();
+                for (owner, old) in host.displaced {
+                    displaced.insert(owner, old);
+                    if included.insert(owner) {
+                        added.push(owner);
+                        areas.push((owner.0, old));
+                    }
+                }
+                if added.is_empty() {
+                    let accepted = (host.results, host.spills, host.cycles);
+                    self.rng = rng;
+                    break accepted;
+                }
+                // The closure only grows: each retry adds at least one persisted owner, so it
+                // is bounded by their count. The workbook is unchanged until final allocation.
+                dirty.extend(added.iter().copied());
+                for dependent in self.dirty_closure(wb, &added, &areas) {
+                    if included.insert(dependent) {
+                        dirty.push(dependent);
+                    }
+                }
             };
-            self.rng = rng;
+            // Discovery was conservative: an attempt blocked by an earlier stable winner may
+            // have found later owners. Only surviving arrays can require their footprints now.
+            // Keep the expanded dirty set and results so all affected readers still update.
+            displaced.retain(|owner, old| {
+                spills.iter().any(|(candidate, array)| {
+                    candidate.0 == owner.0
+                        && (candidate.1.row, candidate.1.col) < (owner.1.row, owner.1.col)
+                        && array_area(candidate.1, array).intersects(old)
+                })
+            });
             if std::env::var_os("GRIDCRAFT_PROFILE").is_some() {
                 eprintln!("  eval {} formulas {:.1} ms", results.len(), prof_now() - tp);
             }
             let tw = prof_now();
-            self.last_recalc_cells += results.len();
             // The loops this round finds replace the ones listed for the formulas it evaluated.
             if !self.circular.is_empty() {
                 let evaluated: HashSet<Key> = dirty.iter().copied().collect();
                 self.circular.retain(|k| !evaluated.contains(k));
             }
             self.circular.extend(cycles);
-            let mut spill_changes = self.write_back(wb, &dirty, results, &spills);
+            let mut spill_changes = self.write_back(wb, &dirty, results, &spills, &displaced);
             // Formulas with references only known while evaluating (INDIRECT, OFFSET) may have read
             // a spill area before it was laid out: they are evaluated once more.
             if dynamic_again && !spills.is_empty() {
@@ -449,9 +493,18 @@ impl Calc {
         dirty: &[Key],
         results: HashMap<Key, Value>,
         spills: &HashMap<Key, std::sync::Arc<Array>>,
+        displaced: &HashMap<Key, RangeRef>,
     ) -> Vec<Key> {
         let mut spill_changes = Vec::new();
         let mut freed = Vec::new();
+        // Clear competing later owners together: otherwise an earlier candidate sees their old
+        // children, and an unchanged later owner can incorrectly retain the contested cells.
+        for (key, old) in displaced {
+            if let Some(sheet) = wb.sheet_mut(key.0) {
+                sheet.clear_spill(*old);
+                sheet.spill_ranges.remove(&key.1);
+            }
+        }
         for (key, value) in results {
             let Some(sheet) = wb.sheet_mut(key.0) else { continue };
             if let Some(cell) = sheet.cells.get_mut(key.1)
@@ -463,17 +516,20 @@ impl Calc {
         for key in dirty {
             let new = spills.get(key);
             let Some(sheet) = wb.sheet_mut(key.0) else { continue };
-            let old = sheet.spill_ranges.get(&key.1).copied();
+            let old = displaced.get(key).or_else(|| sheet.spill_ranges.get(&key.1)).copied();
             if old.is_none() && new.is_none() {
                 continue;
             }
             // An unchanged spill does not alter any values its dependents read.
             if let (Some(range), Some(array)) = (old, new)
+                && !displaced.contains_key(key)
                 && spills_as_before(sheet, key.1, range, array)
             {
                 continue;
             }
-            if let Some(range) = old {
+            if let Some(range) = old
+                && !displaced.contains_key(key)
+            {
                 for cell in range.iter() {
                     sheet.spill.remove(&cell);
                 }
@@ -592,6 +648,36 @@ pub(crate) mod tests {
         iv.query(a, b, &mut |t| v.push(*t));
         v.sort_unstable();
         v
+    }
+
+    #[test]
+    fn disjoint_and_unchanged_spills_do_not_scan_unrelated_owners() {
+        let mut wb = Workbook::new();
+        let mut calc = Calc::new();
+        for row in 0..300 {
+            wb.sheet_mut(0).unwrap().cells.set(CellRef::new(row, 3), Cell::formula(Formula::new("=SEQUENCE(1,2)")));
+        }
+        calc.recalc_all(&mut wb);
+        let mut exprs = HashMap::default();
+        let mut dirty = Vec::new();
+        for row in 0..300 {
+            for col in [0, 3] {
+                let at = CellRef::new(row, col);
+                let formula = Formula::new("=SEQUENCE(1,2)");
+                exprs.insert((0, at), formula.expr_arc().unwrap());
+                wb.sheet_mut(0).unwrap().cells.set(at, Cell::formula(formula));
+                dirty.push((0, at));
+            }
+        }
+        let mut rng = 1;
+        let mut host = PassHost::new(&wb, &exprs, &mut rng, 0.0);
+        for key in dirty {
+            host.calculate(key);
+            assert_eq!(host.results.get(&key), Some(&Value::Number(1.0)));
+        }
+        assert_eq!(host.spills.len(), 600);
+        assert!(host.displaced.is_empty());
+        assert_eq!(host.collision_owner_visits, 0, "disjoint and own-contained attempts bypass the owner scan");
     }
 
     /// A 1,000 x 1,000 Python result laid out from A1 in a pass, with the same values already
