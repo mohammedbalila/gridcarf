@@ -934,7 +934,12 @@ impl Session {
                     {
                         label = last.label.clone();
                     }
-                    d.undo.truncate(len);
+                }
+                // This invocation owns its before/result step, including ordinary-error partial
+                // results. Replace its children's history with the captured history, not just a
+                // truncated suffix: nested Undo/Redo can consume entries that predate the owner.
+                if let Some((undo, _)) = history_before {
+                    d.undo = undo;
                 }
                 push_entry(&mut d.undo, label, wb, &d.wb, sel);
                 d.redo.clear();

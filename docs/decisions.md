@@ -1,5 +1,20 @@
 # Decisions
 
+## Undoable invocations own their nested history
+
+Outside the existing undo-group boundaries, a changed undoable invocation retains
+one step from its captured before state to its result. Nested edits, undo and redo
+are part of that action: completion restores the captured undo history before
+appending the owner's step. Ordinary errors still keep partial workbook effects;
+this is not a new rollback boundary. Arc publication remains the change policy.
+
+Intentionally nonundoable dispatchers retain their children's undoable steps.
+Split remains such a dispatcher for one freeze/unfreeze step. Original-document
+ownership, group labels, history budgets, script permissions, recording and
+journaling retain their existing rules. Successful inner commands and their
+wrapper can still both appear in the journal; raw replay of toggles can therefore
+diverge. Correcting journal/replay semantics is a separate change.
+
 ## Account for allocations retained by undo history
 
 The model estimates owned capacities, tree/hash node storage, nested payloads and

@@ -314,6 +314,16 @@ impl Harness {
         let d = self.s.doc().expect("document");
         let before = d.wb.clone();
         let selection = d.selection.clone();
+        // Split is a noundo dispatcher for exactly one undoable freeze/unfreeze command.
+        // Derive that transition from its input state, never from the engine's history.
+        let split = (id == "view.split").then(|| {
+            if before.active().is_some_and(|sh| sh.freeze.is_some()) {
+                (None, "Unfreeze Panes")
+            } else {
+                let at = selection.active;
+                ((at.row != 0 || at.col != 0).then_some((at.row, at.col)), "Freeze Panes")
+            }
+        });
         let was_grouped = self.s.in_group(d.uid);
         let result = self.s.execute(id, params.clone());
         if let Err(EngineError::Internal(_, msg)) = &result {
@@ -323,6 +333,12 @@ impl Harness {
             return Err(fail(i, "documents", format!("`{id}` changed the number of open documents; exclude it in EXCLUDED")));
         }
         let after = self.wb();
+        if result.is_ok()
+            && let Some((freeze, _)) = split
+            && after.active().and_then(|sh| sh.freeze) != freeze
+        {
+            return Err(fail(i, "split transition", "Split did not reach its independently predicted freeze state"));
+        }
         let grouped = self.s.in_group(self.s.doc().expect("document").uid);
         let spec = find_command(id).expect("generated ids are registered");
         if !was_grouped && grouped {
@@ -357,6 +373,12 @@ impl Harness {
                 }
             } else if spec.undoable && !Arc::ptr_eq(&before, &after) {
                 self.undo.push(checkpoint(before, selection, spec.label.trim_end_matches('…').to_string()));
+                self.redo.clear();
+            } else if result.is_ok()
+                && let Some((_, label)) = split
+                && !Arc::ptr_eq(&before, &after)
+            {
+                self.undo.push(checkpoint(before, selection, label.to_string()));
                 self.redo.clear();
             }
         }
@@ -1542,4 +1564,50 @@ fn canonical_history_comparison_retains_non_finite_diagnostics() {
             assert_eq!(workbook_diff(&wb, &wb), expected, "same-instance comparison must preserve non-reflexive numeric diagnostics");
         }
     }
+}
+
+#[test]
+fn split_delegated_history_is_tracked_independently() {
+    for cell in ["A1", "C3"] {
+        let mut h = Harness::new("sales");
+        h.step(0, "view.unfreezePanes", &json!({})).unwrap();
+        h.step(1, "selection.set", &json!({"cell":cell})).unwrap();
+        let before = h.wb();
+        h.step(2, "view.split", &json!({})).unwrap();
+        assert!(!Arc::ptr_eq(&before, &h.wb()), "even A1's value-noop publishes an undo checkpoint");
+        h.step(3, "view.split", &json!({})).unwrap();
+        h.end_episode(4).unwrap();
+    }
+}
+
+#[test]
+fn split_rejects_missing_delegated_checkpoint() {
+    let mut h = Harness::new("sales");
+    h.step(0, "view.split", &json!({})).unwrap();
+    h.s.doc_mut().unwrap().undo.clear();
+    let failure = h.end_episode(1).unwrap_err();
+    assert_eq!(failure.kind, "undo");
+    assert!(failure.what.contains("expected 1 independently tracked entries, got 0"));
+}
+
+#[test]
+fn split_rejects_wrong_delegated_checkpoint() {
+    let mut h = Harness::new("sales");
+    h.step(0, "selection.set", &json!({"cell":"C3"})).unwrap();
+    h.step(1, "view.split", &json!({})).unwrap();
+    h.s.doc_mut().unwrap().undo[0].wb = h.wb();
+    let failure = h.end_episode(2).unwrap_err();
+    assert_eq!(failure.kind, "undo");
+    assert!(failure.what.contains("checkpoint 0 differs from its command-before workbook"));
+}
+
+#[test]
+fn ordinary_nonundoable_commands_reject_unexpected_history() {
+    let mut h = Harness::new("sales");
+    let before = h.wb();
+    h.step(0, "selection.set", &json!({"cell":"C3"})).unwrap();
+    h.s.doc_mut().unwrap().undo.push(checkpoint(before, Selection::default(), "unexpected".into()));
+    let failure = h.end_episode(1).unwrap_err();
+    assert_eq!(failure.kind, "undo");
+    assert!(failure.what.contains("expected 0 independently tracked entries, got 1"));
 }
