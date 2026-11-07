@@ -390,3 +390,119 @@ fn textbox_draft_uses_its_document_before_the_first_window_sync() {
     assert_eq!((draft.id, draft.text.as_str()), (id, "unfinished text"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn inactive_autosave_rebases_valid_parked_traces_only_for_its_view_change() {
+    use gridcraft_ui_egui::grid::Trace;
+    let dir = directory("parked-traces");
+    let path = dir.join("traced.xlsx");
+    let mut app = crate::common::app(Session::new());
+    app.session.new_workbook();
+    // Establish source/destination metadata before tracing: this test isolates view storage.
+    app.run("file.save", json!({"path":path})).unwrap();
+    app.run("cell.set", json!({"cell":"A1","input":"42"})).unwrap();
+    app.run("cell.set", json!({"cell":"B1","input":"=A1"})).unwrap();
+    app.run("selection.set", json!({"cell":"B1"})).unwrap();
+    let uid = app.session.doc().unwrap().uid;
+    let stale_window = app.session.active_window().unwrap();
+    app.grid.trace = Trace::new(&app, json!([{"range":"A1"}]));
+    let stale_revision = app.grid.trace.as_ref().unwrap().revision;
+    let arrows = app.grid.trace.as_ref().unwrap().arrows.clone();
+    app.run("view.newWindow", json!({})).unwrap();
+    app.run("cell.set", json!({"cell":"A1","input":"43"})).unwrap();
+    let valid_window = app.session.active_window().unwrap();
+    app.grid.trace = Trace::new(&app, json!([{"range":"A1"}]));
+    app.run("view.newWindow", json!({})).unwrap();
+    let live_window = app.session.active_window().unwrap();
+    app.grid.trace = Trace::new(&app, json!([{"range":"A1"}]));
+    let before_view = app.grid.trace.as_ref().unwrap().revision;
+    assert!(stale_revision < before_view, "a real edit made only the old trace stale");
+    app.run("selection.set", json!({"cell":"E5"})).unwrap();
+    app.session.new_workbook();
+    app.follow_active_window();
+    app.run("cell.set", json!({"cell":"A1","input":"7"})).unwrap();
+    app.run("cell.set", json!({"cell":"B1","input":"=A1"})).unwrap();
+    app.run("selection.set", json!({"cell":"B1"})).unwrap();
+    app.run("file.save", json!({"path":dir.join("other.xlsx")})).unwrap();
+    // Use matching revisions so this control detects a missing document-identity guard.
+    let other_before = app.session.doc().unwrap().revision;
+    assert!(other_before <= before_view && before_view - other_before <= 8);
+    for revision in other_before..before_view {
+        app.run("cell.set", json!({"cell":"C1","input":revision.to_string()})).unwrap();
+    }
+    app.run("file.save", json!({})).unwrap();
+    assert_eq!(app.session.doc().unwrap().revision, before_view);
+    let other_uid = app.session.doc().unwrap().uid;
+    let other_window = app.session.active_window().unwrap();
+    app.grid.trace = Trace::new(&app, json!([{"range":"A1"}]));
+    let other_revision = app.grid.trace.as_ref().unwrap().revision;
+    let other_arrows = app.grid.trace.as_ref().unwrap().arrows.clone();
+    app.run("view.newWindow", json!({})).unwrap();
+    let active_window = app.session.active_window();
+    app.grid.trace = Trace::new(&app, json!([{"range":"A1"}]));
+    let windows = window_context(&app.session);
+    app.ui.autosave = true;
+    tick(&mut app);
+    let saved = app.session.documents().iter().find(|d| d.uid == uid).unwrap();
+    let saved_revision = saved.revision;
+    assert!(!saved.is_dirty());
+    assert!(saved_revision > before_view, "the pending active-cell view was stored");
+    assert_eq!(saved.wb.active().unwrap().view_active, gridcraft_engine::core::CellRef::new(4, 4));
+    assert_eq!(app.session.doc().unwrap().uid, other_uid);
+    assert_eq!(app.session.active_window(), active_window);
+    assert_eq!(window_context(&app.session), windows);
+    let other_trace = app.grid.trace.as_ref().unwrap();
+    assert_eq!((other_trace.uid, other_trace.revision, &other_trace.arrows), (other_uid, other_revision, &other_arrows));
+    for window in [live_window, valid_window] {
+        app.enter_window(window);
+        let trace = app.grid.trace.as_ref().unwrap();
+        assert_eq!(trace.revision, saved_revision, "valid parked trace in window {window} survives pure view storage");
+        assert_eq!(trace.arrows, arrows);
+    }
+    app.enter_window(stale_window);
+    let stale = app.grid.trace.as_ref().unwrap();
+    assert_eq!(stale.revision, stale_revision, "a content-invalidated trace must remain stale");
+    assert_ne!(stale.revision, saved_revision);
+    assert_eq!(stale.arrows, arrows);
+    app.enter_window(other_window);
+    let other_trace = app.grid.trace.as_ref().unwrap();
+    assert_eq!((other_trace.uid, other_trace.revision, &other_trace.arrows), (other_uid, other_revision, &other_arrows));
+    if let Some(path) = std::env::var_os("GRIDCRAFT_R01_I1_SCREENSHOT") {
+        app.enter_window(live_window);
+        let mut h = crate::common::harness_with(crate::common::builder().with_size(egui::vec2(1200.0, 800.0)), app, 4);
+        h.render().unwrap().save(path).unwrap();
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn inactive_autosave_does_not_rebase_traces_across_new_source_metadata() {
+    use gridcraft_ui_egui::grid::Trace;
+    let dir = directory("trace-source");
+    let path = dir.join("first-save.xlsx");
+    let mut app = crate::common::app(Session::new());
+    app.session.new_workbook();
+    app.run("cell.set", json!({"cell":"A1","input":"42"})).unwrap();
+    app.run("cell.set", json!({"cell":"B1","input":"=A1"})).unwrap();
+    app.run("selection.set", json!({"cell":"B1"})).unwrap();
+    app.session.doc_mut().unwrap().path = Some(path.to_str().unwrap().into());
+    assert!(app.session.doc().unwrap().wb.source_path.is_none());
+    let window = app.session.active_window().unwrap();
+    app.grid.trace = Trace::new(&app, json!([{"range":"A1"}]));
+    let before_view = app.grid.trace.as_ref().unwrap().revision;
+    let arrows = app.grid.trace.as_ref().unwrap().arrows.clone();
+    app.run("selection.set", json!({"cell":"E5"})).unwrap();
+    app.session.new_workbook();
+    app.follow_active_window();
+    app.ui.autosave = true;
+    tick(&mut app);
+    app.enter_window(window);
+    let d = app.session.doc().unwrap();
+    assert!(!d.is_dirty());
+    assert!(d.wb.source_path.is_some(), "ordinary save established new source metadata");
+    let trace = app.grid.trace.as_ref().unwrap();
+    assert!(trace.revision > before_view, "the pure stored-view change was rebased");
+    assert!(trace.revision < d.revision, "the separate save metadata change still invalidates the trace");
+    assert_eq!(trace.arrows, arrows);
+    std::fs::remove_dir_all(dir).unwrap();
+}

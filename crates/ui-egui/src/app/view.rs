@@ -38,11 +38,9 @@ impl SheetApp {
     /// cell to the engine so a save writes them (`sheetView topLeftCell`). Normal view only:
     /// Page Layout view scrolls over pages, not cells.
     pub fn store_view_state(&mut self) {
-        let trace_before = crate::grid::Trace::key(self);
         if let Some(uid) = self.session.active().map(|d| d.uid) {
             self.store_document_view_state(uid);
         }
-        crate::grid::Trace::keep_through_view_change(self, trace_before);
     }
 
     /// Flush only the window whose selection/sheet is live in this document. Other windows'
@@ -50,6 +48,7 @@ impl SheetApp {
     pub(super) fn store_document_view_state(&mut self, uid: u64) {
         let window = self.session.document_view_window(uid);
         let Some(d) = self.session.documents().iter().find(|d| d.uid == uid) else { return };
+        let before_revision = d.revision;
         let mut tops = Vec::new();
         for (&(w, si), v) in &self.views {
             let Some(sh) = d.wb.sheets.get(si).filter(|sh| Some(w) == window && sh.view == gridcraft_engine::model::SheetViewMode::Normal) else {
@@ -65,6 +64,10 @@ impl SheetApp {
         // run between collecting and storing the view.
         if let Err(error) = self.session.store_document_view(uid, &tops) {
             self.alert(error.to_string());
+            return;
+        }
+        if let Some(after_revision) = self.session.documents().iter().find(|d| d.uid == uid).map(|d| d.revision) {
+            self.rebase_document_view_traces(uid, before_revision, after_revision);
         }
     }
 }

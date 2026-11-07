@@ -63,6 +63,19 @@ impl SheetApp {
                 .any(|w| w.editor.as_ref().is_some_and(|e| e.doc == uid) || w.text_box_editor.as_ref().is_some_and(|e| e.document() == uid))
     }
 
+    /// Only view storage's own revision transition is harmless to arrows. Match both document
+    /// and prior revision so traces invalidated by content edits stay stale, including parked ones.
+    pub(crate) fn rebase_document_view_traces(&mut self, uid: u64, before_revision: u64, after_revision: u64) {
+        for grid in std::iter::once(&mut self.grid).chain(self.parked.values_mut().map(|w| &mut w.grid)) {
+            if let Some(trace) = grid.trace.as_mut()
+                && trace.uid == uid
+                && trace.revision == before_revision
+            {
+                trace.revision = after_revision;
+            }
+        }
+    }
+
     /// Exchanges the per-window fields with `w`. Destructured in full, so a field added to
     /// [`WindowUi`] can't be left out of the swap.
     fn swap_window_ui(&mut self, w: &mut WindowUi) {
