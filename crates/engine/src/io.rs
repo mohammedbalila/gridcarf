@@ -69,6 +69,11 @@ pub fn open_bytes_with_password(name: &str, bytes: &[u8], password: Option<&str>
 /// the text it holds, with no number, date or boolean conversion (identifiers such as GTINs, SKUs
 /// and ZIP codes survive). It does not apply to other formats.
 pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
+    open_bytes_with_report(name, bytes, password, csv_as_text).map(|(wb, report)| (wb, report.warnings))
+}
+
+/// Opens with retained typed compatibility facts as well as the original warning strings.
+pub fn open_bytes_with_report(name: &str, bytes: &[u8], password: Option<&str>, csv_as_text: bool) -> Result<(Workbook, gridcraft_xlsx::ReadReport)> {
     if gridcraft_xlsx::sniff(bytes) != gridcraft_xlsx::Format::Encrypted {
         let (mut wb, warnings) = open_plain(name, bytes, csv_as_text)?;
         fit_imported_rows(&mut wb);
@@ -86,7 +91,14 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
     }
     let (mut wb, mut warnings) = open_plain(name, &plain, csv_as_text)?;
     fit_imported_rows(&mut wb);
-    warnings.insert(0, DECRYPTED_NOTICE.into());
+    warnings.warnings.insert(0, DECRYPTED_NOTICE.into());
+    warnings.issue(gridcraft_model::CompatibilityIssue::new(
+        "workbook encryption",
+        None,
+        gridcraft_model::CompatibilityEffect::EncryptionRemoved,
+        gridcraft_model::Editability::Unavailable,
+        DECRYPTED_NOTICE,
+    ));
     Ok((wb, warnings))
 }
 
@@ -128,12 +140,20 @@ fn decrypt_message(name: &str, e: gridcraft_xlsx::DecryptError) -> String {
 /// Parses bytes that aren't encrypted, then takes the workbook's macros, and the button actions
 /// xlsx has no place for, out of their hidden names, and adopts the Python cells they hold (see
 /// [`adopt_python`]) within the limits of [`enforce_python_limits`].
-fn open_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
+fn open_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, gridcraft_xlsx::ReadReport)> {
     let (mut wb, mut warnings) = read_plain(name, bytes, csv_as_text)?;
-    warnings.extend(crate::macros::load(&mut wb));
+    for warning in crate::macros::load(&mut wb) {
+        // `load` explicitly retains newer macro records; `json_bytes`/`with_names`
+        // write them back unchanged. This notice is not evidence of a loss.
+        if !wb.macros_unread.is_empty() && warning == crate::macros::kept_notice(wb.macros_unread.len()) {
+            warnings.notice(warning);
+        } else {
+            warnings.warn(warning);
+        }
+    }
     crate::cmd::controls::load_action_names(&mut wb);
-    warnings.extend(adopt_python(&mut wb));
-    warnings.extend(enforce_python_limits(&mut wb));
+    warnings.extend_warnings(adopt_python(&mut wb));
+    warnings.extend_warnings(enforce_python_limits(&mut wb));
     Ok((wb, warnings))
 }
 
@@ -262,12 +282,12 @@ fn sane_python_output(v: &gridcraft_core::Value) -> bool {
 }
 
 /// Parses bytes that aren't encrypted, as they are.
-fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
+fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, gridcraft_xlsx::ReadReport)> {
     let kind = FileKind::from_path(name);
     let sniffed = gridcraft_xlsx::sniff(bytes);
     if sniffed == gridcraft_xlsx::Format::Xls {
         let (wb, report) = gridcraft_xlsx::read_xls(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report));
     }
     if sniffed == gridcraft_xlsx::Format::LegacyBinary {
         return Err(EngineError::Other(format!(
@@ -286,7 +306,7 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
     if let Some(import) = import {
         let read = if import == FileKind::Ods { gridcraft_xlsx::read_ods } else { gridcraft_xlsx::read_xlsb };
         let (wb, report) = read(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report));
     }
     // Text named `.xlsx` is read as text.
     if sniffed == gridcraft_xlsx::Format::Xlsx || (kind == Some(FileKind::Xlsx) && sniffed != gridcraft_xlsx::Format::Csv) {
@@ -297,10 +317,10 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
                 _ => format!("We can't open '{name}': {e}"),
             })
         })?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report));
     }
     if let Some(read) = read_html_table(name, kind, bytes, csv_as_text) {
-        return read;
+        return read.map(|(wb, warnings)| (wb, warnings.into()));
     }
     match kind {
         Some(FileKind::Json) => {
@@ -319,12 +339,12 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
             if dropped > 0 {
                 warnings.push(format!("{name}: {dropped} cells outside the 1,048,576 × 16,384 grid were dropped"));
             }
-            Ok((wb, warnings))
+            Ok((wb, warnings.into()))
         }
         Some(FileKind::Sylk) => {
             let (mut wb, warnings) = sylk::read(name, bytes)?;
             rename_first_sheet(&mut wb, name);
-            Ok((wb, warnings))
+            Ok((wb, warnings.into()))
         }
         Some(FileKind::Tsv) => {
             let opts = gridcraft_xlsx::CsvOptions { delimiter: b'\t', parse_values: !csv_as_text, ..Default::default() };
@@ -332,13 +352,13 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
             // Tab is what makes it a .tsv/.txt; saved as .csv it gets the CSV default.
             wb.csv_delimiter = None;
             rename_first_sheet(&mut wb, name);
-            Ok((wb, report.warnings))
+            Ok((wb, report))
         }
         _ => {
             let opts = gridcraft_xlsx::CsvOptions { delimiter: 0, parse_values: !csv_as_text, ..Default::default() };
             let (mut wb, report) = gridcraft_xlsx::read_csv_with_report(bytes, &opts).map_err(|e| EngineError::Other(e.to_string()))?;
             rename_first_sheet(&mut wb, name);
-            Ok((wb, report.warnings))
+            Ok((wb, report))
         }
     }
 }

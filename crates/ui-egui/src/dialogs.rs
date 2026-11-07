@@ -1110,6 +1110,15 @@ impl Dialog {
             "assignAction" => return crate::control_ui::open_assign(app, &params),
             "formatControl" => return crate::control_ui::open_format(app, &params),
             "controlQuestion" => return crate::control_ui::open_question(&params),
+            "saveLosses" => {
+                let command = match params.get("command").and_then(Json::as_str) {
+                    Some("file.saveBytes") => "file.saveBytes",
+                    Some("file.exportCsv") => "file.exportCsv",
+                    Some("file.exportHtml") => "file.exportHtml",
+                    _ => "file.save",
+                };
+                Dialog::form("saveLosses", "Review Save Losses", command, vec![], params.clone())
+            }
             "saveCopy" => Dialog::custom("saveCopy", "Save a Copy", json!({"format": p("format")})),
             "saveChanges" => Dialog::custom("saveChanges", "Save Changes?", json!({"title": p("title"), "quit": p("quit")})),
             "start" => Dialog::custom("start", "GridCraft", json!({})),

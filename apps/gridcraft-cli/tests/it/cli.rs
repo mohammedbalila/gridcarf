@@ -93,7 +93,7 @@ fn run_then_cat_and_info_on_sample() {
 }
 
 #[test]
-fn convert_xlsx_csv_roundtrip() {
+fn convert_refuses_losses_and_explicit_save_keeps_csv_values() {
     let dir = tmpdir("convert");
     let xlsx = dir.join("in.xlsx");
     let csv = dir.join("out.csv");
@@ -106,7 +106,21 @@ fn convert_xlsx_csv_roundtrip() {
         xlsx.to_str().unwrap(),
         "--quiet",
     ]);
-    ok(&["convert", xlsx.to_str().unwrap(), csv.to_str().unwrap()]);
+    let refused = run(&["convert", xlsx.to_str().unwrap(), csv.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("save.losses"));
+    assert!(!csv.exists());
+    // This fresh process opens one known fixture at revision 1. Analyze and explicitly
+    // accept the two known loss classes in that same session; no export bypass is used.
+    let analyze = format!("file.analyzeSave={}", serde_json::json!({"path":csv}));
+    let save = format!(
+        "file.save={}",
+        serde_json::json!({"path":csv, "expectedDocument":1, "expectedRevision":1, "confirmedLosses":["feature.omitted", "feature.static"]})
+    );
+    let output = ok(&["run", "--in", xlsx.to_str().unwrap(), "--cmd", &analyze, "--cmd", &save]);
+    let analysis: serde_json::Value = serde_json::from_str(output.lines().next().unwrap()).unwrap();
+    assert_eq!(analysis["result"]["document"], 1);
+    assert_eq!(analysis["result"]["revision"], 1);
     let text = std::fs::read_to_string(&csv).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines, ["Name,Qty", "apple,3", "\"pear, green\",4", "total,7"], "{text}");

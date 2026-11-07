@@ -36,3 +36,5 @@ mod table_total_row_last_row;
 mod trace_error;
 mod workbook_author;
 mod wrap_row_height;
+
+mod save_losses;

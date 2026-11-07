@@ -531,20 +531,25 @@ fn the_debuggers_answers_count_its_own_steps_and_say_what_stays() {
     // that rolls back, and stopping without keeping each say so.
     let dir = std::env::temp_dir().join(format!("gc-macro-debug-files-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let export = json!({"command": "file.exportCsv", "params": {"path": format!("{}/out.csv", dir.to_string_lossy())}});
+    let export = json!({"command": "file.exportPdf", "params": {"path": format!("{}/out.pdf", dir.to_string_lossy())}});
     for (last, how) in [
         (json!({"command": "cell.set", "params": {"cell": "Nowhere!A2", "input": "two"}}), "failed"),
         (json!({"type": "stop", "message": "undo", "rollback": true}), "stopped"),
         (json!({"command": "cell.set", "params": {"cell": "A2", "input": "two"}}), "stop"),
     ] {
         let mut s = super::s();
-        put(&mut s, json!({"name": "F", "output": {"onConflict": "overwrite"}, "permissions": ["file.exportCsv"], "steps": [export, last]}));
+        put(&mut s, json!({"name": "F", "output": {"onConflict": "overwrite"}, "permissions": ["file.exportPdf"], "steps": [export, last]}));
         debug(&mut s, json!({"action": "start", "name": "F", "approve": true}));
         debug(&mut s, json!({"action": "step"}));
         let st = if how == "stop" { debug(&mut s, json!({"action": "stop"})) } else { debug(&mut s, json!({"action": "step"})) };
         let msg = st["message"].as_str().unwrap_or_default();
-        assert!(msg.contains("the file step 1 (file.exportCsv) wrote stays") && !msg.contains("Nothing was changed"), "{how}: {st}");
-        assert_eq!(st["wroteFiles"], json!(["step 1 (file.exportCsv)"]), "{how}: {st}");
+        assert!(msg.contains("the file step 1 (file.exportPdf) wrote stays") && !msg.contains("Nothing was changed"), "{how}: {st}");
+        assert_eq!(st["wroteFiles"], json!(["step 1 (file.exportPdf)"]), "{how}: {st}");
+    }
+    assert!(std::fs::read_dir(&dir).unwrap().count() > 0, "the file step created output");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "the real file-write path emitted a PDF");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -768,8 +773,8 @@ fn a_dry_run_leaves_the_journal_and_the_recording_start_as_they_were() {
 fn each_step_is_checked_for_writes_over_data() {
     let dir = std::env::temp_dir().join(format!("gc-macro-guard-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let csv = dir.join("out.csv").to_string_lossy().to_string();
-    let export = json!({"command": "file.exportCsv", "params": {"path": csv}});
+    let pdf = dir.join("out.pdf").to_string_lossy().to_string();
+    let export = json!({"command": "file.exportPdf", "params": {"path": pdf}});
     let solver = json!({"command": "data.solver", "params": {"objective": "C1", "variables": "A1", "constraints": ["A1 <= 5"], "method": "simplex", "saveModel": false}});
     let late = json!({"command": "cell.set", "params": {"cell": "B1", "input": "over"}});
     // A file step or Solver, then a step that writes over B1: the run stops there.
@@ -778,7 +783,7 @@ fn each_step_is_checked_for_writes_over_data() {
         set(&mut s, "A1", "1");
         set(&mut s, "C1", "=A1");
         set(&mut s, "B1", "keep");
-        put(&mut s, json!({"name": "Late", "inputs": [{"name": "Input"}], "permissions": ["file.exportCsv"], "steps": [first, late]}));
+        put(&mut s, json!({"name": "Late", "inputs": [{"name": "Input"}], "permissions": ["file.exportPdf"], "steps": [first, late]}));
         let start = s.doc().unwrap().wb.clone();
         for rule in ["fail", "ask"] {
             let r = s.execute("macro.run", json!({"name": "Late", "inputs": "A1", "onConflict": rule, "approve": true}));
@@ -789,7 +794,7 @@ fn each_step_is_checked_for_writes_over_data() {
             assert!(e.contains("Step 2 (cell.set): It would write over data (B1 on Sheet1)"), "{e}");
             // The workbook is put back; a file the run wrote stays, and the message says so.
             let left =
-                if first == &export { "The workbook was put back; the file step 1 (file.exportCsv) wrote stays." } else { "Nothing was changed." };
+                if first == &export { "The workbook was put back; the file step 1 (file.exportPdf) wrote stays." } else { "Nothing was changed." };
             assert!(e.ends_with(left), "{e}");
             assert_eq!(v(&s, "B1").display(), "keep", "{first} {rule}");
             assert!(Arc::ptr_eq(&s.doc().unwrap().wb, &start), "{first} {rule}: rolled back");
@@ -803,10 +808,15 @@ fn each_step_is_checked_for_writes_over_data() {
     let again = |input: &str| json!({"command": "cell.set", "params": {"cell": "E1", "input": input}});
     put(
         &mut s,
-        json!({"name": "Twice", "permissions": ["file.exportCsv"], "output": {"onConflict": "fail"}, "steps": [again("a"), export, again("b")]}),
+        json!({"name": "Twice", "permissions": ["file.exportPdf"], "output": {"onConflict": "fail"}, "steps": [again("a"), export, again("b")]}),
     );
     s.execute("macro.run", json!({"name": "Twice", "approve": true})).unwrap();
     assert_eq!(v(&s, "E1").display(), "b");
+    assert!(std::fs::read_dir(&dir).unwrap().count() > 0, "the file step created output");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "the real file-write path emitted a PDF");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1117,30 +1127,35 @@ fn a_token_in_a_path_needs_the_permission_and_approval() {
     let files = |dir: &std::path::Path| std::fs::read_dir(dir).unwrap().count();
     let in_dir = format!("{}/{{{{Input}}}}", dir.to_string_lossy());
     for path in [json!({"$ref": "Input"}), json!(in_dir), json!(" ")] {
-        let step = json!({"command": "file.exportCsv", "params": {"path": path}});
+        let step = json!({"command": "file.exportPdf", "params": {"path": path}});
         put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step]}));
         // Without the permission nothing runs, not even the check's dry run.
         let err = s.execute("macro.run", json!({"name": "Export"})).unwrap_err().to_string();
-        assert!(err.contains("Step 1 (file.exportCsv) writes a file. Add file.exportCsv to the macro's permissions"), "{path}: {err}");
+        assert!(err.contains("Step 1 (file.exportPdf) writes a file. Add file.exportPdf to the macro's permissions"), "{path}: {err}");
         let c = s.execute("macro.check", json!({"name": "Export"})).unwrap();
         assert!(c["errors"][0].as_str().unwrap().contains("writes a file"), "{path}: {c}");
         assert!(c.get("footprint").is_none());
         // With it, the person approves first; the check doesn't run it before then.
-        put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step], "permissions": ["file.exportCsv"]}));
+        put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step], "permissions": ["file.exportPdf"]}));
         let r = s.execute("macro.run", json!({"name": "Export"}));
         let Err(EngineError::Approve(q)) = &r else { panic!("{path}: {r:?}") };
-        assert!(q.contains("file.exportCsv, which writes a file"), "{q}");
+        assert!(q.contains("file.exportPdf, which writes a file"), "{q}");
         let c = s.execute("macro.check", json!({"name": "Export"})).unwrap();
-        assert_eq!(c["needsApproval"], json!(["runs file.exportCsv, which writes a file"]), "{path}");
+        assert_eq!(c["needsApproval"], json!(["runs file.exportPdf, which writes a file"]), "{path}");
         assert!(c.get("footprint").is_none());
         assert_eq!(files(&dir), 0, "{path}");
-        assert!(!std::path::Path::new("A1.csv").exists() && !std::path::Path::new(" .csv").exists());
+        assert!(!std::path::Path::new("A1.pdf").exists() && !std::path::Path::new(" .pdf").exists());
     }
     // Once approved, the check's dry run stops before the step, and only the run writes the file.
-    let step = json!({"command": "file.exportCsv", "params": {"path": in_dir}});
-    put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step], "permissions": ["file.exportCsv"]}));
+    let step = json!({"command": "file.exportPdf", "params": {"path": in_dir}});
+    put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step], "permissions": ["file.exportPdf"]}));
     s.execute("macro.run", json!({"name": "Export", "approve": true, "inputs": "B2"})).unwrap();
     assert_eq!(files(&dir), 1);
+    assert!(std::fs::read_dir(&dir).unwrap().count() > 0, "the file step created output");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "the real file-write path emitted a PDF");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let c = s.execute("macro.check", json!({"name": "Export", "inputs": "B2"})).unwrap();
@@ -1155,11 +1170,11 @@ fn the_debugger_runs_a_token_path_only_with_the_permission_and_approval() {
     let dir = std::env::temp_dir().join(format!("gc-macro-debug-token-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let files = |dir: &std::path::Path| std::fs::read_dir(dir).unwrap().count();
-    let step = json!({"command": "file.exportCsv", "params": {"path": format!("{}/{{{{Input}}}}", dir.to_string_lossy())}});
+    let step = json!({"command": "file.exportPdf", "params": {"path": format!("{}/{{{{Input}}}}", dir.to_string_lossy())}});
     put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step]}));
     let err = s.execute("macro.debug", json!({"action": "start", "name": "Export"})).unwrap_err().to_string();
     assert!(err.contains("writes a file"), "{err}");
-    put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step], "permissions": ["file.exportCsv"]}));
+    put(&mut s, json!({"name": "Export", "inputs": [{"name": "Input"}], "steps": [step], "permissions": ["file.exportPdf"]}));
     assert!(matches!(s.execute("macro.debug", json!({"action": "start", "name": "Export"})), Err(EngineError::Approve(_))));
     assert_eq!(files(&dir), 0);
     // Approved, it pauses before the step and writes the file only when the step runs.
@@ -1167,6 +1182,11 @@ fn the_debugger_runs_a_token_path_only_with_the_permission_and_approval() {
     assert_eq!(files(&dir), 0, "paused before the step");
     s.execute("macro.debug", json!({"action": "step"})).unwrap();
     assert_eq!(files(&dir), 1, "the debugger runs the approved step");
+    assert!(std::fs::read_dir(&dir).unwrap().count() > 0, "the file step created output");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "the real file-write path emitted a PDF");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1268,8 +1288,8 @@ fn macros_from_a_file_ask_before_running() {
 fn a_partial_footprint_doesnt_clear_later_writes() {
     let dir = std::env::temp_dir().join(format!("gc-macro-partial-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let csv = dir.join("out.csv").to_string_lossy().to_string();
-    let export = json!({"command": "file.exportCsv", "params": {"path": csv}});
+    let pdf = dir.join("out.pdf").to_string_lossy().to_string();
+    let export = json!({"command": "file.exportPdf", "params": {"path": pdf}});
     let solver = json!({"command": "data.solver", "params": {"objective": "C1", "variables": "A1", "constraints": ["A1 <= 5"], "method": "simplex", "saveModel": false}});
     let late = json!({"command": "cell.set", "params": {"cell": "B1", "input": "over"}});
     // The dry run stops at an approved file step or at Solver; the step after it writes over B1.
@@ -1278,7 +1298,7 @@ fn a_partial_footprint_doesnt_clear_later_writes() {
         set(&mut s, "A1", "1");
         set(&mut s, "C1", "=A1");
         set(&mut s, "B1", "keep");
-        put(&mut s, json!({"name": "Late", "inputs": [{"name": "Input"}], "permissions": ["file.exportCsv"], "steps": [first, late]}));
+        put(&mut s, json!({"name": "Late", "inputs": [{"name": "Input"}], "permissions": ["file.exportPdf"], "steps": [first, late]}));
         let start = s.doc().unwrap().wb.clone();
         let c = s.execute("macro.check", json!({"name": "Late", "inputs": "A1"})).unwrap();
         if c.get("needsApproval").is_none() {
@@ -1303,7 +1323,7 @@ fn a_partial_footprint_doesnt_clear_later_writes() {
     let again = |input: &str| json!({"command": "cell.set", "params": {"cell": "E1", "input": input}});
     put(
         &mut s,
-        json!({"name": "Twice", "permissions": ["file.exportCsv"], "output": {"onConflict": "fail"}, "steps": [again("a"), export, again("b")]}),
+        json!({"name": "Twice", "permissions": ["file.exportPdf"], "output": {"onConflict": "fail"}, "steps": [again("a"), export, again("b")]}),
     );
     s.execute("macro.run", json!({"name": "Twice", "approve": true})).unwrap();
     assert_eq!(v(&s, "E1").display(), "b");
@@ -1314,13 +1334,18 @@ fn a_partial_footprint_doesnt_clear_later_writes() {
     let step = |cell: &str| json!({"command": "cell.set", "params": {"cell": cell, "input": "new"}});
     put(
         &mut s,
-        json!({"name": "Shift", "permissions": ["file.exportCsv"], "output": {"onConflict": "shiftDown"}, "steps": [step("C1"), export, step("D1")]}),
+        json!({"name": "Shift", "permissions": ["file.exportPdf"], "output": {"onConflict": "shiftDown"}, "steps": [step("C1"), export, step("D1")]}),
     );
     let start = s.doc().unwrap().wb.clone();
     let err = s.execute("macro.run", json!({"name": "Shift", "approve": true})).unwrap_err().to_string();
     assert!(err.contains("Step 3 (cell.set): It would write over data (D1 on Sheet1)"), "{err}");
     assert_eq!((v(&s, "C1").display(), v(&s, "D1").display()), ("old".into(), "keep".into()));
     assert!(Arc::ptr_eq(&s.doc().unwrap().wb, &start), "the shift is rolled back too");
+    assert!(std::fs::read_dir(&dir).unwrap().count() > 0, "the file step created output");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "the real file-write path emitted a PDF");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2092,7 +2117,13 @@ fn kept_macros_count_toward_the_limit_and_keep_their_names() {
     s.execute("macro.record", json!({"cancel": true})).unwrap();
     // Saved and opened again: every macro, the kept ones too, is still there.
     for format in ["xlsx", "json"] {
-        let b64 = s.execute("file.saveBytes", json!({"format": format})).unwrap()["base64"].as_str().unwrap().to_string();
+        let result = if format == "json" {
+            // The preceding XLSX open carries opaque workbook metadata; JSON omits it.
+            super::accept_save_losses(&mut s, "file.saveBytes", json!({"format": format}), &["feature.omitted"])
+        } else {
+            s.execute("file.saveBytes", json!({"format": format})).unwrap()
+        };
+        let b64 = result["base64"].as_str().unwrap().to_string();
         s.execute("file.open", json!({"name": format!("again.{format}"), "base64": b64})).unwrap();
         let wb = &s.doc().unwrap().wb;
         assert_eq!((wb.macros.len(), wb.macros_unread.len()), (gridcraft_model::MAX_MACROS - 2, 2), "{format}");
@@ -2513,4 +2544,16 @@ fn a_step_that_deletes_a_form_control_after_a_partial_footprint_is_caught() {
     }
     s.execute("macro.run", json!({"name": "Drop", "inputs": "A1", "overwrite": true})).unwrap();
     assert!(s.doc().unwrap().wb.active().unwrap().controls.is_empty());
+}
+
+#[test]
+fn save_losses_macro_file_permission_does_not_acknowledge_content_loss() {
+    let mut s = s();
+    let path = std::env::temp_dir().join(format!("gc-macro-save-loss-{}.csv", std::process::id()));
+    std::fs::write(&path, b"original").unwrap();
+    put(&mut s, json!({"name":"Lossy export", "permissions":["file.exportCsv"], "steps":[{"command":"file.exportCsv", "params":{"path":path}}]}));
+    let result = s.execute("macro.run", json!({"name":"Lossy export", "approve":true}));
+    assert!(result.unwrap_err().to_string().contains("save.losses"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    std::fs::remove_file(path).unwrap();
 }

@@ -203,10 +203,8 @@ pub(crate) fn read_xls_with(bytes: &[u8], mut budget: Budget) -> Result<(Workboo
     defined_names(&g, &model_index, &mut wb, &mut report);
     wb.set_active_sheet(wb.sheets.iter().position(|s| s.visibility == Visibility::Visible).unwrap_or(0));
     // The overview comes first.
-    report.warnings.insert(
-        0,
-        "Imported from an Excel 97-2003 (.xls) workbook: values, formulas, cell formatting, merged cells, column widths, row heights and defined names were read. Charts, pictures, comments and other features are not imported yet. Save as .xlsx; saving .xls is not supported.".into(),
-    );
+    report.warn("Imported from an Excel 97-2003 (.xls) workbook: values, formulas, cell formatting, merged cells, column widths, row heights and defined names were read. Charts, pictures, comments and other features are not imported yet. Save as .xlsx; saving .xls is not supported.");
+    report.warnings.rotate_right(1);
     Ok((wb, report))
 }
 

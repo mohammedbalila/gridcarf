@@ -79,14 +79,74 @@ pub enum IoError {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReadReport {
     pub warnings: Vec<String>,
+    pub issues: Vec<gridcraft_model::CompatibilityIssue>,
 }
 
 impl ReadReport {
-    pub(crate) fn warn(&mut self, msg: impl Into<String>) {
+    pub fn warn(&mut self, msg: impl Into<String>) {
         let m = msg.into();
-        if self.warnings.len() < 1000 && !self.warnings.contains(&m) {
-            self.warnings.push(m);
+        if !self.warnings.contains(&m) {
+            // Existing readers report prose. Preserve it, but never infer fidelity from an
+            // unclassified warning. Safe preservation notices use `notice` at their source.
+            use gridcraft_model::{CompatibilityEffect as Effect, CompatibilityIssue, Editability};
+            let (feature, effect) = if m == "what-if data tables are not supported; kept their values" {
+                ("what-if data table", Effect::Static)
+            } else if m.contains("kept the cached value")
+                || m.contains("kept their values")
+                || m.contains("imported as static")
+                || m.contains("kept only its last calculated value")
+            {
+                ("imported live content", Effect::Static)
+            } else if m.contains("dropped") || m.contains("skipped") || m.contains("not kept on save") {
+                ("imported content", Effect::Omitted)
+            } else {
+                ("unclassified import warning", Effect::Unknown)
+            };
+            self.issue(CompatibilityIssue::new(
+                feature,
+                None,
+                effect,
+                if effect == Effect::Unknown { Editability::Unknown } else { Editability::Unavailable },
+                &m,
+            ));
+            // The notice cap must not hide a later loss from the independent issue ledger.
+            self.notice(m);
         }
+    }
+    /// An explicitly safe preservation notice, with no loss or uncertainty to acknowledge.
+    pub fn notice(&mut self, message: String) {
+        if self.warnings.len() < 1000 && !self.warnings.contains(&message) {
+            self.warnings.push(message);
+        }
+    }
+    pub fn issue(&mut self, issue: gridcraft_model::CompatibilityIssue) {
+        if self.issues.contains(&issue) {
+            return;
+        }
+        if self.issues.len() < 1000 {
+            self.issues.push(issue);
+        } else if self.issues.len() == 1000 {
+            self.issues.push(gridcraft_model::CompatibilityIssue::new(
+                "additional import issues",
+                None,
+                gridcraft_model::CompatibilityEffect::Unknown,
+                gridcraft_model::Editability::Unknown,
+                "The import issue limit was reached. Additional content losses or compatibility risks could not be listed; review the original before saving.",
+            ));
+        }
+    }
+    pub fn extend_warnings(&mut self, warnings: impl IntoIterator<Item = String>) {
+        for warning in warnings {
+            self.warn(warning);
+        }
+    }
+}
+
+impl From<Vec<String>> for ReadReport {
+    fn from(warnings: Vec<String>) -> Self {
+        let mut report = Self::default();
+        report.extend_warnings(warnings);
+        report
     }
 }
 

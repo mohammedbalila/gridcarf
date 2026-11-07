@@ -447,7 +447,16 @@ fn imported_oversized_picture(h: &mut Harness, o: &Objects) -> ObjRef {
         a.width = 12_000.0;
         a.height = 60.0;
     }
-    let saved = h.state_mut().run("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    // This broad object fixture also has a slicer, which XLSX cannot write. Acknowledge
+    // exactly that known loss while exercising the real picture import path.
+    let error = h.state_mut().run("file.saveBytes", json!({"format": "xlsx"})).unwrap_err();
+    let failure: serde_json::Value = serde_json::from_str(&error).unwrap();
+    let analysis = &failure["analysis"];
+    let issues = analysis["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["feature"], "slicer");
+    assert_eq!(issues[0]["code"], "feature.omitted");
+    let saved = h.state_mut().run("file.saveBytes", json!({"format":"xlsx", "expectedDocument":analysis["document"], "expectedRevision":analysis["revision"], "confirmedLosses":["feature.omitted"]})).unwrap();
     h.state_mut().run("file.open", json!({"name": "wide.xlsx", "base64": saved["base64"]})).unwrap();
     h.run_steps(4);
     let pic = ObjRef::new(ObjKind::Image, h.state().session.doc().unwrap().wb.active().unwrap().images[0].id);

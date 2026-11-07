@@ -55,10 +55,11 @@ impl SheetApp {
             return r;
         }
         let before = self.session.active_window();
-        let zoom_from = matches!(id, "view.zoom" | "view.zoom100" | "view.zoomToSelection").then(|| crate::grid::Trace::key(self));
+        let view_from = matches!(id, "view.zoom" | "view.zoom100" | "view.zoomToSelection" | "sheet.activate" | "sheet.next" | "sheet.previous")
+            .then(|| crate::grid::Trace::key(self));
         let r = self.session.run(id, params);
-        if let Some(from) = zoom_from {
-            crate::grid::Trace::keep_through_zoom(self, from);
+        if let Some(from) = view_from {
+            crate::grid::Trace::keep_through_view_change(self, from);
         }
         if id.starts_with("file.") && self.session.active_window() != before {
             // File › New or Open from the Backstage view: the window it was in goes back to its sheet.
@@ -100,6 +101,10 @@ impl SheetApp {
     }
 
     pub fn run_or_alert(&mut self, id: &str, params: Json) {
+        if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes" | "file.exportCsv" | "file.exportHtml") {
+            self.save_or_explain(id, params);
+            return;
+        }
         // A menu/shortcut opens the settings first; the Print page's button submits explicitly.
         if id == "file.print" {
             if self.services.print_native.is_some() {
@@ -386,13 +391,8 @@ impl SheetApp {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.xlsx") } else { path };
                         self.run_or_alert("file.save", json!({"path": path}));
                     }
-                } else if self.services.download.is_some()
-                    && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
-                    && let Some(dl) = &self.services.download
-                    && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
-                {
-                    let name = r.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx").to_string();
-                    dl(&name, &b);
+                } else if self.services.download.is_some() {
+                    self.save_or_explain("file.saveBytes", json!({"format": "xlsx"}));
                 }
             }
             // File › Options (`file.options`) and the File tab itself open the Backstage view.

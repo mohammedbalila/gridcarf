@@ -413,7 +413,7 @@ pub fn status_bar(app: &mut SheetApp, ui: &mut Ui) {
                     if slider.changed() {
                         let from = crate::grid::Trace::key(app);
                         let _ = app.session.run("view.zoom", json!({"percent": z.round()}));
-                        crate::grid::Trace::keep_through_zoom(app, from);
+                        crate::grid::Trace::keep_through_view_change(app, from);
                     }
                     if crate::widgets::icon_button(ui, Icon::Minus, t.text_dim, "Zoom Out", vec2(18.0, 18.0)).clicked() {
                         let z = ((zoom as f32 / 10.0).ceil() * 10.0 - 10.0).max(10.0);

@@ -14,6 +14,18 @@ fn s() -> Session {
     s
 }
 
+/// Explicit review for format tests whose fixture intentionally exercises known loss.
+fn accept_save_losses(s: &mut Session, command: &str, mut params: serde_json::Value, codes: &[&str]) -> serde_json::Value {
+    let path = params["path"].as_str().map(str::to_owned).unwrap_or_else(|| format!("review.{}", params["format"].as_str().unwrap_or("xlsx")));
+    let analysis = s.execute("file.analyzeSave", json!({"path":path})).unwrap();
+    let actual: std::collections::BTreeSet<_> = analysis["issues"].as_array().unwrap().iter().map(|i| i["code"].as_str().unwrap()).collect();
+    assert_eq!(actual, codes.iter().copied().collect(), "reviewed issues: {analysis}");
+    params["expectedRevision"] = analysis["revision"].clone();
+    params["expectedDocument"] = analysis["document"].clone();
+    params["confirmedLosses"] = json!(codes);
+    s.execute(command, params).unwrap()
+}
+
 fn v(s: &Session, a: &str) -> Value {
     s.doc().unwrap().wb.active().unwrap().value(CellRef::parse(a).unwrap())
 }
@@ -2490,7 +2502,7 @@ fn ods_import_keeps_cached_values_and_reports_limits() {
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
         assert_eq!(v(&s, "B1"), Value::from("Original data"));
         assert!(s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.is_none());
-        let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+        let saved = accept_save_losses(&mut s, "file.saveBytes", json!({"format": "xlsx"}), &["package.unknown"]);
         s.execute("file.open", json!({"name": "imported.xlsx", "base64": saved["base64"]})).unwrap();
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
     }
@@ -2516,7 +2528,7 @@ fn ods_import_never_reuses_source_as_save_target() {
         assert!(s.execute("file.saveAs", json!({"path": dir.join("source.ods")})).is_err());
         assert!(s.execute("file.saveBytes", json!({"format": "ods"})).is_err());
         let output = dir.join("converted.xlsx");
-        s.execute("file.saveAs", json!({"path": output})).unwrap();
+        accept_save_losses(&mut s, "file.saveAs", json!({"path": output}), &["package.unknown"]);
         assert!(!s.doc().unwrap().is_dirty());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         s.execute("file.open", json!({"name": "converted.xlsx", "base64": crate::io::base64_encode(&std::fs::read(output).unwrap())})).unwrap();
@@ -2580,11 +2592,11 @@ fn export_csv_values_writes_raw_values_and_the_default_stays_displayed_text() {
     let dir = std::env::temp_dir().join(format!("gridcraft-csv-values-{}-{nonce}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let displayed = dir.join("displayed.csv");
-    s.execute("file.exportCsv", json!({"path": displayed})).unwrap();
-    s.execute("file.exportCsv", json!({"path": dir.join("off.csv"), "values": false})).unwrap();
+    accept_save_losses(&mut s, "file.exportCsv", json!({"path": displayed}), &["feature.omitted", "feature.static"]);
+    accept_save_losses(&mut s, "file.exportCsv", json!({"path": dir.join("off.csv"), "values": false}), &["feature.omitted", "feature.static"]);
     let raw = dir.join("raw.csv");
-    s.execute("file.exportCsv", json!({"path": raw, "values": true})).unwrap();
-    let saved = s.execute("file.saveBytes", json!({"format": "csv"})).unwrap();
+    accept_save_losses(&mut s, "file.exportCsv", json!({"path": raw, "values": true}), &["feature.omitted", "feature.static"]);
+    let saved = accept_save_losses(&mut s, "file.saveBytes", json!({"format": "csv"}), &["feature.omitted", "feature.static"]);
     let default = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
     // The default export is byte for byte what Save As CSV writes, and `values: false` is the default.
     assert_eq!(std::fs::read(&displayed).unwrap(), default);
@@ -2658,17 +2670,17 @@ fn save_as_into_another_folder_keeps_linked_workbooks_on_the_same_file() {
     std::fs::write(&dest, linked_workbook("Source.xlsx")).unwrap();
     let mut s = s();
     s.execute("file.open", json!({"path": dest})).unwrap();
-    s.execute("file.saveAs", json!({"path": b.join("Dest.xlsx")})).unwrap();
+    accept_save_losses(&mut s, "file.saveAs", json!({"path": b.join("Dest.xlsx")}), &["package.unknown"]);
     assert_eq!(link_target(&b.join("Dest.xlsx")), "../Source.xlsx");
     // Saved again into the folder it was read from, the path is the one it was read with.
-    s.execute("file.saveAs", json!({"path": a.join("Copy.xlsx")})).unwrap();
+    accept_save_losses(&mut s, "file.saveAs", json!({"path": a.join("Copy.xlsx")}), &["package.unknown"]);
     assert_eq!(link_target(&a.join("Copy.xlsx")), "Source.xlsx");
     // Read from a subfolder and saved into its parent, the path goes down into the subfolder.
     let deep = b.join("Deep.xlsx");
     std::fs::write(&deep, linked_workbook("Source.xlsx")).unwrap();
     let mut s = Session::new();
     s.execute("file.open", json!({"path": deep})).unwrap();
-    s.execute("file.saveAs", json!({"path": a.join("Deep.xlsx")})).unwrap();
+    accept_save_losses(&mut s, "file.saveAs", json!({"path": a.join("Deep.xlsx")}), &["package.unknown"]);
     assert_eq!(link_target(&a.join("Deep.xlsx")), "b/Source.xlsx");
     std::fs::remove_dir_all(a).unwrap();
 }
@@ -3471,7 +3483,7 @@ fn xlsb_import_keeps_cached_values_and_reports_limits() {
         assert!(s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.is_none());
         s.execute("cell.set", json!({"cell": "B1", "input": "Changed"})).unwrap();
         assert_eq!(v(&s, "A1"), Value::Number(42.0)); // Imported formula caches are constants.
-        let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+        let saved = accept_save_losses(&mut s, "file.saveBytes", json!({"format": "xlsx"}), &["package.unknown"]);
         s.execute("file.open", json!({"name": "imported.xlsx", "base64": saved["base64"]})).unwrap();
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
     }
@@ -3497,7 +3509,7 @@ fn xlsb_import_never_reuses_source_as_save_target() {
         assert!(s.execute("file.saveAs", json!({"path": dir.join("source.xlsb")})).is_err());
         assert!(s.execute("file.saveBytes", json!({"format": "xlsb"})).is_err());
         let output = dir.join("converted.xlsx");
-        s.execute("file.saveAs", json!({"path": output})).unwrap();
+        accept_save_losses(&mut s, "file.saveAs", json!({"path": output}), &["package.unknown"]);
         assert!(!s.doc().unwrap().is_dirty());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         s.execute("file.open", json!({"name": "converted.xlsx", "base64": crate::io::base64_encode(&std::fs::read(output).unwrap())})).unwrap();
@@ -3588,7 +3600,7 @@ fn xls_import_keeps_formulas_and_never_saves_back_to_xls() {
     s.execute("cell.set", json!({"cell": "A1", "input": "50"})).unwrap();
     assert_eq!(v(&s, "A2"), Value::Number(100.0));
     assert!(s.execute("file.saveBytes", json!({"format": "xls"})).is_err());
-    assert!(s.execute("file.saveBytes", json!({"format": "xlsx"})).is_ok());
+    accept_save_losses(&mut s, "file.saveBytes", json!({"format": "xlsx"}), &["package.unknown"]);
 }
 
 #[test]

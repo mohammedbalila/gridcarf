@@ -53,7 +53,7 @@ with a file open.
 | `create_table` | `range`, `style?`, `header?`, `name?` | `insert.table`. |
 | `sort_range` | `keys`, `range?`, `header?` | `data.sort`; keys are `"B"`, `"B desc"` or `{column, order}`. |
 | `filter` | `column`, `range?`, `values?`, `custom?`, `top?`, `blanks?`, `clear?` | `data.filterBy` (turns AutoFilter on when needed). |
-| `open_workbook` / `save_workbook` / `new_workbook` | `path` / `path?` / `sample?` | Files (`.xlsx`, `.csv`, `.tsv`, `.json`, `.html`). |
+| `open_workbook` / `save_workbook` / `new_workbook` | `path` / `path?, confirmedLosses?, expectedRevision?, expectedDocument?` / `sample?` | Files (`.xlsx`, `.csv`, `.tsv`, `.json`, `.html`). |
 | `undo` / `redo` | `steps?` | History. |
 | `screenshot` | `path` | PNG of the window (Remote only). |
 | `list_functions` | `search?`, `category?` | Worksheet functions with signatures. |
@@ -90,3 +90,20 @@ methods `-32601`.
 `Server::new(Box::new(Remote::connect(&control_addr("7979"))?))`, then `Server::serve(stdin, stdout)` or
 `Server::handle_line(line) -> Option<String>`. Implement the `Backend` trait (`call(method, params)`) to drive another
 host.
+
+### Reviewing save losses
+
+`save_workbook` accepts additive `confirmedLosses` (an array of issue codes),
+`expectedRevision` and `expectedDocument`. A refused save has `isError: true` and
+`structuredContent: {error: "save.losses" | "save.stale", analysis: {...}}`.
+The analysis includes `document`, `revision`, `path` and typed `issues` with `code`,
+`feature`, `location`, `effect`, `editability` and `description`.
+
+Use `execute_command` with `command: "file.analyzeSave"` and `params: {path: ...}`
+to review before saving. Explicitly pass the returned document/revision and every issue
+code to `save_workbook` only after accepting those losses. Changed content requires a
+fresh decision. The same fields work through `execute_command` for `file.saveAs`,
+`file.saveBytes`, `file.exportCsv` and `file.exportHtml`. These commands never open a
+loss dialog for programmatic callers. CLI scripts use these same commands and fields;
+`run --out` and `convert` refuse unacknowledged losses. Low-level codecs and explicit PDF print
+exports retain their existing behavior.

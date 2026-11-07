@@ -23,6 +23,7 @@ pub mod pivot_calc;
 pub mod recent;
 pub mod record;
 pub mod sample;
+pub mod save;
 pub mod selection;
 pub mod tables;
 pub mod windows;
@@ -53,6 +54,8 @@ pub enum EngineError {
     Disabled(String, String),
     #[error("invalid parameters for `{cmd}`: {msg}")]
     BadParams { cmd: String, msg: String },
+    #[error("{0}")]
+    SaveBlocked(save::SaveFailure),
     #[error("no workbook open")]
     NoDocument,
     #[error("{0}")]
@@ -194,6 +197,7 @@ pub struct DocState {
     pub path: Option<String>,
     pub saved: Arc<Workbook>,
     pub revision: u64,
+    import_issues: Vec<gridcraft_model::CompatibilityIssue>,
     /// Identifies this open workbook for the rest of the session: it never changes while the
     /// workbook is open (saving, renaming, reordering) and is never reused for another one.
     pub uid: u64,
@@ -320,6 +324,7 @@ impl DocState {
             redo: vec![],
             path,
             revision: 1,
+            import_issues: vec![],
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title,
             sheet_selections: vec![],
@@ -330,6 +335,21 @@ impl DocState {
             touched: None,
             edits: None,
             go_to_recent: vec![],
+        }
+    }
+    pub fn import_issues(&self) -> &[gridcraft_model::CompatibilityIssue] {
+        &self.import_issues
+    }
+    /// Import facts outlive edits and undo: a clean model comparison cannot recover lost source content.
+    pub fn retain_import_issues(&mut self, issues: Vec<gridcraft_model::CompatibilityIssue>) {
+        let before = self.import_issues.len();
+        for issue in issues {
+            if !self.import_issues.contains(&issue) {
+                self.import_issues.push(issue);
+            }
+        }
+        if self.import_issues.len() != before {
+            self.revision = self.revision.saturating_add(1);
         }
     }
     pub fn is_dirty(&self) -> bool {
@@ -349,6 +369,7 @@ impl DocState {
         if !changed {
             return;
         }
+        self.revision = self.revision.saturating_add(1);
         let dirty = self.is_dirty();
         let wb = Arc::make_mut(&mut self.wb);
         for (i, c) in tops {
@@ -688,6 +709,7 @@ impl Session {
             return Err(EngineError::Disabled(id.to_string(), macros::debug::BUSY.into()));
         }
         let before = self.active().map(|d| (d.uid, d.wb.clone(), d.selection.clone()));
+        let sheet_before = self.active().map(|d| d.wb.active_sheet());
         // A dry run inside this command that a panic cuts short leaves journaling paused and its
         // touch log open; the panic branch puts both back.
         let paused_before = self.journal_paused;
@@ -820,6 +842,14 @@ impl Session {
         // it leaves the group its step and makes one of its own for what it changed after the end.
         // A command that opened and closed its own groups makes one step of its own, which
         // replaces the steps those groups made.
+        // Queries and noundo commands can also change stored state (recalculation,
+        // Save As metadata and active-sheet selection). They invalidate save decisions too.
+        if let Some((uid, wb, _)) = &before
+            && let Some(d) = self.docs.iter_mut().find(|d| d.uid == *uid)
+            && ((!spec.undoable && !Arc::ptr_eq(wb, &d.wb)) || sheet_before != Some(d.wb.active_sheet()))
+        {
+            d.revision = d.revision.saturating_add(1);
+        }
         let epoch_changed = self.group_epoch != group_epoch;
         let in_group_now = before.as_ref().is_some_and(|(uid, ..)| self.in_group(*uid));
         let was_open = start.is_some_and(|(was_open, _)| was_open);
@@ -873,7 +903,7 @@ impl Session {
             }
             // Inside a group the redo history waits for the group: `group_end` clears it when the
             // group becomes a step, and `group_rollback` puts it back as it was.
-            d.revision += 1;
+            d.revision = d.revision.saturating_add(1);
         }
         // The history limit applies once the outermost command has collapsed its steps, so the
         // lengths it compared stay true. Meanwhile the steps made inside it are bounded on their own.
@@ -951,7 +981,7 @@ impl Session {
         if changed && !outer {
             push_entry(&mut d.undo, g.label, g.wb, &d.wb, g.selection);
             d.redo.clear();
-            d.revision += 1;
+            d.revision = d.revision.saturating_add(1);
         }
         if !outer {
             self.group_step =
@@ -1025,7 +1055,7 @@ impl Session {
         d.selection = g.selection;
         d.undo.truncate(g.start);
         d.redo = g.redo;
-        d.revision += 1;
+        d.revision = d.revision.saturating_add(1);
         // The steps recorded while the group was open go with their edits (all of them when the
         // recording started inside the group).
         if let Some(rec) = self.recorder.as_mut() {

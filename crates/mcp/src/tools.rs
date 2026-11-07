@@ -11,20 +11,25 @@ use crate::headless::NO_UI;
 pub struct ToolResult {
     pub content: Vec<Value>,
     pub is_error: bool,
+    pub structured_content: Option<Value>,
 }
 
 impl ToolResult {
     pub fn text(t: impl Into<String>) -> Self {
-        Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: false }
+        Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: false, structured_content: None }
     }
     pub fn json(v: &Value) -> Self {
         Self::text(serde_json::to_string_pretty(v).unwrap_or_default())
     }
     pub fn error(t: impl Into<String>) -> Self {
-        Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: true }
+        Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: true, structured_content: None }
     }
     pub fn to_value(&self) -> Value {
-        json!({"content": self.content, "isError": self.is_error})
+        let mut value = json!({"content": self.content, "isError": self.is_error});
+        if let Some(content) = &self.structured_content {
+            value["structuredContent"] = content.clone();
+        }
+        value
     }
 }
 
@@ -366,8 +371,11 @@ fn base_tool_definitions() -> Vec<Value> {
             "save_workbook",
             "Save workbook",
             "Save the active workbook. The format follows the extension (.xlsx default; .csv/.tsv save the active sheet; .json; .html). \
-             Without `path` saves to the workbook's current file.",
-            obj(json!({"path": string("Destination path")}), &[]),
+             Without `path` saves to the workbook's current file. Known losses return structuredContent with a document/revision analysis. Inspect with execute_command file.analyzeSave, then explicitly supply confirmedLosses, expectedRevision and expectedDocument.",
+            obj(
+                json!({"path": string("Destination path"), "confirmedLosses": {"type":"array", "items":{"type":"string"}, "description":"Issue codes explicitly accepted from file.analyzeSave"}, "expectedRevision":int("Reviewed revision"), "expectedDocument":int("Reviewed document identity")}),
+                &[],
+            ),
             false,
         ),
         tool(
@@ -614,7 +622,7 @@ fn save_workbook(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
             return Err("this workbook has never been saved: pass `path` (e.g. \"/tmp/book.xlsx\")".into());
         }
     }
-    exec(b, "file.save", pick(a, &["path"]))
+    exec(b, "file.save", pick(a, &["path", "confirmedLosses", "expectedRevision", "expectedDocument"]))
 }
 
 fn screenshot(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
@@ -710,6 +718,13 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         if target.is_empty() || UNTARGETED.contains(&name) { dispatch(b, name, a) } else { dispatch(&mut Targeted { inner: b, target }, name, a) };
     match r {
         Ok(v) => ToolResult::json(&v),
-        Err(e) => ToolResult::error(format!("{name}: {e}")),
+        Err(e) => match serde_json::from_str::<gridcraft_engine::save::SaveFailure>(&e) {
+            Ok(failure) => {
+                let mut result = ToolResult::error(&e);
+                result.structured_content = serde_json::to_value(failure).ok();
+                result
+            }
+            Err(_) => ToolResult::error(format!("{name}: {e}")),
+        },
     }
 }

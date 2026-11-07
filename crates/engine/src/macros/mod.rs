@@ -241,6 +241,19 @@ fn keep_unread(unread: &mut Vec<Json>, v: Json, bad: &mut usize) {
     }
 }
 
+/// The safe preservation notice emitted by `load`; it contains no workbook-derived names.
+pub(crate) fn kept_notice(count: usize) -> String {
+    let one = count == 1;
+    format!(
+        "{} macro{} in the workbook {} made by a newer version of GridCraft: this version can't show or run {}, and saving keeps {} unchanged.",
+        count,
+        if one { "" } else { "s" },
+        if one { "was" } else { "were" },
+        if one { "it" } else { "them" },
+        if one { "it" } else { "them" }
+    )
+}
+
 /// After a file is opened: moves macros out of hidden names into `Workbook::macros`, keeps
 /// macros in a newer format unread (`Workbook::macros_unread`), and drops macros that are damaged
 /// or over the limits. Returns a warning for what was kept unread and one for what was dropped.
@@ -318,15 +331,7 @@ pub fn load(wb: &mut Workbook) -> Vec<String> {
     bad = bad.saturating_add(unread.len().saturating_sub(room));
     unread.truncate(room);
     if !unread.is_empty() {
-        let one = unread.len() == 1;
-        warnings.push(format!(
-            "{} macro{} in the workbook {} made by a newer version of GridCraft: this version can't show or run {}, and saving keeps {} unchanged.",
-            unread.len(),
-            if one { "" } else { "s" },
-            if one { "was" } else { "were" },
-            if one { "it" } else { "them" },
-            if one { "it" } else { "them" },
-        ));
+        warnings.push(kept_notice(unread.len()));
     }
     wb.macros_unread = std::sync::Arc::new(unread);
     if bad > 0 {

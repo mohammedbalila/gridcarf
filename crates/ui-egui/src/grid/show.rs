@@ -365,7 +365,7 @@ fn update_zoom_glide(app: &mut SheetApp, ui: &egui::Ui, place: (u64, usize), zoo
         let z = if glides { zoom_glide_step(shown, to, share) } else { to };
         let from = Trace::key(app);
         let _ = app.session.run("view.zoom", json!({"percent": z}));
-        Trace::keep_through_zoom(app, from);
+        Trace::keep_through_view_change(app, from);
         zooming.glide = (z != to).then_some((to, z));
         ui.ctx().request_repaint();
     }

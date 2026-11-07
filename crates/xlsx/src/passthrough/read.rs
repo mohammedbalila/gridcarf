@@ -28,6 +28,20 @@ fn raw_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Vec<PreservedRel>, String> {
     Ok(out)
 }
 
+/// Inventory owner relationships that neither the model reader nor pass-through handles.
+/// This is bounded evidence about these owners, not a claim to detect arbitrary unknown XML.
+fn inventory(cx: &mut Ctx<'_>, owner: &str, rels: &[PreservedRel], handled: &[&str]) {
+    for r in rels.iter().filter(|r| !is_kind(r, handled)) {
+        cx.report.issue(gridcraft_model::CompatibilityIssue::new(
+            kind(&r.rel_type),
+            Some(format!("{owner}: {}", r.target)),
+            gridcraft_model::CompatibilityEffect::Unknown,
+            gridcraft_model::Editability::Unknown,
+            "This workbook relationship cannot be preserved reliably by this version of GridCraft.",
+        ));
+    }
+}
+
 // ---------------------------------------------------------------- reading
 
 /// The `<sheet>` entries of the workbook that are chart sheets, each with the number of worksheets
@@ -195,6 +209,12 @@ impl KeptReader {
         let mut seen = HashSet::new();
         // Package root: custom document properties, ribbon customisation, task panes.
         if let Ok(root) = raw_rels(cx, "") {
+            inventory(
+                cx,
+                "package",
+                &root,
+                &["officeDocument", "core-properties", "extended-properties", "custom-properties", "extensibility", "webextensiontaskpanes"],
+            );
             for r in root.iter().filter(|r| is_kind(r, PACKAGE_ROOTS)) {
                 let mut q = Preserved::default();
                 match self.keep(cx, &mut q, std::slice::from_ref(r), &mut seen) {
@@ -207,6 +227,43 @@ impl KeptReader {
             }
         }
         let wb_rels = raw_rels(cx, wb_part).unwrap_or_default();
+        inventory(
+            cx,
+            wb_part,
+            &wb_rels,
+            &[
+                "worksheet",
+                "chartsheet",
+                "styles",
+                "theme",
+                "sharedStrings",
+                "sheetMetadata",
+                "person",
+                "vbaProject",
+                "pivotCacheDefinition",
+                "externalLink",
+                "customXml",
+                "connections",
+                "xmlMaps",
+                "FeaturePropertyBag",
+                "rdRichValue",
+                "rdRichValueStructure",
+                "rdRichValueTypes",
+                "richValueRel",
+                "python",
+            ],
+        );
+        if let Some(list) = wb_xml.child("extLst") {
+            for ext in list.kids("ext").filter(|e| !e.attr("uri").is_some_and(|u| u.eq_ignore_ascii_case(CALC_FEATURES_URI))) {
+                cx.report.issue(gridcraft_model::CompatibilityIssue::new(
+                    "workbook extension",
+                    Some(format!("{wb_part}: {}", ext.attr("uri").unwrap_or("missing uri"))),
+                    gridcraft_model::CompatibilityEffect::Unknown,
+                    gridcraft_model::Editability::Unknown,
+                    "This workbook extension is unsupported; its effect on the saved workbook is unknown.",
+                ));
+            }
+        }
         for r in wb_rels.iter().filter(|r| is_kind(r, WORKBOOK_ROOTS)) {
             if let Err(why) = self.keep(cx, &mut p, std::slice::from_ref(r), &mut seen) {
                 cx.warn(format!("{} part {} was dropped: {why}", kind(&r.rel_type), r.target));
@@ -251,7 +308,7 @@ impl KeptReader {
                     }
                     x.push_str("</externalReferences>");
                     p.elements.push(PreservedXml { slot: "externalReferences".into(), xml: x });
-                    cx.warn("links to external workbooks were kept; they are not followed or refreshed");
+                    cx.notice("links to external workbooks were kept; they are not followed or refreshed");
                 }
                 Err(why) => cx.warn(format!("links to external workbooks were dropped: {why}")),
             }
@@ -297,6 +354,28 @@ impl KeptReader {
                 return None;
             }
         };
+        inventory(
+            cx,
+            part,
+            &rels,
+            &[
+                "drawing",
+                "table",
+                "pivotTable",
+                "comments",
+                "threadedComment",
+                "vmlDrawing",
+                "hyperlink",
+                "queryTable",
+                "tableSingleCells",
+                "oleObject",
+                "ctrlProp",
+                "control",
+                "image",
+                "package",
+                "printerSettings",
+            ],
+        );
         let mut p = Preserved::default();
         let mut seen = HashSet::new();
         for r in rels.iter().filter(|r| is_kind(r, SHEET_ROOTS)) {
@@ -352,7 +431,7 @@ impl KeptReader {
                 Ok(()) => {
                     let xml = format!("<legacyDrawingHF xmlns:r=\"{NS_REL}\" r:id=\"{}\"/>", esc_attr(&r.id));
                     p.elements.push(PreservedXml { slot: "legacyDrawingHF".into(), xml });
-                    cx.warn(format!("sheet \"{name}\": pictures in the header and footer are not shown; they are kept for saving"));
+                    cx.notice(format!("sheet \"{name}\": pictures in the header and footer are not shown; they are kept for saving"));
                 }
                 Err(why) => cx.warn(format!("sheet \"{name}\": header and footer pictures were dropped: {why}")),
             }
@@ -396,7 +475,7 @@ impl KeptReader {
             }
         }
         if p.elements.iter().any(|e| e.slot == "oleObjects" || e.slot == "controls") || (controls.vml_only_unmodelled && p.vml.is_some()) {
-            cx.warn(format!("sheet \"{name}\": embedded objects and form controls are not shown; they are kept for saving"));
+            cx.notice(format!("sheet \"{name}\": embedded objects and form controls are not shown; they are kept for saving"));
         } else {
             p.vml = None;
         }

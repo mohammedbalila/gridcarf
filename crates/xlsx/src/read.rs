@@ -49,6 +49,9 @@ impl Ctx<'_> {
     pub fn warn(&mut self, m: impl Into<String>) {
         self.report.warn(m);
     }
+    pub fn notice(&mut self, message: impl Into<String>) {
+        self.report.notice(message.into());
+    }
     /// Stores the phonetic data read from `xl/sharedStrings.xml`.
     ///
     /// One entry per base text: the writer rebuilds the shared string table from the values the
@@ -445,7 +448,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], known_function: Option<&'a dyn Fn(&str) ->
         match cx.pkg.read(&r.target) {
             Ok(Some(data)) => {
                 wb.vba_project = Some(data.into());
-                cx.warn("macros (VBA project) were kept but not executed");
+                cx.notice("macros (VBA project) were kept but not executed");
             }
             Ok(None) => cx.warn("macros (VBA project) reference a missing part and were dropped"),
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),

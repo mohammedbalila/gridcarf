@@ -180,6 +180,19 @@ fn read_sheet_format(e: &El, sheet: &mut Sheet) {
     }
 }
 
+fn inventory_table_relationships(cx: &mut Ctx<'_>, target: &str) -> Result<(), IoError> {
+    for r in cx.pkg.rels(target)? {
+        cx.report.issue(gridcraft_model::CompatibilityIssue::new(
+            "table relationship",
+            Some(format!("{target}: {} ({})", r.target, r.kind)),
+            gridcraft_model::CompatibilityEffect::Unknown,
+            gridcraft_model::Editability::Unknown,
+            "This table includes related content that cannot be preserved reliably by this version of GridCraft.",
+        ));
+    }
+    Ok(())
+}
+
 /// Reads the sheet part `part`, with the VML shape numbers of the form controls read into the
 /// model (pass-through keeps the other controls).
 pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, crate::controls::ReadControls), IoError> {
@@ -322,6 +335,7 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
                 for tp in e.kids("tablePart") {
                     if let Some(rel) = tp.attr("id").and_then(|id| rels.iter().find(|r| r.id == id)) {
                         let target = rel.target.clone();
+                        inventory_table_relationships(cx, &target)?;
                         if let Some(x) = cx.optional_xml(&target)?
                             && let Some(mut t) = read_table(cx, &x)
                         {
@@ -851,7 +865,13 @@ fn read_ext(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
                         cx.warn("some Excel 2010 conditional format extensions were skipped");
                     }
                 }
-                _ => {}
+                _ => cx.report.issue(gridcraft_model::CompatibilityIssue::new(
+                    "worksheet extension",
+                    Some(format!("{}: {} ({})", sheet.name, c.name, ext.attr("uri").unwrap_or("missing uri"))),
+                    gridcraft_model::CompatibilityEffect::Unknown,
+                    gridcraft_model::Editability::Unknown,
+                    "This worksheet extension is unsupported; preservation is unknown.",
+                )),
             }
         }
     }

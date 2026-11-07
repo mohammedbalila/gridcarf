@@ -157,3 +157,35 @@ Synthetic Session/XLSX tests cover SQRT at row 2, shared formulas, scalar and ra
 contexts, round trips, JSON compatibility and recalculation after edits. These bounded
 checks do not establish complete legacy function parity; other file formats are unchanged.
 Excel open/repair/recalculate and an external workbook corpus remain untested.
+
+## Revision-scoped loss decisions (S02, 2026-11-07)
+
+All document serialization commands (`file.save`, `file.saveAs`, `file.saveBytes`,
+`file.exportCsv`, `file.exportHtml`) analyze known compatibility losses before encoding
+or writing. Low-level `io` codecs remain policy-free for the checker and format tests;
+PDF remains explicit print output. `file.analyzeSave {path, sheet?}` returns the open
+document identity, revision, resolved path and typed issues. To proceed despite issues,
+call the save command with `confirmedLosses` containing every reported code,
+`expectedRevision` and `expectedDocument`. A stale revision or different document is
+refused, including after recalculation, undo and changed import facts. Acknowledgement
+applies to that call; it is not blanket permission for future saves or AutoSave.
+
+Import issues remain on `DocState` across edits, undo and saves. Existing warning text
+is preserved; definite omissions/static conversions are classified and unclassified
+warnings remain unknown. The reader inventories unsupported package/workbook/sheet
+relationships, workbook/worksheet extensions and table relationships. This is bounded
+coverage, not arbitrary unknown-feature detection. After 1,000 distinct import issues,
+an explicit unknown-risk record marks the incomplete inventory. Safe preservation notices stay notices.
+Preserved reference-bearing content conservatively reports `reference.unadjusted` even
+before edits: adjustment is unsupported, not evidence that references are corrupted.
+Fully modelled controls do not receive that preserved-content warning.
+
+Known destination differences include model slicers omitted by XLSX, VBA omitted by
+non-macro XLSX and flat exports, opaque preserved content omitted by JSON, and flat-format
+losses. JSON already preserves VBA as base64 and is not incorrectly labelled as dropping
+it. HTML keeps floating pictures and renders charts as static SVG, but omits hyperlink
+targets and conditional formatting. The UI lists definite
+losses separately from compatibility risks and binds its confirmation to document,
+revision and destination. Programmatic calls return `save.losses`/`save.stale` with the
+analysis; MCP also exposes it as `structuredContent`. No encryption/trust implementation
+or unknown-content recovery codec is introduced.

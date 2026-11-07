@@ -7,10 +7,12 @@
 mod b64;
 pub mod cell;
 mod cellmap;
+pub mod compatibility;
 pub mod features;
 pub mod macros;
 pub mod password;
 pub mod preserved;
+pub use compatibility::{CompatibilityEffect, CompatibilityIssue, Editability};
 pub mod python;
 pub mod sheet;
 pub mod store;

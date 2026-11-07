@@ -127,3 +127,5 @@ mod wheel_zoom;
 mod whole_line_shortcuts;
 mod widgets;
 mod zoom_dialog;
+
+mod save_losses;

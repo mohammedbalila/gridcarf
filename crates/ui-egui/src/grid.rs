@@ -163,8 +163,8 @@ pub struct FillTag {
 }
 
 /// Trace Precedents, Trace Dependents and Trace Error arrows: they stay on the cells they were
-/// traced from while the selection moves. They go away when anything but a zoom changes the
-/// workbook (`revision`): Excel removes them on edits to the traced formula and on inserted,
+/// traced from while the selection moves. Content changes invalidate their workbook revision;
+/// view changes keep them visible: Excel removes them on edits to the traced formula and on inserted,
 /// deleted or moved cells, this also on a new value in a precedent.
 pub struct Trace {
     pub uid: u64,
@@ -214,14 +214,14 @@ impl Trace {
         Some(Trace { uid: d.uid, revision: d.revision, arrows })
     }
 
-    /// The active document's uid and revision, to hand [`Trace::keep_through_zoom`] after a zoom.
+    /// The active document's uid and revision, to hand [`Trace::keep_through_view_change`] after a view change.
     pub fn key(app: &SheetApp) -> Option<(u64, u64)> {
         app.session.active().map(|d| (d.uid, d.revision))
     }
 
-    /// Zooming changes the workbook (its revision) but moves no cell: arrows that were shown
-    /// before a zoom stay after it, as in Excel (#3097). `before` is [`Trace::key`] from then.
-    pub fn keep_through_zoom(app: &mut SheetApp, before: Option<(u64, u64)>) {
+    /// Zoom, sheet selection and stored scroll positions change the save revision but move no
+    /// cells: existing arrows remain valid (#3097). `before` is [`Trace::key`] from then.
+    pub fn keep_through_view_change(app: &mut SheetApp, before: Option<(u64, u64)>) {
         let now = Trace::key(app);
         if let Some(t) = app.grid.trace.as_mut()
             && before == Some((t.uid, t.revision))

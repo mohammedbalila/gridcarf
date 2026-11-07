@@ -734,7 +734,7 @@ fn export(app: &mut SheetApp, ui: &mut Ui, out: &mut Outcome) {
 }
 
 /// Exports the active workbook as `pdf`, `csv` or `html`: through the save picker on the desktop,
-/// as a browser download on the web. Returns whether a file was written or handed over.
+/// as a browser download on the web. Returns whether the request succeeded or awaits a loss decision.
 pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
     if !app.commit_edit(0, 0, false, false) {
         return false;
@@ -751,6 +751,9 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
         let Some(path) = pick(&format!("{stem}.{fmt}")) else { return false };
         // The picker may suggest a workbook extension; the export writes the chosen format.
         let path = std::path::Path::new(&path).with_extension(fmt).to_string_lossy().into_owned();
+        if fmt != "pdf" {
+            return app.save_or_explain(id, json!({"path": path}));
+        }
         return match app.run(id, json!({"path": path})) {
             Ok(_) => true,
             Err(e) => {
@@ -773,24 +776,7 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
             }
         };
     }
-    app.store_view_state();
-    match app.session.run("file.saveBytes", json!({"format": fmt})) {
-        Ok(r) => {
-            let bytes = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode);
-            let name = r.get("name").and_then(Json::as_str).map_or_else(|| format!("{stem}.{fmt}"), str::to_string);
-            match (bytes, &app.services.download) {
-                (Some(b), Some(dl)) => {
-                    dl(&name, &b);
-                    true
-                }
-                _ => false,
-            }
-        }
-        Err(e) => {
-            app.message = Some(("GridCraft".into(), crate::clean_error(&e)));
-            false
-        }
-    }
+    app.save_or_explain("file.saveBytes", json!({"format": fmt}))
 }
 
 /// Excel's File › Account: product information and the About window.

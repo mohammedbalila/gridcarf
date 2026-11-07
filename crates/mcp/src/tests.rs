@@ -640,3 +640,23 @@ fn a_window_argument_routes_tools_to_that_window() {
         ok(&mut s, "list_windows", json!({})).as_array().unwrap().iter().map(|r| r["title"].as_str().unwrap().to_string()).collect();
     assert_eq!(titles, ["Book1:1", "Book2", "Book1:2"]);
 }
+
+#[test]
+fn save_losses_named_tool_preserves_structured_error_and_confirmation() {
+    let mut s = server();
+    ok(&mut s, "execute_command", json!({"command":"range.setValues", "params":{"range":"A1", "values":[["Region"],["East"]]}}));
+    ok(&mut s, "execute_command", json!({"command":"insert.table", "params":{"range":"A1:A2", "name":"Sales", "header":true}}));
+    ok(&mut s, "execute_command", json!({"command":"insert.slicer", "params":{"table":"Sales", "column":"Region", "at":"D1"}}));
+    let path = tmp("save-losses.xlsx");
+    let result = call(&mut s, "save_workbook", json!({"path":path}));
+    assert_eq!(result["isError"], true);
+    assert_eq!(result["structuredContent"]["error"], "save.losses", "{result}");
+    let analysis = &result["structuredContent"]["analysis"];
+    ok(
+        &mut s,
+        "save_workbook",
+        json!({"path":path, "expectedRevision":analysis["revision"], "expectedDocument":analysis["document"], "confirmedLosses":["feature.omitted"]}),
+    );
+    assert!(std::fs::read(&path).unwrap().starts_with(b"PK"));
+    std::fs::remove_file(path).unwrap();
+}

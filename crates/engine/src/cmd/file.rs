@@ -9,12 +9,13 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "file.new", "New Workbook", ["File"], Some("Cmd+N"), "{sample?: \"budget\"|\"sales\"|\"grades\"}", always, new_workbook),
         cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path} | {name, base64}, plus {password} for a password-protected workbook and {csvAsText?: bool} to keep every csv/tsv/txt field as text, with no number or date conversion (xlsx, xlsm, xls import, xlsb and ods data import, csv, tsv, txt, json)", always, open),
-        cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?} (xlsx by default; .csv/.tsv/.json/.html/.pdf by extension)", has_doc, save),
-        cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path} (.xlsx, .csv, .tsv, .json, .html, or .pdf: a PDF of the active sheet)", has_doc, save_as),
-        cmd!(query "file.saveBytes", "Encode Workbook", [], None, "{format?: xlsx|csv|tsv|json|html} → {base64}", has_doc, save_bytes),
+        cmd!(query "file.analyzeSave", "Analyze Save", [], None, "{path?, sheet?} → {document, revision, path, issues}; inspect before explicitly acknowledging losses", has_doc, analyze_save),
+        cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?, confirmedLosses?: [code], expectedRevision?: u64, expectedDocument?: u64} (losses require all three acknowledgement fields; xlsx by default; .csv/.tsv/.json/.html/.pdf by extension)", has_doc, save),
+        cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path, confirmedLosses?: [code], expectedRevision?: u64, expectedDocument?: u64} (.xlsx, .csv, .tsv, .json, .html, or .pdf: a PDF of the active sheet)", has_doc, save_as),
+        cmd!(query "file.saveBytes", "Encode Workbook", [], None, "{format?: xlsx|csv|tsv|json|html, confirmedLosses?: [code], expectedRevision?: u64, expectedDocument?: u64} → {base64}", has_doc, save_bytes),
         cmd!(noundo "file.close", "Close", ["File"], Some("Cmd+W"), "{force?: bool, document?: bool} (closes the active window, or with `document` the workbook and all its windows; the workbook closes with its last window)", has_doc, close),
-        cmd!(noundo "file.exportCsv", "Export as CSV", ["File", "Export"], None, "{path, sheet?, values?: bool} → {path, bytes}: writes the cells as displayed, like Excel's Save As CSV; `values: true` writes raw values instead (full-precision numbers, ISO 8601 dates and times, TRUE/FALSE)", has_doc, |s, p| export(s, p, "csv")),
-        cmd!(noundo "file.exportHtml", "Save as Web Page", ["File", "Export"], None, "{path}", has_doc, |s, p| export(s, p, "html")),
+        cmd!(noundo "file.exportCsv", "Export as CSV", ["File", "Export"], None, "{path, sheet?, values?: bool, confirmedLosses?: [code], expectedRevision?: u64, expectedDocument?: u64} → {path, bytes}: writes the cells as displayed, like Excel's Save As CSV; `values: true` writes raw values instead (full-precision numbers, ISO 8601 dates and times, TRUE/FALSE)", has_doc, |s, p| export(s, p, "csv")),
+        cmd!(noundo "file.exportHtml", "Save as Web Page", ["File", "Export"], None, "{path, sheet?, confirmedLosses?: [code], expectedRevision?: u64, expectedDocument?: u64}", has_doc, |s, p| export(s, p, "html")),
         cmd!("file.properties", "Properties", ["File"], None, "{title?, subject?, author?, company?, keywords?, description?}", has_doc, properties),
         cmd!(
             query "file.options",
@@ -58,7 +59,8 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
         return ok();
     };
     let encrypted = gridcraft_xlsx::sniff(&bytes) == gridcraft_xlsx::Format::Encrypted;
-    let (mut wb, warnings) = crate::io::open_bytes_with(&name, &bytes, str_param(p, "password"), bool_param(p, "csvAsText").unwrap_or(false))?;
+    let (mut wb, report) = crate::io::open_bytes_with_report(&name, &bytes, str_param(p, "password"), bool_param(p, "csvAsText").unwrap_or(false))?;
+    let warnings = report.warnings;
     wb.source_dir = str_param(p, "path").and_then(crate::io::source_dir);
     // What `CELL("filename")` reports (#1489). A workbook opened from bytes knows its name but
     // never a folder, so it reports `[name]Sheet` with none; an import reports the file it came
@@ -87,6 +89,7 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
     }
     // Someone else may have made the file: its active content asks before it runs.
     let mut doc = DocState::new(wb, path, title, crate::Trust::FromFile);
+    doc.retain_import_issues(report.issues);
     if crate::io::FileKind::from_path(&name).is_none() && gridcraft_xlsx::sniff(&bytes) == gridcraft_xlsx::Format::Xlsx {
         doc.content_kind = Some(crate::io::FileKind::Xlsx);
     }
@@ -102,8 +105,14 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let d = s.doc()?;
     Ok(
-        json!({"index": i, "title": d.display_title(), "sheets": d.wb.sheets.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), "warnings": warnings}),
+        json!({"index": i, "title": d.display_title(), "sheets": d.wb.sheets.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), "warnings": warnings, "issues": d.import_issues()}),
     )
+}
+
+fn analyze_save(s: &mut Session, p: &Json) -> Result<Json> {
+    let d = s.doc()?;
+    let path = str_param(p, "path").or(d.path.as_deref()).ok_or_else(|| bad("file.analyzeSave", "missing `path`"))?;
+    serde_json::to_value(crate::save::analyze_sheet(d, path, target_sheet(s, p)?)?).map_err(|e| crate::EngineError::Other(e.to_string()))
 }
 
 fn save(s: &mut Session, p: &Json) -> Result<Json> {
@@ -119,6 +128,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
         return super::print::export_pdf(s, &json!({"path": path}));
     }
+    crate::save::check(s.doc()?, &path, p)?;
     let d = s.doc_mut()?;
     // The document's own file keeps the format its content had when opened; any other path
     // goes by its extension. Relative paths to linked workbooks are rewritten for the new folder.
@@ -130,7 +140,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
         None => crate::io::save_bytes(wb, &path)?,
     };
     crate::io::write_file(&path, &bytes)?;
-    // Only a full-fidelity format clears the dirty flag and becomes the document's file.
+    // Document formats become the workbook's file after any known losses have been acknowledged.
     if matches!(kind, Some(crate::io::FileKind::Xlsx | crate::io::FileKind::Json)) {
         // The new file is the workbook's own now, so `CELL("filename")` reports it (#1489). Set
         // before the `saved` snapshot, or the workbook would read as dirty the moment it was
@@ -157,6 +167,7 @@ fn save_bytes(s: &mut Session, p: &Json) -> Result<Json> {
     let fmt = str_param(p, "format").unwrap_or("xlsx");
     let d = s.doc()?;
     let name = format!("{}.{fmt}", std::path::Path::new(&d.display_title()).file_stem().and_then(|x| x.to_str()).unwrap_or("Book"));
+    crate::save::check(d, &name, p)?;
     // The file name goes into a PivotChart's link to its PivotTable.
     let bytes = crate::io::save_bytes(&d.wb, &name)?;
     Ok(json!({"name": name, "base64": crate::io::base64_encode(&bytes), "bytes": bytes.len()}))
@@ -191,6 +202,7 @@ fn export(s: &mut Session, p: &Json, ext: &str) -> Result<Json> {
         wb.set_active_sheet(target_sheet(s, p)?);
     }
     let target = if path.ends_with(&format!(".{ext}")) { path.clone() } else { format!("{path}.{ext}") };
+    crate::save::check_sheet(d, &target, p, wb.active_sheet())?;
     let bytes = if ext == "csv" && bool_param(p, "values").unwrap_or(false) {
         crate::io::csv_values_bytes(&wb)?
     } else {

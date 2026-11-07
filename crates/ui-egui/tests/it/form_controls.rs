@@ -417,10 +417,10 @@ fn scratch(name: &str) -> std::path::PathBuf {
     p
 }
 
-/// Points the fixture's button at `file.exportCsv` to `path` and presses it: the question about
+/// Points the fixture's button at `file.exportPdf` to `path` and presses it: the question about
 /// the file opens.
 fn ask_export(h: &mut Harness, button: u32, path: &std::path::Path) {
-    h.state_mut().run("control.assign", json!({"id": button, "command": "file.exportCsv", "params": {"path": path}})).unwrap();
+    h.state_mut().run("control.assign", json!({"id": button, "command": "file.exportPdf", "params": {"path": path}})).unwrap();
     h.state_mut().press_button(button);
     h.run_steps(4);
     let d = h.state().dialog.clone().expect("a prompt");
@@ -441,9 +441,9 @@ fn answer(h: &mut Harness, label: &str) {
 #[test]
 fn an_answer_does_not_run_an_action_reassigned_while_the_question_was_open() {
     let (mut h, ids) = fixture();
-    let (a, b) = (scratch("a.csv"), scratch("b.csv"));
+    let (a, b) = (scratch("a.pdf"), scratch("b.pdf"));
     ask_export(&mut h, ids.button, &a);
-    h.state_mut().session.execute("control.assign", json!({"id": ids.button, "command": "file.exportCsv", "params": {"path": b}})).unwrap();
+    h.state_mut().session.execute("control.assign", json!({"id": ids.button, "command": "file.exportPdf", "params": {"path": b}})).unwrap();
     answer(&mut h, " Run ");
     assert!(!a.exists() && !b.exists(), "the stale answer ran nothing");
     assert!(h.state().dialog.as_ref().is_none_or(|d| d.name() != "controlQuestion"));
@@ -457,9 +457,10 @@ fn an_answer_does_not_run_an_action_reassigned_while_the_question_was_open() {
     assert!(text.contains(&b.display().to_string()), "{text}");
     answer(&mut h, " Run ");
     assert!(b.exists() && !a.exists(), "the new question's answer runs the new action");
+    assert!(std::fs::read(&b).unwrap().starts_with(b"%PDF-"));
     let _ = std::fs::remove_file(&b);
     // A change to a different command, and to a macro, is refused the same way.
-    let c = scratch("c.csv");
+    let c = scratch("c.pdf");
     ask_export(&mut h, ids.button, &c);
     h.state_mut().session.execute("control.assign", json!({"id": ids.button, "macro": "Mark"})).unwrap();
     answer(&mut h, " Run ");
@@ -472,11 +473,12 @@ fn an_answer_does_not_run_an_action_reassigned_while_the_question_was_open() {
 #[test]
 fn an_answer_runs_when_the_action_is_reassigned_unchanged() {
     let (mut h, ids) = fixture();
-    let a = scratch("same.csv");
+    let a = scratch("same.pdf");
     ask_export(&mut h, ids.button, &a);
-    h.state_mut().session.execute("control.assign", json!({"id": ids.button, "command": "file.exportCsv", "params": {"path": a}})).unwrap();
+    h.state_mut().session.execute("control.assign", json!({"id": ids.button, "command": "file.exportPdf", "params": {"path": a}})).unwrap();
     answer(&mut h, " Run ");
     assert!(a.exists(), "{:?}", h.state().message);
+    assert!(std::fs::read(&a).unwrap().starts_with(b"%PDF-"));
     assert!(h.state().message.is_none(), "{:?}", h.state().message);
     let _ = std::fs::remove_file(&a);
 }
@@ -486,7 +488,7 @@ fn an_answer_runs_when_the_action_is_reassigned_unchanged() {
 #[test]
 fn an_answer_runs_nothing_when_the_button_or_its_workbook_is_gone() {
     let (mut h, ids) = fixture();
-    let a = scratch("gone.csv");
+    let a = scratch("gone.pdf");
     ask_export(&mut h, ids.button, &a);
     h.state_mut().session.execute("object.delete", json!({"kind": "control", "id": ids.button})).unwrap();
     answer(&mut h, " Run ");
@@ -502,7 +504,7 @@ fn an_answer_runs_nothing_when_the_button_or_its_workbook_is_gone() {
     for at in ["A1", "A5"] {
         s.execute("insert.button", json!({"at": at})).unwrap();
     }
-    let id = s.execute("insert.button", json!({"at": "E12", "command": "file.exportCsv", "params": {"path": a}})).unwrap()["control"].as_u64();
+    let id = s.execute("insert.button", json!({"at": "E12", "command": "file.exportPdf", "params": {"path": a}})).unwrap()["control"].as_u64();
     assert_eq!(id, Some(u64::from(ids.button)), "the other workbook's button has the same id");
     answer(&mut h, " Run ");
     assert!(!a.exists(), "the answer belongs to the first workbook's button");

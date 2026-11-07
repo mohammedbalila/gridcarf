@@ -295,10 +295,8 @@ fn convert(args: &[String]) -> Result<(), String> {
         eprintln!("wrote {out} ({} bytes, {} pages)", result["bytes"], result["pages"]);
         return Ok(());
     }
-    let d = s.doc().map_err(|e| e.to_string())?;
-    let bytes = gridcraft_engine::io::save_file_bytes(&d.wb, out).map_err(|e| e.to_string())?;
-    gridcraft_engine::io::write_file(out, &bytes).map_err(|e| e.to_string())?;
-    eprintln!("wrote {out} ({} bytes)", bytes.len());
+    let result = exec(&mut s, "file.save", json!({"path": out}))?;
+    eprintln!("wrote {out} ({} bytes)", result["bytes"]);
     Ok(())
 }
 
@@ -611,6 +609,42 @@ mod tests {
             parse_command(r#"{"command":"home.insertSheet","params":{"name":"R"}}"#).unwrap(),
             Some(("home.insertSheet".into(), json!({"name": "R"})))
         );
+    }
+
+    #[test]
+    fn save_losses_cli_returns_codes_and_accepts_explicit_parameters() {
+        let mut s = blank();
+        exec(&mut s, "range.setValues", json!({"range":"A1", "values":[["Region"],["East"]]})).unwrap();
+        exec(&mut s, "insert.table", json!({"range":"A1:A2", "name":"Sales", "header":true})).unwrap();
+        exec(&mut s, "insert.slicer", json!({"table":"Sales", "column":"Region", "at":"D1"})).unwrap();
+        let error = exec(&mut s, "file.saveBytes", json!({"format":"xlsx"})).unwrap_err();
+        let failure: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(failure["error"], "save.losses");
+        let a = exec(&mut s, "file.analyzeSave", json!({"path":"Book1.xlsx"})).unwrap();
+        let params =
+            json!({"format":"xlsx", "expectedRevision":a["revision"], "expectedDocument":a["document"], "confirmedLosses":["feature.omitted"]});
+        let (_, params) = parse_command(&format!("file.saveBytes={params}")).unwrap().unwrap();
+        assert!(exec(&mut s, "file.saveBytes", params).unwrap()["bytes"].as_u64().unwrap() > 0);
+        assert!(s.ui_requests.is_empty());
+    }
+
+    #[test]
+    fn save_losses_convert_cannot_bypass_the_document_guard() {
+        let mut s = blank();
+        exec(&mut s, "range.setValues", json!({"range":"A1", "values":[["Region"],["East"]]})).unwrap();
+        exec(&mut s, "insert.table", json!({"range":"A1:A2", "name":"Sales", "header":true})).unwrap();
+        exec(&mut s, "insert.slicer", json!({"table":"Sales", "column":"Region", "at":"D1"})).unwrap();
+        let base = std::env::temp_dir().join(format!("gridcraft-convert-loss-{}", std::process::id()));
+        let input = base.with_extension("json");
+        let output = base.with_extension("xlsx");
+        std::fs::write(&input, gridcraft_engine::io::save_bytes(&s.doc().unwrap().wb, "input.json").unwrap()).unwrap();
+        std::fs::write(&output, b"original").unwrap();
+        let result = convert(&[input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()]);
+        let bytes = std::fs::read(&output).unwrap();
+        std::fs::remove_file(input).unwrap();
+        std::fs::remove_file(output).unwrap();
+        assert!(result.is_err(), "convert silently dropped the slicer");
+        assert_eq!(bytes, b"original");
     }
 
     #[test]

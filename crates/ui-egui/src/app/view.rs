@@ -38,6 +38,7 @@ impl SheetApp {
     /// cell to the engine so a save writes them (`sheetView topLeftCell`). Normal view only:
     /// Page Layout view scrolls over pages, not cells.
     pub fn store_view_state(&mut self) {
+        let trace_before = crate::grid::Trace::key(self);
         let window = self.session.active_window();
         let Some(d) = self.session.active_mut() else { return };
         let mut tops = Vec::new();
@@ -52,5 +53,6 @@ impl SheetApp {
             tops.push((si, CellRef::new(row, col)));
         }
         d.store_view(&tops);
+        crate::grid::Trace::keep_through_view_change(self, trace_before);
     }
 }

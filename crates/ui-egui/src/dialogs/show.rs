@@ -21,6 +21,7 @@ use gridcraft_engine::model::PageOrder;
 pub(crate) fn build_params(d: &Dialog) -> Json {
     let mut v = Json::Object(d.values.clone());
     match d.name.as_str() {
+        "saveLosses" => return d.values.get("params").cloned().unwrap_or(Json::Null),
         "insertLink" => {
             if d.original_link_text.as_deref().is_some_and(|text| d.values.get("text").and_then(Json::as_str) == Some(text))
                 && let Some(m) = v.as_object_mut()
@@ -119,6 +120,52 @@ pub(crate) fn build_params(d: &Dialog) -> Json {
         _ => {}
     }
     v
+}
+
+fn save_losses(ui: &mut egui::Ui, d: &Dialog, open: &mut bool, confirm: &mut bool) {
+    ui.label("Review content losses and compatibility risks before saving.");
+    if let Some(analysis) = d.values.get("analysis") {
+        ui.label(format!("Destination: {}", analysis["path"].as_str().unwrap_or("")));
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            for issue in analysis["issues"].as_array().into_iter().flatten() {
+                ui.separator();
+                let feature = issue["feature"].as_str().unwrap_or("Content");
+                let location = issue["location"].as_str().unwrap_or("Workbook");
+                let effect = match issue["effect"].as_str() {
+                    Some("omitted") => "Content omitted",
+                    Some("static") => "Live behavior becomes static",
+                    Some("encryptionRemoved") => "Encryption removed",
+                    _ => "Compatibility risk",
+                };
+                ui.strong(format!("{feature} — {location}"));
+                ui.label(effect);
+                ui.label(issue["description"].as_str().unwrap_or("Compatibility is unknown."));
+            }
+        });
+    }
+    ui.label("Cancel to keep the destination unchanged, or explicitly accept these losses for this save.");
+    ui.horizontal(|ui| {
+        if ui.button("Cancel").clicked() {
+            *open = false;
+        }
+        if ui.button("Save with losses").clicked() {
+            *confirm = true;
+        }
+    });
+}
+
+fn deliver_save_download(app: &SheetApp, d: &Dialog, result: &Json) {
+    if d.name == "saveLosses" && d.command == Some("file.saveBytes") {
+        app.deliver_saved_bytes(result);
+    }
+}
+
+fn dialog_error(d: &Dialog, error: &str) -> String {
+    if d.name == "saveLosses" && serde_json::from_str::<gridcraft_engine::save::SaveFailure>(error).is_ok() {
+        "The workbook or its losses changed since this review. Cancel and choose Save again to review the current version.".into()
+    } else {
+        crate::clean_error(error)
+    }
 }
 
 /// Takes and draws the active dialog, dispatches its body by name, consumes picture-inbox results, runs OK/confirm commands, handles Esc/close and restores the back-dialog stack.
@@ -308,6 +355,7 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
                         }
                     }
                 }
+                "saveLosses" => save_losses(ui, &d, &mut open, &mut confirm),
                 "saveCopy" => {
                     let fmt = d.values.get("format").and_then(Json::as_str).unwrap_or("xlsx").to_string();
                     ui.label(format!("Save a copy as .{fmt}"));
@@ -433,6 +481,8 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
         let params = build_params(&d);
         match app.run(cmd, params) {
             Ok(r) => {
+                deliver_save_download(app, &d, &r);
+
                 open = false;
                 if d.name == "solver" {
                     app.open_dialog("solverResults", r);
@@ -450,7 +500,7 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
                 d.values.insert("password".into(), json!(""));
                 app.message = Some((d.title.clone(), crate::clean_error(&e)));
             }
-            Err(e) => app.message = Some((d.title.clone(), crate::clean_error(&e))),
+            Err(e) => app.message = Some((d.title.clone(), dialog_error(&d, &e))),
         }
     } else if confirm {
         open = false;

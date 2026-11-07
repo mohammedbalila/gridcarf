@@ -61,6 +61,45 @@ impl SheetApp {
         }
     }
 
+    /// Only menu invocations ask for a loss decision. Script calls keep the structured error.
+    pub(crate) fn save_or_explain(&mut self, id: &str, params: Json) -> bool {
+        match self.run(id, params.clone()) {
+            Ok(result) => {
+                if id == "file.saveBytes" {
+                    self.deliver_saved_bytes(&result);
+                }
+                true
+            }
+            Err(error) => match serde_json::from_str::<gridcraft_engine::save::SaveFailure>(&error) {
+                Ok(failure) => {
+                    let analysis = failure.analysis;
+                    let mut confirmed = if params.is_object() { params } else { json!({}) };
+                    // Bind both identity and revision: two open workbooks may have the same revision.
+                    confirmed["expectedDocument"] = json!(analysis.document);
+                    confirmed["expectedRevision"] = json!(analysis.revision);
+                    confirmed["confirmedLosses"] = json!(analysis.issues.iter().map(|i| &i.code).collect::<Vec<_>>());
+                    if id != "file.saveBytes" {
+                        confirmed["path"] = json!(analysis.path);
+                    }
+                    self.open_dialog("saveLosses", json!({"command": id, "params": confirmed, "analysis": analysis}));
+                    true
+                }
+                Err(_) => {
+                    self.alert(error);
+                    false
+                }
+            },
+        }
+    }
+
+    pub(crate) fn deliver_saved_bytes(&self, result: &Json) {
+        if let Some(download) = &self.services.download
+            && let Some(bytes) = result.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
+        {
+            download(result.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx"), &bytes);
+        }
+    }
+
     /// The open windows in order, for the Switch Windows lists.
     pub fn open_windows(&self) -> Vec<OpenWindow> {
         let active = self.session.active_window();
@@ -112,7 +151,17 @@ impl SheetApp {
         if autosave_due {
             self.grid.last_autosave = now;
             self.store_view_state();
-            let _ = self.session.run("file.save", json!({}));
+            if let Err(error) = self.session.run("file.save", json!({})) {
+                self.notice = Some(Notice {
+                    text: if serde_json::from_str::<gridcraft_engine::save::SaveFailure>(&error).is_ok() {
+                        "AutoSave paused: saving would lose content. Choose Save to review the losses.".into()
+                    } else {
+                        clean_error(&error)
+                    },
+                    kind: NoticeKind::Warning,
+                    action: None,
+                });
+            }
         } else if self.ui.autosave && dirty_xlsx {
             // Keep checking even when no input arrives while the window is hidden.
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
