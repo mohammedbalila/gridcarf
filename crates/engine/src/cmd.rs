@@ -420,6 +420,14 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         round_edited_as_displayed(&d.wb, &mut wb, &mut changed, structural);
     }
     whatif::check_imported_tables(&d.wb, &wb, &edits)?;
+    // Include rows that will auto-fit before checking kept object geometry. Preparation can
+    // refuse, so it must precede mutable calculation, edit logs and candidate publication.
+    if changed.len() <= 200_000 {
+        fit_rows.extend(changed.iter().map(|(s, c)| (*s, c.row)));
+    }
+    if let Some(prepared) = gridcraft_xlsx::prepare_preserved_edit(&d.wb, &wb, &edits, &fit_rows).map_err(EngineError::Other)? {
+        wb = prepared;
+    }
     if let Some(log) = d.touched.as_mut() {
         for (si, c) in changed.iter().take(TOUCH_LOG_LIMIT.saturating_sub(log.len())) {
             if let Some(sh) = wb.sheet(*si) {
@@ -429,9 +437,6 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     }
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);
-    }
-    if changed.len() <= 200_000 {
-        fit_rows.extend(changed.iter().map(|(s, c)| (*s, c.row)));
     }
     if let Some(t0) = t0 {
         eprintln!("commit: edit {:?}, {} changed", since(t0), changed.len());

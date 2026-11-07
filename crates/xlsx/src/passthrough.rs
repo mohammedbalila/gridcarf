@@ -18,9 +18,8 @@
 //! - External relationship targets (the path of a linked workbook) are kept as text and never
 //!   opened, followed or refreshed. A relative path to a linked workbook is rewritten when the
 //!   workbook is saved into another folder ([`rebase_links`]), so it still names the same file.
-//! - Sheet content lives on the sheet: deleting the sheet drops it, Copy Sheet doesn't copy it.
-//!   Cell references inside kept parts (a control's linked cell, a query table's range, a cell
-//!   mapped to an XML element) are kept as they were, not adjusted to inserted or deleted rows.
+//! - Sheet content lives on the sheet. Engine edits prepare supported reference adjustments
+//!   or refuse invalidating operations; copying a sheet with kept content is refused.
 //! - Strict Open XML files are not passed through (their namespaces differ from what we write).
 //! - Sizes are bounded: per part and per workbook.
 
@@ -44,10 +43,12 @@ use crate::xml::{self, esc_attr};
 
 mod read;
 mod rebase;
+mod references;
 mod write;
 
 pub use read::KeptReader;
 pub use rebase::{SheetKept, rebase_links};
+pub use references::{check_preserved_sheet_copy, prepare_preserved_edit};
 #[cfg(test)]
 pub(crate) use write::sheet_names_in;
 pub use write::{KeptOut, SheetIds, WorkbookKept, workbook_elements, write_package_rels, write_workbook};

@@ -26,6 +26,7 @@ mod offset_overflow;
 mod percent_entry;
 mod pivot_unknown_func;
 mod pivotchart_link;
+mod preserved_references;
 mod range_fill_formats;
 mod recalc_invariants;
 mod recently_used;

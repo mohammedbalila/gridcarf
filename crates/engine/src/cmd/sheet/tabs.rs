@@ -151,6 +151,7 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
         let n = cx.wb.sheets.len();
         let Some(src) = cx.wb.sheets.get(i).cloned() else { return Err(bad("sheet.move", "no such sheet")) };
         if copy {
+            gridcraft_xlsx::check_preserved_sheet_copy(&src).map_err(EngineError::Other)?;
             let mut sh = (*src).clone();
             // The copy is a sheet of its own, not the one it was copied from.
             sh.uid = gridcraft_model::SheetUid::fresh();
@@ -167,7 +168,7 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             sh.name = name;
             crate::cmd::whatif::check_imported_table_copy(&src, &sh.name)?;
             sh.tables.clear(); // table names must be unique
-            sh.preserved = None; // kept file content (form controls, OLE objects…) stays with the original
+            sh.preserved = None; // the copy guard above permits only empty kept content
             // Object ids are unique across the workbook (selection and the `{kind, id}` commands
             // rely on it), so the copied objects get fresh ones (free ones, even when a file used
             // the largest id).

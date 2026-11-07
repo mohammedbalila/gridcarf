@@ -256,7 +256,7 @@ relationships, workbook/worksheet extensions and table relationships. This is bo
 coverage, not arbitrary unknown-feature detection. After 1,000 distinct import issues,
 an explicit unknown-risk record marks the incomplete inventory. Safe preservation notices stay notices.
 Preserved reference-bearing content conservatively reports `reference.unadjusted` even
-before edits: adjustment is unsupported, not evidence that references are corrupted.
+before edits: adjustment is unsupported in general, not evidence that references are corrupted.
 Fully modelled controls do not receive that preserved-content warning.
 
 Known destination differences include model slicers omitted by XLSX, VBA omitted by
@@ -268,3 +268,40 @@ losses separately from compatibility risks and binds its confirmation to documen
 revision and destination. Programmatic calls return `save.losses`/`save.stale` with the
 analysis; MCP also exposes it as `structuredContent`. No encryption/trust implementation
 or unknown-content recovery codec is introduced.
+
+## Preserved-reference edits (S05, 2026-11-07)
+
+The XLSX crate prepares supported reference changes or returns an error against an unpublished
+engine candidate. It receives existing typed coordinate edits and pending auto-height rows;
+all validation and byte patches finish before mutable calculation, touched/edit logs, selection
+or workbook publication. Sheet identities use numeric `SheetUid::get()`, since `SheetUid`
+equality deliberately ignores identity in workbook content comparisons. XML stays opaque
+to the model and engine. Copying a sheet with preserved content refuses explicitly.
+
+Initial positive support is a complete static checkbox graph: unique relationships, parts and
+shape IDs, consistent single-cell links in `formControlPr@fmlaLink`, VML `FmlaLink`, and every
+present worksheet `controlPr@linkedCell`. It accepts zero-offset, matching VML and worksheet
+markers with unchanged owner grid metrics. Owner coordinate edits, cross-sheet moves into
+the owner and unproved geometry changes refuse; VML movement flags are not interpreted.
+Pending auto-height at or above the bottom marker refuses, except custom-height rows that
+the existing auto-height routine skips. Rows below all markers can still auto-fit. Sheet
+rename and edits on another sheet can adjust the links while leaving geometry bytes intact.
+
+A private streaming namespace/span scanner validates only these known paths and a separate
+`singleXmlCell@r` same-owner mapping handler. It uses existing part/fragment/depth/node limits,
+additional per-tag/name/value bounds, and nonoverlapping bounded byte patches. Captured
+fragments retain inherited namespaces, including an absent default;
+explicit child namespace declarations retain their original bindings. Unsupported
+children, formula fields, ambiguous ownership, nonzero offsets, `AlternateContent`, DTDs,
+CDATA and entity-bearing VML link text refuse invalidating operations. Attribute values
+can use XML entities; quoted sheet names in plain VML text remain supported. Mapping
+deletions or cross-owner moves refuse. This is not a generic XML rewrite or query refresh.
+
+Unknown surviving workbook/package graphs can refer to any sheet. Address edits and
+sheet, defined-name or table identity/range/column-name changes therefore require proof
+for every surviving graph; unknown maps, connections and query tables conservatively veto
+such changes. There is no invented query-table `ref` attribute. Safe unrelated value/style/view
+edits keep original bytes; deleting a whole owner can drop its graph when every surviving graph
+remains valid. The existing conservative `reference.unadjusted` save warning remains. No executable
+content policy changes, new dependencies or native Excel compatibility claims accompany this
+synthetic-schema coverage.

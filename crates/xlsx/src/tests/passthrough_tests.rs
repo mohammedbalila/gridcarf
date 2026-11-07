@@ -498,6 +498,69 @@ fn kept_vml_drawings_are_charged_to_the_kept_total() {
 
 const XML_MAPS: &str = r#"<?xml version="1.0"?><MapInfo xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" SelectionNamespaces=""><Schema ID="Schema1"><xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"><xsd:element name="DataList"><xsd:complexType><xsd:sequence><xsd:element name="ItemList"><xsd:complexType><xsd:sequence><xsd:element name="TableID" type="xsd:integer"/><xsd:element name="Item" maxOccurs="unbounded"><xsd:complexType><xsd:sequence><xsd:element name="No" type="xsd:string"/><xsd:element name="Blocked" type="xsd:boolean"/></xsd:sequence></xsd:complexType></xsd:element></xsd:sequence></xsd:complexType></xsd:element></xsd:sequence></xsd:complexType></xsd:element></xsd:schema></Schema><Map ID="1" Name="DataList_Map" RootElement="DataList" SchemaID="Schema1" ShowImportExportValidationErrors="0" AutoFit="1" Append="0" PreserveSortAFLayout="1" PreserveFormat="1"><DataBinding FileBinding="1" ConnectionID="1" DataBindingLoadMode="1"/></Map></MapInfo>"#;
 const SINGLE_CELLS: &str = r#"<?xml version="1.0"?><singleXmlCells xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><singleXmlCell id="3" r="C1" connectionId="1"><xmlCellPr id="1" uniqueName="TableID"><xmlPr mapId="1" xpath="/DataList/ItemList/TableID" xmlDataType="integer"/></xmlCellPr></singleXmlCell></singleXmlCells>"#;
+
+/// Isolate the single-cell part's schema handler from the accompanying opaque workbook graph.
+/// A real package's unknown map/connection graph must still veto structural changes (below).
+fn single_cell_schema_fixture() -> gridcraft_model::Workbook {
+    use gridcraft_model::{Preserved, PreservedPart, PreservedRel, Workbook};
+    let mut wb = Workbook::new();
+    wb.sheet_mut(0).unwrap().preserved = Some(Arc::new(Preserved {
+        rels: vec![PreservedRel {
+            id: "mapped".into(),
+            rel_type: format!("{NS_R}/tableSingleCells"),
+            target: "xl/tables/cells.xml".into(),
+            external: false,
+        }],
+        parts: vec![PreservedPart {
+            name: "xl/tables/cells.xml".into(),
+            content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.tableSingleCells+xml".into(),
+            data: Arc::from(SINGLE_CELLS.as_bytes()),
+            rels: vec![],
+        }],
+        ..Default::default()
+    }));
+    wb
+}
+
+#[test]
+fn single_cell_mapping_adjusts_only_its_cell_attribute() {
+    use gridcraft_formula::adjust::{Axis, Edit};
+    let before = single_cell_schema_fixture();
+    let after = crate::prepare_preserved_edit(&before, &before, &[("Sheet1".into(), Edit::Insert { axis: Axis::Rows, at: 0, count: 2 })], &[])
+        .expect("same-owner mapping can adjust")
+        .expect("mapped reference changes");
+    let p = after.sheet(0).unwrap().preserved.as_ref().unwrap();
+    assert_eq!(p.parts[0].data.as_ref(), SINGLE_CELLS.replace("r=\"C1\"", "r=\"C3\"").as_bytes());
+    assert_eq!(before.sheet(0).unwrap().preserved.as_ref().unwrap().parts[0].data.as_ref(), SINGLE_CELLS.as_bytes());
+}
+
+#[test]
+fn single_cell_mapping_refuses_deleted_or_cross_sheet_target() {
+    use gridcraft_formula::adjust::{Axis, Edit};
+    let mut before = single_cell_schema_fixture();
+    before.sheets.push(Arc::new(Sheet::new("Other")));
+    for edit in [
+        Edit::Delete { axis: Axis::Rows, at: 0, count: 1 },
+        Edit::MoveToSheet { from: gridcraft_core::RangeRef::parse("C1").unwrap(), to_sheet: "Other".into(), to_row: 2, to_col: 2 },
+    ] {
+        assert!(crate::prepare_preserved_edit(&before, &before, &[("Sheet1".into(), edit)], &[]).is_err());
+    }
+}
+
+#[test]
+fn preserved_reference_relationship_identity_is_bounded() {
+    use gridcraft_formula::adjust::{Axis, Edit};
+    let mut before = single_cell_schema_fixture();
+    Arc::make_mut(before.sheet_mut(0).unwrap().preserved.as_mut().unwrap()).rels[0].id = "x".repeat(1025);
+    assert!(crate::prepare_preserved_edit(&before, &before, &[("Sheet1".into(), Edit::Insert { axis: Axis::Rows, at: 0, count: 1 })], &[]).is_err());
+}
+
+#[test]
+fn unknown_workbook_map_graph_still_refuses_structural_edit() {
+    use gridcraft_formula::adjust::{Axis, Edit};
+    let (before, _) = read_xlsx(&xml_map_package()).unwrap();
+    assert!(crate::prepare_preserved_edit(&before, &before, &[("Item".into(), Edit::Insert { axis: Axis::Rows, at: 0, count: 1 })], &[]).is_err());
+}
 const XML_CONNECTION: &str = r#"<?xml version="1.0"?><connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" name="DataList" type="4" refreshedVersion="0" background="1"><webPr xml="1" sourceData="1" url="C:\temp\datalist.xml" htmlTables="1"/></connection></connections>"#;
 
 /// A workbook bound to an XML map, shaped like a Business Central configuration package: the map,

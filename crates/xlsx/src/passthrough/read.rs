@@ -542,13 +542,24 @@ fn scan_sheet(bytes: &[u8]) -> Option<SheetScan> {
             Event::Eof => break,
             Event::Start(e) if !in_root => {
                 in_root = true;
+                let mut default_namespace = String::new();
                 for a in e.attributes().with_checks(false).flatten() {
-                    if let Some(p) = a.key.as_ref().strip_prefix(b"xmlns:")
+                    let prefix = if a.key.as_ref() == b"xmlns" { Some(b"".as_slice()) } else { a.key.as_ref().strip_prefix(b"xmlns:") };
+                    if let Some(p) = prefix
                         && let (Ok(p), Ok(v)) = (std::str::from_utf8(p), std::str::from_utf8(&a.value))
                         && !v.contains('"')
                     {
-                        decls.push((p.to_string(), v.to_string()));
+                        if p.is_empty() {
+                            default_namespace = v.to_string();
+                        } else {
+                            decls.push((p.to_string(), v.to_string()));
+                        }
                     }
+                }
+                // The writer supplies this default; every other inherited default, including
+                // its absence on a prefixed worksheet, must travel with the captured fragment.
+                if default_namespace != "http://schemas.openxmlformats.org/spreadsheetml/2006/main" {
+                    decls.push((String::new(), default_namespace));
                 }
             }
             Event::Start(e) => {
@@ -620,11 +631,19 @@ fn with_decls(frag: &str, decls: &[(String, String)]) -> String {
     let Some(name_end) = frag.char_indices().skip(1).find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '>').map(|(i, _)| i) else {
         return frag.to_string();
     };
-    let head = frag.get(..frag.find('>').unwrap_or(frag.len())).unwrap_or("");
+    let mut reader = Reader::from_str(frag);
+    let start = match reader.read_event() {
+        Ok(Event::Start(e) | Event::Empty(e)) => e,
+        _ => return frag.to_string(),
+    };
+    let Ok(declared) = start.attributes().map(|a| a.map(|a| a.key.as_ref().to_vec())).collect::<std::result::Result<HashSet<_>, _>>() else {
+        return frag.to_string();
+    };
     let mut add = String::new();
     for (p, v) in decls {
-        if !head.contains(&format!("xmlns:{p}=")) {
-            let _ = write!(add, " xmlns:{p}=\"{v}\"");
+        let key = if p.is_empty() { "xmlns".to_string() } else { format!("xmlns:{p}") };
+        if !declared.contains(key.as_bytes()) {
+            let _ = write!(add, " {key}=\"{v}\"");
         }
     }
     format!("{}{add}{}", frag.get(..name_end).unwrap_or(""), frag.get(name_end..).unwrap_or(""))
@@ -922,4 +941,55 @@ fn map_start(e: &BytesStart<'_>, prefixes: &mut HashSet<Vec<u8>>, map: &mut dyn 
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    use quick_xml::NsReader;
+    use quick_xml::name::ResolveResult;
+
+    const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    fn fragment_namespace(sheet: &str, local: &[u8]) -> String {
+        let scan = scan_sheet(sheet.as_bytes()).unwrap();
+        let fragment = &scan.fragments[0].1;
+        let wrapped = format!("<worksheet xmlns='{MAIN}'>{fragment}</worksheet>");
+        let mut reader = NsReader::from_str(&wrapped);
+        loop {
+            let (ns, event) = reader.read_resolved_event().unwrap();
+            match event {
+                Event::Start(e) | Event::Empty(e) => {
+                    // Duplicate declarations are not a valid way to retain an override.
+                    assert!(e.attributes().all(|a| a.is_ok()), "{fragment}");
+                    if e.local_name().as_ref() == local {
+                        return match ns {
+                            ResolveResult::Bound(ns) => String::from_utf8(ns.as_ref().to_vec()).unwrap(),
+                            ResolveResult::Unbound => String::new(),
+                            ResolveResult::Unknown(_) => panic!("unbound prefix: {fragment}"),
+                        };
+                    }
+                }
+                Event::Eof => panic!("missing element: {fragment}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn captured_fragment_retains_inherited_default_namespace() {
+        for (declaration, expected) in [("xmlns='urn:foreign'", "urn:foreign"), ("xmlns=''", ""), ("", "")] {
+            let sheet = format!("<s:worksheet xmlns:s='{MAIN}' {declaration}><controls><control/></controls></s:worksheet>");
+            assert_eq!(fragment_namespace(&sheet, b"controls"), expected);
+        }
+    }
+
+    #[test]
+    fn captured_fragment_respects_own_default_and_prefix_declarations() {
+        let sheet = format!(
+            "<worksheet xmlns='{MAIN}' xmlns:p='urn:root'><controls xmlns = 'urn:child' xmlns:p = 'urn:override'><p:marker/></controls></worksheet>"
+        );
+        assert_eq!(fragment_namespace(&sheet, b"controls"), "urn:child");
+        assert_eq!(fragment_namespace(&sheet, b"marker"), "urn:override");
+    }
 }
