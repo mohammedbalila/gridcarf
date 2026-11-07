@@ -188,11 +188,15 @@ fn workbook_snapshots_share_the_macro_list_until_it_changes() {
     wb.macros.push(sample_macro("Totals"));
     let snapshot = wb.clone();
     assert!(wb.macros.shares(&snapshot.macros));
-    assert_eq!(crate::history_retained_bytes(&snapshot, &wb), std::mem::size_of::<Workbook>());
+    let shared_bytes = crate::history_retained_bytes(&snapshot, &wb);
+    let mut without_macros = wb.clone();
+    without_macros.macros = Macros::default();
+    let without_snapshot = without_macros.clone();
+    assert_eq!(shared_bytes, crate::history_retained_bytes(&without_snapshot, &without_macros));
     wb.macros.push(sample_macro("More"));
     assert!(!wb.macros.shares(&snapshot.macros), "a write copies the list first");
     assert_eq!(snapshot.macros.len(), 1);
-    assert!(crate::history_retained_bytes(&snapshot, &wb) > std::mem::size_of::<Workbook>());
+    assert!(crate::history_retained_bytes(&snapshot, &wb) > shared_bytes);
     // The copy is per list, not per workbook copy: cloning again shares the new list.
     let again = wb.clone();
     assert!(wb.macros.shares(&again.macros));

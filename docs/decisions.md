@@ -1,5 +1,25 @@
 # Decisions
 
+## Account for allocations retained by undo history
+
+The model estimates owned capacities, tree/hash node storage, nested payloads and
+shared allocation identities. The engine seeds each accounting pass with the live
+workbook and visits history newest first, charging a shared history-only allocation
+to its newest owner once, including across sheets and nonadjacent snapshots.
+Equal content in separately owned allocations still costs memory. Workbook metadata,
+styles and their index, notes, features, spill maps, preserved content and cell values
+all participate; this estimate is a retention policy, not a hard process-RSS ceiling.
+
+The 128 MiB byte budget, 100-step cap and single oversized latest-step exception are
+unchanged. Groups retain their existing protected boundaries. Saturated totals are
+recomputed after eviction rather than subtracting from an overflowed sum.
+
+Immutable cell bands cache allocation inventories to avoid revisiting every cell on
+small edits. The private cache owns only accounting data, is excluded from equality
+and JSON, starts empty on copy-on-write detach, and is invalidated before each band
+mutation. Passes borrow inventories while their workbooks are alive; caches release
+with their bands and their own retained capacity is included in the estimate.
+
 ## Share note storage between sheet snapshots
 
 `Sheet::comments` is an `Arc<BTreeMap<CellRef, Comment>>`. Note edits use

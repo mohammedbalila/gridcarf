@@ -77,7 +77,7 @@ pub struct HistoryEntry {
     pub label: String,
     pub wb: Arc<Workbook>,
     pub selection: Selection,
-    /// Estimate of storage this snapshot retains beyond the next workbook version.
+    /// Estimate charged to this snapshot in the last newest-first history accounting pass.
     pub retained_bytes: usize,
 }
 
@@ -241,23 +241,25 @@ const JOURNAL_MAX_ENTRIES: usize = 10_000;
 pub(crate) const JOURNAL_MAX_BYTES: usize = 64 * 1024 * 1024;
 const UNDO_BYTES_LIMIT: usize = 128 * 1024 * 1024;
 
+#[cfg(test)]
 fn history_retained_bytes(older: &Workbook, newer: &Workbook) -> usize {
-    let mut bytes = std::mem::size_of::<Workbook>();
-    for (index, sheet) in older.sheets.iter().enumerate() {
-        // Moving or inserting sheets must not charge unchanged sheets at a new index.
-        if newer.sheets.iter().any(|next| Arc::ptr_eq(sheet, next)) {
-            continue;
-        }
-        bytes = bytes.saturating_add(std::mem::size_of::<gridcraft_model::Sheet>());
-        let empty = gridcraft_model::CellStore::new();
-        let next = newer.sheets.get(index).map_or(&empty, |next| &next.cells);
-        bytes = bytes.saturating_add(sheet.cells.retained_bytes_against(next));
+    let mut accounting = gridcraft_model::RetainedBytes::default();
+    accounting.seed_workbook(newer);
+    accounting.workbook(older)
+}
+
+/// Charge each history-only shared allocation to its newest owner. Removing old entries then
+/// needs no reassignment. Seed with the live workbook so its allocations cost history nothing.
+fn account_history(history: &mut [HistoryEntry], current: &Workbook) {
+    let mut accounting = gridcraft_model::RetainedBytes::default();
+    accounting.seed_workbook(current);
+    for entry in history.iter_mut().rev() {
+        entry.retained_bytes = accounting
+            .workbook(&entry.wb)
+            .saturating_add(entry.label.capacity())
+            .saturating_add(entry.selection.ranges.capacity().saturating_mul(std::mem::size_of::<gridcraft_core::RangeRef>()))
+            .saturating_add(std::mem::size_of::<HistoryEntry>());
     }
-    // Snapshots share the macro list until a change to it; a snapshot with its own list keeps it.
-    if !older.macros.shares(&newer.macros) {
-        bytes = bytes.saturating_add(older.macros.estimated_bytes());
-    }
-    bytes
 }
 
 fn push_history(history: &mut Vec<HistoryEntry>, label: String, wb: Arc<Workbook>, next: &Workbook, selection: Selection) {
@@ -273,22 +275,30 @@ fn push_history_with_budget(
     byte_budget: usize,
 ) {
     push_entry(history, label, wb, next, selection);
-    trim_to_budget(history, byte_budget);
+    trim_to_budget(history, next, byte_budget);
 }
 
 /// Adds a step without applying the limits: inside a command they wait for the outermost
 /// command to collapse its steps (see [`Session::trim_history`]).
-fn push_entry(history: &mut Vec<HistoryEntry>, label: String, wb: Arc<Workbook>, next: &Workbook, selection: Selection) {
-    let retained_bytes = history_retained_bytes(&wb, next);
+fn push_entry(history: &mut Vec<HistoryEntry>, label: String, wb: Arc<Workbook>, _next: &Workbook, selection: Selection) {
+    // Accounting runs at the policy boundary, after a command/group collapses its steps.
+    let retained_bytes = 0;
     history.push(HistoryEntry { label, wb, selection, retained_bytes });
 }
 
 /// Drops the oldest steps past [`UNDO_LIMIT`] or `byte_budget`, always keeping the latest one
 /// (even if that one edit exceeds the budget).
-fn trim_to_budget(history: &mut Vec<HistoryEntry>, byte_budget: usize) {
+fn trim_to_budget(history: &mut Vec<HistoryEntry>, current: &Workbook, byte_budget: usize) {
+    account_history(history, current);
     let mut total = history.iter().fold(0usize, |sum, entry| sum.saturating_add(entry.retained_bytes));
     while history.len() > 1 && (history.len() > UNDO_LIMIT || total > byte_budget) {
-        total = total.saturating_sub(history.remove(0).retained_bytes);
+        let removed = history.remove(0).retained_bytes;
+        // Subtracting from a saturated sum can understate what the remaining entries retain.
+        total = if total == usize::MAX {
+            history.iter().fold(0usize, |sum, entry| sum.saturating_add(entry.retained_bytes))
+        } else {
+            total.saturating_sub(removed)
+        };
     }
 }
 
@@ -1028,9 +1038,15 @@ impl Session {
         let groups = self.groups.iter().filter(|g| g.doc == uid).map(|g| g.start);
         let step = self.group_step.as_ref().filter(|g| g.doc == uid).map(|g| g.len);
         let mark = marks.chain(groups).chain(step).max().unwrap_or(0).min(d.undo.len());
+        account_history(&mut d.undo[mark..], &d.wb);
         let mut bytes = d.undo.iter().skip(mark).fold(0usize, |sum, e| sum.saturating_add(e.retained_bytes));
         while d.undo.len() > mark + 1 && (d.undo.len() - mark > UNDO_LIMIT || bytes > UNDO_BYTES_LIMIT) {
-            bytes = bytes.saturating_sub(d.undo.remove(mark).retained_bytes);
+            let removed = d.undo.remove(mark).retained_bytes;
+            bytes = if bytes == usize::MAX {
+                d.undo.iter().skip(mark).fold(0usize, |sum, entry| sum.saturating_add(entry.retained_bytes))
+            } else {
+                bytes.saturating_sub(removed)
+            };
         }
     }
 
@@ -1039,7 +1055,7 @@ impl Session {
     fn trim_history(&mut self) {
         let groups = &self.groups;
         for d in self.docs.iter_mut().filter(|d| !groups.iter().any(|g| g.doc == d.uid)) {
-            trim_to_budget(&mut d.undo, UNDO_BYTES_LIMIT);
+            trim_to_budget(&mut d.undo, &d.wb, UNDO_BYTES_LIMIT);
         }
     }
 

@@ -932,3 +932,11 @@ mod picture_map {
         Ok(Vec::<(CellRef, Arc<CellPicture>)>::deserialize(deserializer)?.into_iter().collect())
     }
 }
+
+impl Sheet {
+    /// Heap allocations kept beyond `newer`; whole-history callers should instead share one
+    /// [`crate::RetainedBytes`] pass so nonadjacent snapshots deduplicate too.
+    pub fn retained_bytes_against(&self, newer: &Sheet) -> usize {
+        crate::retained::RetainedBytes::against(self, newer)
+    }
+}

@@ -18,8 +18,9 @@
 //!   (catches stale dependency graphs);
 //! - every few steps and at the end, an XLSX save and reload (with the recalculation opening does)
 //!   gives the same sheets, formulas and values;
-//! - at the end, undoing everything gives back the starting workbook and redoing everything the
-//!   final one (view state aside), and both keep the Watch Window list, which isn't an edit.
+//! - at the end, undoing everything reaches the oldest retained workbook, and redoing the
+//!   retained steps reaches their final workbook (view state aside); both keep the Watch
+//!   Window list, which isn't an edit. The byte budget may evict steps before the count cap.
 //!
 //! Knobs (environment variables):
 //! - `GRIDCRAFT_FUZZ_SEEDS` (default 6) and `GRIDCRAFT_FUZZ_STEPS` (default 40): the budget. Soak with
@@ -39,8 +40,8 @@ use gridcraft_engine::{EngineError, Session, command_specs, find_command, io};
 use serde_json::{Value as Json, json};
 
 const SAMPLES: [&str; 3] = ["sales", "budget", "grades"];
-/// Episodes end (undo/redo checks, then a fresh history) before the engine's 100-step undo limit
-/// starts dropping the oldest entries.
+/// Episodes end (undo/redo checks, then a fresh history) before the engine's 100-step undo limit.
+/// Its byte budget can evict steps earlier; checks follow the history that remains.
 const EPISODE_UNDO_DEPTH: usize = 90;
 /// Save and reload every this many steps (and at the end of every episode).
 const ROUNDTRIP_EVERY: usize = 10;
@@ -219,8 +220,6 @@ fn shrink(sample: &str, steps: &[Step], kind: &str) -> Vec<Step> {
 
 struct Harness {
     s: Session,
-    /// The workbook at the start of the current episode (what undoing everything gives back).
-    base: Arc<Workbook>,
 }
 
 fn fail(step: usize, kind: &'static str, what: impl Into<String>) -> Failure {
@@ -243,8 +242,7 @@ impl Harness {
     fn new(sample: &str) -> Harness {
         let mut s = Session::new();
         s.execute("file.new", json!({"sample": sample})).expect("sample opens");
-        let base = s.doc().expect("document").wb.clone();
-        Harness { s, base }
+        Harness { s }
     }
 
     fn wb(&self) -> Arc<Workbook> {
@@ -289,10 +287,12 @@ impl Harness {
         guarded(i, "recalc", || recalc_diff(&wb))
     }
 
-    /// Undo everything, compare with the start, redo everything, compare with the end, then save
-    /// and reload; the next episode starts from here with an empty history.
+    /// Check both ends of the retained undo/redo history, then save and reload. A byte-budget
+    /// eviction can make the episode's original start or end unreachable; the retained snapshots
+    /// are still required to round-trip exactly, including formula modes and spill state.
     fn end_episode(&mut self, i: usize) -> Result<(), Failure> {
         let end = self.wb();
+        let retained_start = self.s.doc().expect("document").undo.first().map_or_else(|| end.clone(), |e| e.wb.clone());
         let mut n = 0;
         while !self.s.doc().expect("document").undo.is_empty() {
             if let Err(EngineError::Internal(_, msg)) = self.s.execute("edit.undo", json!({})) {
@@ -304,28 +304,40 @@ impl Harness {
             }
         }
         let undone = self.wb();
-        if let Some(diff) = workbook_diff(&self.base, &undone) {
-            return Err(fail(i, "undo", format!("undoing all {n} steps doesn't give back the starting workbook: {diff}")));
+        if let Some(diff) = workbook_diff(&retained_start, &undone) {
+            return Err(fail(i, "undo", format!("undoing all {n} steps doesn't give back the oldest retained workbook: {diff}")));
         }
         if watch_list(&end) != watch_list(&undone) {
             return Err(fail(i, "undo", format!("undoing all {n} steps changed the Watch Window list (not an edit)")));
         }
         self.check_state(i)?;
-        // Only the steps undone here: an `edit.undo {steps}` in the sequence may have left more.
-        for _ in 0..n {
+        // Only this batch's still-retained steps: earlier sequence undos may have left more,
+        // and building redo history can itself evict its oldest entries under the byte budget.
+        let redo = &self.s.doc().expect("document").redo;
+        let redo_count = n.min(redo.len());
+        let retained_end =
+            if redo_count == n { end.clone() } else { redo.get(redo.len() - redo_count).map_or_else(|| undone.clone(), |e| e.wb.clone()) };
+        for _ in 0..redo_count {
             if let Err(EngineError::Internal(_, msg)) = self.s.execute("edit.redo", json!({})) {
                 return Err(fail(i, "panic", format!("`edit.redo` panicked while redoing everything: {msg}")));
             }
         }
-        if let Some(diff) = workbook_diff(&end, &self.wb()) {
-            return Err(fail(i, "redo", format!("redoing all {n} steps doesn't give back the final workbook: {diff}")));
+        if let Some(diff) = workbook_diff(&retained_end, &self.wb()) {
+            return Err(fail(i, "redo", format!("redoing all {redo_count} retained steps doesn't give back their final workbook: {diff}")));
+        }
+        if watch_list(&end) != watch_list(&self.wb()) {
+            return Err(fail(i, "redo", "redoing retained steps changed the Watch Window list (not an edit)"));
         }
         self.check_state(i)?;
+        // Keep the original episode-end roundtrip check even if that state was evicted from
+        // redo, and also check the reachable state when the two differ.
         guarded(i, "xlsx roundtrip", || roundtrip_diff(&end))?;
+        if redo_count != n {
+            guarded(i, "xlsx roundtrip", || roundtrip_diff(&self.wb()))?;
+        }
         let d = self.s.active_mut().expect("document");
         d.undo.clear();
         d.redo.clear();
-        self.base = d.wb.clone();
         Ok(())
     }
 
@@ -1134,4 +1146,64 @@ fn view_mode_switch_is_not_an_undo_difference() {
         let failure = replay("sales", &[(id.to_string(), json!({"sheet": 0}))]);
         assert!(failure.is_none(), "`{id}`: {failure:?}");
     }
+}
+
+#[test]
+fn episode_checks_follow_evicted_undo_history() {
+    let mut h = Harness::new("sales");
+    for i in 1..=3 {
+        h.s.execute("cell.set", json!({"cell":"A1", "input":i.to_string()})).unwrap();
+    }
+    // Deterministically model the byte policy evicting the first two steps, without allocating
+    // hundreds of megabytes just to test the harness. Seed 1 also exercises real byte eviction.
+    h.s.doc_mut().unwrap().undo.drain(..2);
+    let end = h.wb();
+    h.end_episode(3).unwrap();
+    assert_eq!(workbook_diff(&end, &h.wb()), None);
+}
+
+#[test]
+fn retained_history_comparison_keeps_formula_modes_and_spills() {
+    let mut a = Workbook::new();
+    a.sheet_mut(0).unwrap().set_cell(CellRef::new(0, 0), gridcraft_model::Cell::formula(Formula::new("A2:A3")));
+    let mut b = a.clone();
+    let formula = b.sheet_mut(0).unwrap().cells.get_mut(CellRef::new(0, 0)).unwrap().formula.as_mut().unwrap();
+    Arc::make_mut(formula).eval_mode = gridcraft_model::FormulaEvalMode::Legacy;
+    assert!(workbook_diff(&a, &b).is_some());
+    let mut b = a.clone();
+    b.sheet_mut(0).unwrap().spill.insert(CellRef::new(1, 0), Value::Number(2.0));
+    assert!(workbook_diff(&a, &b).is_some());
+}
+
+#[test]
+fn episode_checks_the_furthest_retained_redo_after_byte_eviction() {
+    let mut h = Harness::new("sales");
+    h.s.execute("cell.set", json!({"cell":"A1", "input":"1"})).unwrap();
+    let mut text = String::with_capacity(80 * 1024 * 1024);
+    text.push_str("middle");
+    Arc::make_mut(&mut h.s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().comments_mut().insert(
+        CellRef::new(0, 0),
+        gridcraft_model::Comment {
+            author: String::new(),
+            text,
+            replies: vec![],
+            threaded: false,
+            resolved: false,
+            visible: false,
+            dates: vec![],
+            note_box: None,
+        },
+    );
+    let middle = h.wb();
+    h.s.execute("cell.set", json!({"cell":"A1", "input":"2"})).unwrap();
+    let mut text = String::with_capacity(80 * 1024 * 1024);
+    text.push_str("final");
+    Arc::make_mut(&mut h.s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().comments_mut().get_mut(&CellRef::new(0, 0)).unwrap().text = text;
+    let end = h.wb();
+    assert_eq!(h.s.doc().unwrap().undo.len(), 2);
+    // Capacity makes each version exceed half the real 128 MiB budget without a huge serialized
+    // fixture. Undo can keep both small/80 MiB old states, but redo cannot keep both 80 MiB states.
+    h.end_episode(2).unwrap();
+    assert_eq!(workbook_diff(&middle, &h.wb()), None, "one retained redo must run");
+    assert!(workbook_diff(&end, &h.wb()).is_some(), "the evicted farther future is unreachable");
 }

@@ -21,6 +21,15 @@ fn has_value(cell: &Cell) -> bool {
 struct Band {
     /// row → (col → cell)
     rows: BTreeMap<u32, BTreeMap<u32, Cell>>,
+    #[serde(skip)]
+    accounting: crate::retained::BandAccounting,
+}
+
+impl Band {
+    fn rows_mut(&mut self) -> &mut BTreeMap<u32, BTreeMap<u32, Cell>> {
+        self.accounting.0.take();
+        &mut self.rows
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -48,7 +57,7 @@ impl CellStore {
         if !band.rows.get(&c.row).is_some_and(|r| r.contains_key(&c.col)) {
             return None;
         }
-        Arc::make_mut(band).rows.get_mut(&c.row)?.get_mut(&c.col)
+        Arc::make_mut(band).rows_mut().get_mut(&c.row)?.get_mut(&c.col)
     }
     /// Stores a cell; a default (empty, unstyled) cell is removed instead.
     pub fn set(&mut self, c: CellRef, cell: Cell) {
@@ -57,7 +66,7 @@ impl CellStore {
             return;
         }
         let band = Arc::make_mut(self.bands.entry(c.row / BAND).or_default());
-        if band.rows.entry(c.row).or_default().insert(c.col, cell).is_none() {
+        if band.rows_mut().entry(c.row).or_default().insert(c.col, cell).is_none() {
             self.len += 1;
         }
     }
@@ -90,12 +99,13 @@ impl CellStore {
             return None;
         }
         let b = Arc::make_mut(band);
-        let row = b.rows.get_mut(&c.row)?;
+        let rows = b.rows_mut();
+        let row = rows.get_mut(&c.row)?;
         let old = row.remove(&c.col);
         if row.is_empty() {
-            b.rows.remove(&c.row);
+            rows.remove(&c.row);
         }
-        if b.rows.is_empty() {
+        if rows.is_empty() {
             self.bands.remove(&key);
         }
         if old.is_some() {
@@ -217,54 +227,10 @@ impl CellStore {
         }
         out
     }
-    /// Approximate heap storage kept alive by this snapshot's bands that `newer` no longer
-    /// shares. This is for bounding Undo history, not for reporting process memory: BTreeMap
-    /// nodes and allocator overhead vary by platform. Shared formulas and values are counted
-    /// only when the newer band no longer holds the same Arc.
+    /// Estimated allocations this store retains beyond `newer`. For a whole history,
+    /// use one [`crate::RetainedBytes`] pass to deduplicate across sheets and snapshots.
     pub fn retained_bytes_against(&self, newer: &CellStore) -> usize {
-        use std::mem::size_of;
-
-        let mut bytes = 0usize;
-        for (key, band) in &self.bands {
-            let next = newer.bands.get(key);
-            if next.is_some_and(|b| Arc::ptr_eq(b, band)) {
-                continue;
-            }
-            bytes = bytes.saturating_add(size_of::<Band>());
-            for (row, cols) in &band.rows {
-                bytes = bytes.saturating_add(size_of::<u32>() + 3 * size_of::<usize>());
-                for (col, cell) in cols {
-                    // Cells and BTreeMap nodes are duplicated with a cloned band even when
-                    // their formula/value Arcs are still shared with the next snapshot.
-                    bytes = bytes.saturating_add(size_of::<u32>() + size_of::<Cell>() + 3 * size_of::<usize>());
-                    let next_cell = next.and_then(|b| b.rows.get(row)).and_then(|r| r.get(col));
-                    if let Some(formula) = &cell.formula
-                        && !next_cell.and_then(|c| c.formula.as_ref()).is_some_and(|f| Arc::ptr_eq(f, formula))
-                    {
-                        bytes = bytes.saturating_add(size_of::<crate::cell::Formula>() + formula.text.len());
-                        if let Some(expr) = &formula.expr {
-                            expr.walk(&mut |_| bytes = bytes.saturating_add(size_of::<gridcraft_formula::Expr>()));
-                        }
-                    }
-                    match &cell.value {
-                        gridcraft_core::Value::Text(text)
-                            if !next_cell.and_then(|c| c.value.as_text()).is_some_and(|t| std::ptr::eq(t, text.as_ref())) =>
-                        {
-                            bytes = bytes.saturating_add(text.len());
-                        }
-                        gridcraft_core::Value::Array(array)
-                            if !next_cell.is_some_and(|c| matches!(&c.value, gridcraft_core::Value::Array(a) if Arc::ptr_eq(a, array))) =>
-                        {
-                            bytes = bytes.saturating_add(
-                                size_of::<gridcraft_core::Array>() + array.data.len().saturating_mul(size_of::<gridcraft_core::Value>()),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        bytes
+        crate::retained::RetainedBytes::against(self, newer)
     }
     /// Removes every cell in `r` and returns them.
     pub fn take_range(&mut self, r: RangeRef) -> Vec<(CellRef, Cell)> {
@@ -395,5 +361,85 @@ mod tests {
         assert!(s.get(c(2, 0)).is_some());
         s.shift_cols(0, 1);
         assert!(s.get(c(7, 1)).is_some());
+    }
+}
+
+impl crate::retained::HeapBytes for CellStore {
+    fn heap_bytes<'a>(&'a self, c: &mut crate::RetainedBytes<'a>) {
+        let Self { bands, len: _ } = self;
+        c.visit(bands);
+    }
+}
+#[cfg(test)]
+thread_local! { static BAND_ESTIMATE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+impl crate::retained::HeapBytes for Band {
+    fn heap_bytes<'a>(&'a self, c: &mut crate::RetainedBytes<'a>) {
+        let summary = self.accounting.0.get_or_init(|| {
+            #[cfg(test)]
+            BAND_ESTIMATE_VISITS.with(|n| n.set(n.get() + 1));
+            crate::retained::AllocationSummary::new(&self.rows)
+        });
+        c.band(summary);
+    }
+}
+
+#[cfg(test)]
+mod retained_cache_tests {
+    use super::*;
+    use gridcraft_core::Value;
+
+    #[test]
+    fn unchanged_band_accounting_reuses_its_allocation_inventory() {
+        let mut store = CellStore::new();
+        store.set(CellRef::new(0, 0), Cell::value(Value::from("payload")));
+        let empty = CellStore::new();
+        BAND_ESTIMATE_VISITS.with(|n| n.set(0));
+        let first = store.retained_bytes_against(&empty);
+        let second = store.retained_bytes_against(&empty);
+        assert_eq!(first, second);
+        assert_eq!(BAND_ESTIMATE_VISITS.with(|n| n.get()), 1, "unchanged bands must not walk every cell on each pass");
+    }
+
+    #[test]
+    fn cached_inventory_storage_is_charged_and_cow_clones_start_empty() {
+        let mut store = CellStore::new();
+        store.set(CellRef::new(0, 0), Cell::value(Value::from("payload")));
+        let empty = CellStore::new();
+        let bytes = store.retained_bytes_against(&empty);
+        let band = store.bands.values().next().unwrap();
+        let summary = band.accounting.0.get().unwrap();
+        assert!(summary.storage_bytes() >= 2 * std::mem::size_of::<usize>());
+        assert!(bytes >= summary.storage_bytes() + std::mem::size_of::<Band>());
+        let cloned = (**band).clone();
+        assert!(cloned.accounting.0.get().is_none());
+        assert_eq!(*band.as_ref(), cloned);
+        let owner = Arc::downgrade(band);
+        drop(store);
+        assert!(owner.upgrade().is_none(), "inventory must not keep the owning band alive");
+    }
+
+    #[test]
+    fn mutation_rebuilds_inventory_and_keeps_snapshot_json_and_equality() {
+        let mut store = CellStore::new();
+        store.set(CellRef::new(0, 0), Cell::value(Value::from("x".repeat(32 * 1024).as_str())));
+        store.set(CellRef::new(1, 0), Cell::value(Value::Number(1.0)));
+        let empty = CellStore::new();
+        let json = serde_json::to_string(&store).unwrap();
+        let baseline = store.retained_bytes_against(&empty);
+        let snapshot = store.clone();
+        assert_eq!(serde_json::to_string(&store).unwrap(), json);
+        assert_eq!(store, snapshot);
+        store.get_mut(CellRef::new(0, 0)).unwrap().value = Value::from("x".repeat(64 * 1024).as_str());
+        assert!(store.retained_bytes_against(&empty) >= baseline + 32 * 1024);
+        assert_eq!(snapshot.retained_bytes_against(&empty), baseline);
+        store.remove(CellRef::new(0, 0));
+        assert!(store.retained_bytes_against(&empty) < 32 * 1024);
+        store.set(CellRef::new(2, 0), Cell::value(Value::from("x".repeat(64 * 1024).as_str())));
+        assert!(store.retained_bytes_against(&empty) >= 64 * 1024);
+        store.shift_rows(1, 128);
+        assert!(store.retained_bytes_against(&empty) >= 64 * 1024);
+        store.rebuild();
+        assert!(store.retained_bytes_against(&empty) >= 64 * 1024);
     }
 }

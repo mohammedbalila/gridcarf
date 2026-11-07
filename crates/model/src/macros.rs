@@ -537,3 +537,10 @@ impl OnConflict {
         }
     }
 }
+
+impl crate::retained::HeapBytes for Macros {
+    fn heap_bytes<'a>(&'a self, c: &mut crate::RetainedBytes<'a>) {
+        let Self(macros) = self;
+        c.visit(macros);
+    }
+}

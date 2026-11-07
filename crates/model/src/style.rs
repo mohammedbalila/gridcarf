@@ -484,6 +484,22 @@ impl StyleTable {
 
 static DEFAULT_STYLE: std::sync::LazyLock<Style> = std::sync::LazyLock::new(Style::default);
 
+impl crate::retained::HeapBytes for StyleTable {
+    fn heap_bytes<'a>(&'a self, c: &mut crate::RetainedBytes<'a>) {
+        let Self { styles, index } = self;
+        c.visit(styles);
+        c.visit(index);
+    }
+}
+
+impl StyleTable {
+    /// Heap allocations kept beyond `newer`; whole-history callers should instead share one
+    /// [`crate::RetainedBytes`] pass so nonadjacent snapshots deduplicate too.
+    pub fn retained_bytes_against(&self, newer: &StyleTable) -> usize {
+        crate::retained::RetainedBytes::against(self, newer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

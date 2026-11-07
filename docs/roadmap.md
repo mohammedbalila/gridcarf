@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-23 · **Change:** minor (test command) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
 list is [`gaps.md`](gaps.md); numbers and method are in
@@ -14,7 +14,15 @@ list is [`gaps.md`](gaps.md); numbers and method are in
    15-digit comparison (#187). 8–15 h. Language work should extend the new `i18n` catalog past the
    ribbon rather than add scattered literals.
 2. **XLSX on real files** (gaps #1, #3): corpus run plus Excel opening our output.
-3. **Large workbooks and multi-threaded recalc** (gap #2).
+3. **Large workbooks and multi-threaded recalc** (gap #2). Complete history allocation
+   accounting now covers non-cell features and shares cached cell-band inventories.
+   Before claiming large-workbook parity, reduce repeated band-root/current-inventory
+   work while preserving global shared-allocation deduplication and byte eviction.
+   A bounded 100k-cell release probe on Apple M5 measured 1.8–2.6 ms per warm edit,
+   15.7–18.3 ms cold inventory creation, and 0.17–0.20 s for 10k formula replacements;
+   the prior incomplete estimator took about 0.02–0.03 ms per edit and 0.021 s for that
+   bulk case. This accepted stabilization cost needs profiling on larger workbooks
+   and other hosts; it is not evidence of unchanged speed or 1M-row responsiveness.
 
 ## Alpha gate
 
@@ -113,6 +121,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | Complete retention accounting; track repeated band-root/current-inventory work before large-workbook parity |
 | 2026-10-23 | minor | Measuring: tests run through `cargo xtask test` |
 | 2026-10-11 | minor | PivotTable calculated fields landed |
 | 2026-10-10 | minor | Current focus and M15 updated for the 10-10 merges |

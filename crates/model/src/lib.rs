@@ -14,6 +14,8 @@ pub mod password;
 pub mod preserved;
 pub use compatibility::{CompatibilityEffect, CompatibilityIssue, Editability};
 pub mod python;
+mod retained;
+pub use retained::RetainedBytes;
 pub mod sheet;
 pub mod store;
 pub mod style;

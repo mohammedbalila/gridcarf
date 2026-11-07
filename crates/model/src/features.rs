@@ -1085,6 +1085,18 @@ pub struct Slicer {
     pub columns: u32,
 }
 
+impl crate::retained::HeapBytes for EquationCache {
+    fn heap_bytes<'a>(&'a self, c: &mut crate::RetainedBytes<'a>) {
+        let Self { key: _, len: _, source, layout } = self;
+        c.visit(source);
+        match layout {
+            Some(Ok(list)) => c.visit(list),
+            Some(Err(error)) => c.visit(&error.message),
+            None => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod trendline_forecast_tests {
     use super::Trendline;
