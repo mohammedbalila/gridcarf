@@ -957,9 +957,20 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
+    write_file_with_sync(path, bytes, std::fs::File::sync_all, |parent| std::fs::File::open(parent)?.sync_all())
+}
+
+/// Keep file synchronization before publication; only directory synchronization is best effort.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file_with_sync(
+    path: &str,
+    bytes: &[u8],
+    sync_file: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> Result<()> {
     use std::io::Write;
     script_sandbox_check(path)?;
-    // Write to a temporary file, then rename: a crash never leaves a half-written workbook.
+    // Publish only complete bytes whose file synchronization succeeded.
     // The temporary file is created exclusively, so an existing file or symlink at that
     // path (planted by another local user) makes the save fail instead of truncating the
     // link's target; and it inherits the destination's access restrictions, so saving a
@@ -979,16 +990,29 @@ pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
     if let Some(p) = &prior {
         let _ = f.set_permissions(p.clone());
     }
-    f.write_all(bytes).and_then(|()| f.flush()).map_err(|e| {
+    let written = f.write_all(bytes).and_then(|()| f.flush()).and_then(|()| sync_file(&f));
+    // Close before cleanup or replacement, including on platforms that restrict live handles.
+    drop(f);
+    written.map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         EngineError::Other(format!("{path}: {e}"))
     })?;
     std::fs::rename(&tmp, path).map_err(|e| {
-        // A write or rename that fails (full disk, the workbook locked by another app) leaves
-        // no temporary file beside the user's workbook.
+        // Cleanup is best effort and cannot replace the original publication error.
         let _ = std::fs::remove_file(&tmp);
         EngineError::Other(format!("{path}: {e}"))
-    })
+    })?;
+    #[cfg(unix)]
+    {
+        let parent = std::path::Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+        // Replacement already happened: directory failure cannot mean the original survived.
+        if let Err(error) = sync_parent(parent) {
+            log::warn!("{path}: parent directory synchronization after save failed: {error}");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = sync_parent;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1065,3 +1089,7 @@ pub fn image_size(data: &[u8]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod write_tests;

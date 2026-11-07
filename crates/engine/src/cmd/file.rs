@@ -302,13 +302,9 @@ fn close_window(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/support/owned_directory.rs"]
-mod owned_directory;
-
-#[cfg(test)]
 mod autosave_tests {
-    use super::owned_directory::Directory;
     use crate::Session;
+    use crate::owned_directory::Directory;
     use serde_json::json;
 
     fn directory(name: &str) -> Directory {

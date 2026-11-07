@@ -1238,3 +1238,7 @@ pub fn cell(r: u32, c: u32) -> CellRef {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/support/owned_directory.rs"]
+mod owned_directory;
