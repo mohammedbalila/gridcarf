@@ -582,19 +582,55 @@ fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
                 cx.wb.sheets.get(i).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
             // A bare name that is also a defined name resolves to the defined name, so it is not the table.
             let shadowed = cx.wb.name(&old, i).is_some();
-            let Some(sh) = cx.wb.sheet_mut(i) else { continue };
             for (c, f) in keys {
                 let Some(e) = f.expr() else { continue };
+                let mut hit = false;
                 let ne = e.map(&mut |x| match x {
                     gridcraft_formula::Expr::Struct(mut st) if st.table.eq_ignore_ascii_case(&old) => {
                         st.table = name.clone();
+                        hit = true;
                         gridcraft_formula::Expr::Struct(st)
                     }
-                    gridcraft_formula::Expr::Name(n) if !shadowed && n.eq_ignore_ascii_case(&old) => gridcraft_formula::Expr::Name(name.clone()),
+                    gridcraft_formula::Expr::Name(n) if !shadowed && n.eq_ignore_ascii_case(&old) => {
+                        hit = true;
+                        gridcraft_formula::Expr::Name(name.clone())
+                    }
                     o => o,
                 });
-                if let Some(cell) = sh.cells.get_mut(c) {
+                if hit && let Some(cell) = cx.wb.sheet_mut(i).and_then(|sh| sh.cells.get_mut(c)) {
                     cell.formula = Some(std::sync::Arc::new(Formula { eval_mode: f.eval_mode, ..Formula::from_expr(ne) }));
+                }
+            }
+            // Stored formulas rename explicit structured references only; bare names may
+            // be LET locals or defined names. Do not detach sheets without a matching reference.
+            let mut updates = Vec::new();
+            if let Some(sh) = cx.wb.sheet(i) {
+                for (ti, t) in sh.tables.iter().enumerate() {
+                    for (ci, col) in t.columns.iter().enumerate() {
+                        let Some(text) = &col.formula else { continue };
+                        let Ok(e) = gridcraft_formula::parse(text) else { continue };
+                        let mut hit = false;
+                        let ne = e.map(&mut |x| match x {
+                            gridcraft_formula::Expr::Struct(mut st) if st.table.eq_ignore_ascii_case(&old) => {
+                                st.table = name.clone();
+                                hit = true;
+                                gridcraft_formula::Expr::Struct(st)
+                            }
+                            o => o,
+                        });
+                        if hit {
+                            updates.push((ti, ci, gridcraft_formula::print(&ne)));
+                        }
+                    }
+                }
+            }
+            if !updates.is_empty()
+                && let Some(sh) = cx.wb.sheet_mut(i)
+            {
+                for (ti, ci, text) in updates {
+                    if let Some(col) = sh.tables.get_mut(ti).and_then(|t| t.columns.get_mut(ci)) {
+                        col.formula = Some(text);
+                    }
                 }
             }
         }

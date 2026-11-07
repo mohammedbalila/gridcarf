@@ -116,3 +116,27 @@ map/key overhead remain outside this count-based guard.
 cargo test --locked -p gridcraft-engine pivot::
 cargo test --locked -p gridcraft-engine
 ~~~
+
+## Stored calculated-column formulas follow renames
+
+[Calculated-column repair source: PR #3391](https://github.com/storytold/gridcraft/pull/3391),
+reviewed at 645dc5c59b9c72022f2741a998efed76dc2ff25f.
+
+Header and table renames now update TableColumn.formula, which is saved separately
+from cell formulas as calculatedColumnFormula. The repair follows explicit structured
+references across tables and sheets, both column-span endpoints, and local references
+bound to their owning table and sheet. Bare names, LET locals and strings in stored
+formulas keep their meaning; unmatched and unparseable stored text stays unchanged.
+
+Rewrites are collected before mutation, so sheets with no matching references retain
+their shared storage. Existing cell-formula evaluation modes and bare-name behavior
+remain. Tests cover literal live/native XML/reopened formulas, Undo/Redo, legacy mode,
+unrelated-sheet sharing, disjoint native what-if metadata and atomic refusal of
+protected native formula-header rewrites. The repair does not establish universal
+bare-table-name resolution or observed Excel reopen behavior.
+
+~~~sh
+cargo test --locked -p gridcraft-engine --lib tables::tests
+cargo test --locked -p gridcraft-engine
+cargo test --locked -p gridcraft-xlsx
+~~~
