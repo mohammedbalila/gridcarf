@@ -5,8 +5,8 @@ use super::state::{NoticeKind, OpenWindow, SaveAnswer, SheetView};
 use super::updates_ui;
 use super::{
     CellRef, HashMap, INTERFACE_SCALE_MAX, INTERFACE_SCALE_MIN, Json, Notice, Perf, RangeRef, Session, SheetApp, UiRequest, UiState, backstage,
-    clamp_interface_scale, clean_error, control, desktop_theme, dialogs, editor, floating_pictures, formula_bar, formula_locale, grid, i18n, json,
-    keytips, macro_ui, panes, pivot_pane, printing, ribbon, tabs, text_box, theme, widgets,
+    cell_pictures, clamp_interface_scale, clean_error, control, desktop_theme, dialogs, editor, floating_pictures, formula_bar, formula_locale, grid,
+    i18n, json, keytips, macro_ui, panes, pivot_pane, printing, ribbon, tabs, text_box, theme, widgets,
 };
 
 mod clipboard;
@@ -114,6 +114,7 @@ impl SheetApp {
         // Floating pictures' textures go with their workbook, even when no sheet is painted.
         let open: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
         floating_pictures::forget_closed(ctx, &open);
+        cell_pictures::forget_dead(ctx);
         self.apply_font_state(ctx);
         if let Some(answer) = self.desktop_theme.take_change() {
             self.desktop_dark = Some(answer);
