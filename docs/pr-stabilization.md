@@ -1,6 +1,6 @@
 # PR stabilization repairs
 
-> Last updated: 2026-11-07. Bounded fixes adapted from existing public GridCraft pull requests.
+> Last updated: 2026-11-08. Bounded fixes adapted from existing public GridCraft pull requests.
 > These repairs do not establish full Excel compatibility.
 
 This integration branch starts from the reviewed stabilization source containing legacy formula
@@ -173,3 +173,124 @@ cargo test --locked -p gridcraft-engine --lib tables::tests
 cargo test --locked -p gridcraft-engine
 cargo test --locked -p gridcraft-xlsx
 ~~~
+
+## S02-B2: Clamp note anchors without signed overflow
+
+Revision: 2026-11-07.
+
+The note-box writer now saturates the addition of a cell coordinate and its signed
+relative offset before applying the existing sheet-bound clamp. Constructed model
+notes with extreme offsets therefore save at the appropriate sheet edge. Ordinary
+negative offsets retain their meaning, and pixel offsets and point sizes are preserved.
+This follows up the overflow finding on
+[PR #1614](https://github.com/storytold/gridcraft/pull/1614#discussion_r4334289015).
+
+Synthetic typed-model regressions exercise real XLSX writes at B2 for both axes,
+row-only and column-only signed extremes. They inspect literal VML anchors, pixel
+offsets and the 224.25 × 89.25 pt size, then reopen author and text. Ordinary negative
+offsets and near-upper-bound coordinates provide controls. Clamped geometry is
+normalized on reopen; the extreme relative inputs need not survive unchanged.
+
+~~~sh
+cargo test --locked -p gridcraft-xlsx note_box
+cargo test --locked -p gridcraft-xlsx
+cargo xtask ci
+~~~
+
+This is an arithmetic save repair. Native Windows, live Excel reopen, process RSS
+and broad external-corpus fidelity remain untested by these synthetic checks.
+
+## T01: Acquire exclusive AutoSave test fixtures
+
+Revision: 2026-11-08 (Asia/Dubai).
+
+The AutoSave integration fixtures and engine sandbox test now acquire their
+synthetic parent directories with exclusive `create_dir`, retrying only existing
+candidates. RAII cleans up only a successfully acquired parent. The sandbox
+fixture also creates its workbook file exclusively and retries file collisions.
+No production save behavior or script permission policy changes.
+
+Both suites compile the same test-only directory helper from
+`crates/engine/tests/support/owned_directory.rs`, keeping acquisition and cleanup
+policy in one place without a runtime dependency or production API. Relative
+module declarations keep the helper visible to the workspace formatter. The UI
+integration tests refer to engine-owned test source: isolated packaged UI tests
+require the full workspace/engine source layout.
+
+Cleanup errors fail normally completing tests and include the owned path and
+original filesystem error. During unwinding they are written directly to stderr
+without a second panic. If stderr itself fails, there is no reliable secondary
+diagnostic channel during unwinding. Deterministic regressions remove an empty,
+exclusively acquired directory before dropping its owner; a captured child test
+checks that both its original panic and cleanup error survive. The child gets its
+marker through `Command::env`, without changing the parent's environment or panic hook.
+
+Directory-acquisition regressions retry both file and directory collisions. The
+file-writer regression retries a regular-file collision; a separate directory-only
+refusal control preserves its sentinel without requiring a platform-specific error
+kind. Fresh candidates and owned cleanup are checked, and missing-parent errors
+surface without trying another candidate. The direct-file regression reproduced
+the old fixture write truncating sentinel bytes before exclusive creation was applied.
+All collision setup and cleanup stays below an independently acquired parent.
+The original AutoSave cases and sandbox denial, document/window, dirty-state and
+journal assertions remain in place; fixture creation stays outside the sandbox.
+
+~~~sh
+cargo test --locked -p gridcraft-engine --lib cmd::file::
+cargo test --locked -p gridcraft-ui-egui --test it autosave_failures
+cargo test --locked -p gridcraft-engine --test it save_temp_ownership
+cargo xtask ci
+~~~
+
+These are test-fixture ownership checks. Native Windows, live Excel, process RSS
+and broad external-corpus fidelity remain untested.
+
+
+## M03-A: Preserve sheet scroll identity and release closed-window state
+
+Revision: 2026-11-08 (Asia/Dubai).
+
+Scroll positions now follow the window and actual sheet UID, so inserting, moving,
+deleting and restoring sheets cannot assign one sheet's scroll to another. Saving
+maps those UIDs back to current sheet indices, including inactive AutoSave, while
+preserving the document's live window, selection and guarded trace/conditional-format
+revision updates. This adapts the narrow identity repair from
+[PR #3507](https://github.com/storytold/gridcraft/pull/3507), commit
+`1688b43ae225fc4f89879d57ebacba66c7908a5a`, around the existing document-scoped save path.
+
+The existing window lifecycle seam now drops closed windows' parked UI and scroll
+entries before returning for an unchanged active window. Hidden logic-only ticks
+therefore release parked conditional-format statistics and dialogs even when the
+surviving window remains current. Deleted-sheet positions remain available to Undo
+until the window closes; broader history-reachability eviction is a separate task.
+
+Regressions cover inserted/reordered sheets, delete-to-Undo and saved views,
+independent windows, inactive/hidden AutoSave and stationary-window cleanup.
+Ordinary active-cell storage and an empty session without a window are preservation
+controls. An orphan active document without any window is not constructible through
+the current public API and is not exercised; its defensive save path is unchanged.
+
+A small synthetic collector paints actual two-cell color-scale output, parks a
+dialog, positively checks clipboard and format-painter owners, explicitly clears
+both, closes each target by ID, and runs two no-paint logic ticks. All 16 warm-up
+and 1,000 measured cycles complete before the final lifetime assertion. Before the
+repair, the last target remained parked and scroll entries grew to 1,017. After it,
+each post-warm-up checkpoint retains one sentinel document/window/scroll entry,
+zero parked entries and zero target conditional-format cache instances. Both maps
+retain capacity for three entries. These are counts and inline-capacity estimates,
+not exact heap or RSS measurements; internal conditional-cache capacity is not measured.
+
+~~~sh
+cargo test --locked -p gridcraft-ui-egui --test it scroll_position
+cargo test --locked -p gridcraft-ui-egui --test it autosave_failures
+cargo test --locked -p gridcraft-ui-egui --test it trace_navigation
+cargo test --locked -p gridcraft-ui-egui --lib window_ui -- --nocapture
+cargo test --locked -p gridcraft-ui-egui --lib grid::show::trace_arrow_tests
+cargo xtask ci
+~~~
+
+The existing offscreen sales sample was rendered and visually inspected on macOS.
+Full weak-payload and clipboard-retained lifetime controls, dead-cell textures,
+history-reachable sheet eviction, release/RSS campaigns, native Windows and live
+Excel observations remain separate gates. This bounded change does not complete
+M03, V03, recovery or general platform/Excel compatibility.

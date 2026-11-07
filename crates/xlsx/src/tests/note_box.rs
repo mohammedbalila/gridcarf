@@ -83,6 +83,54 @@ fn a_box_that_would_start_before_the_sheet_is_clamped_to_it() {
     assert!(vml.contains("<x:Anchor>0, 10, 0, 2, 4, 32, 4, 8</x:Anchor>"), "{vml}");
 }
 
+fn assert_saved_note_box(cell: CellRef, from: (i64, i64), to: (i64, i64), anchor: &str) {
+    let mut wb = Workbook::new();
+    let note = Comment {
+        author: "Anchor author".into(),
+        text: "Anchor overflow regression".into(),
+        replies: vec![],
+        threaded: false,
+        resolved: false,
+        visible: false,
+        dates: vec![],
+        note_box: Some(NoteBox {
+            from: NoteCorner { col: from.0, col_px: 10, row: from.1, row_px: 2 },
+            to: NoteCorner { col: to.0, col_px: 32, row: to.1, row_px: 8 },
+            size_pt: Some((224.25, 89.25)),
+        }),
+    };
+    wb.sheet_mut(0).unwrap().comments_mut().insert(cell, note);
+    let bytes = write_xlsx(&wb).unwrap();
+    let vml = written_vml(&bytes);
+    assert!(vml.contains(&format!("<x:Anchor>{anchor}</x:Anchor>")), "{vml}");
+    assert!(vml.contains("width:224.25pt;height:89.25pt"), "{vml}");
+    let (reopened, _) = read_xlsx(&bytes).unwrap();
+    let note = &reopened.sheets[0].comments[&cell];
+    assert_eq!(note.author, "Anchor author");
+    assert_eq!(note.text, "Anchor overflow regression");
+}
+
+#[test]
+fn a_notes_box_with_extreme_offsets_is_clamped_on_both_axes() {
+    assert_saved_note_box(b2(), (i64::MIN, i64::MIN), (i64::MAX, i64::MAX), "0, 10, 0, 2, 16383, 32, 1048575, 8");
+}
+
+#[test]
+fn a_notes_box_with_extreme_row_offsets_keeps_ordinary_columns() {
+    assert_saved_note_box(b2(), (0, i64::MIN), (4, i64::MAX), "1, 10, 0, 2, 5, 32, 1048575, 8");
+}
+
+#[test]
+fn a_notes_box_with_extreme_column_offsets_keeps_ordinary_rows() {
+    assert_saved_note_box(b2(), (i64::MIN, -1), (i64::MAX, 4), "0, 10, 0, 2, 16383, 32, 5, 8");
+}
+
+#[test]
+fn a_notes_box_keeps_ordinary_negative_offsets_and_clamps_at_the_upper_edge() {
+    assert_saved_note_box(CellRef::new(2, 2), (-1, -2), (4, 4), "1, 10, 0, 2, 6, 32, 6, 8");
+    assert_saved_note_box(CellRef::new(1048574, 16382), (-1, -1), (4, 4), "16381, 10, 1048573, 2, 16383, 32, 1048575, 8");
+}
+
 #[test]
 fn a_new_note_gets_the_default_box() {
     let mut wb = Workbook::new();
