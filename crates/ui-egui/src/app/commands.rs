@@ -23,7 +23,7 @@ impl SheetApp {
         if id.starts_with("file.") || switches_window {
             self.settle_drafts()?;
         }
-        if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes") {
+        if matches!(id, "file.analyzeSave" | "file.save" | "file.saveAs" | "file.saveBytes") {
             self.store_view_state();
         }
         if matches!(

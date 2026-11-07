@@ -67,8 +67,8 @@ fn save_losses_stale_confirmation_cannot_write_after_an_edit() {
 fn save_losses_control_app_save_forwards_explicit_confirmation() {
     let mut h = harness();
     let path = std::env::temp_dir().join(format!("gridcraft-control-loss-{}-{}.xlsx", std::process::id(), h.state().session.doc().unwrap().uid));
-    // First call also settles the UI view, so the analysis is of exactly the reviewed state.
-    assert!(h.state_mut().run("file.save", json!({"path":path})).is_err());
+    h.state_mut().run("selection.set", json!({"cell":"F51"})).unwrap();
+    h.state_mut().view_mut().unwrap().scroll.y = 1000.0;
     let a = h.state_mut().run("file.analyzeSave", json!({"path":path})).unwrap();
     let ctx = h.ctx.clone();
     let outcome = gridcraft_ui_egui::control::handle(
@@ -99,4 +99,23 @@ fn save_losses_backstage_download_waits_for_explicit_decision() {
     let files = files.lock().unwrap();
     assert_eq!(files.len(), 1);
     assert!(String::from_utf8_lossy(&files[0]).contains("Region"));
+}
+
+#[test]
+fn save_losses_analysis_still_rejects_a_subsequent_edit() {
+    let mut h = harness();
+    h.state_mut().run("selection.set", json!({"cell":"F51"})).unwrap();
+    h.state_mut().view_mut().unwrap().scroll.y = 1000.0;
+    let a = h.state_mut().run("file.analyzeSave", json!({"path":"Book1.xlsx"})).unwrap();
+    h.state_mut().run("cell.set", json!({"cell":"B5", "input":"new content"})).unwrap();
+    let error = h
+        .state_mut()
+        .run(
+            "file.saveBytes",
+            json!({"format":"xlsx", "expectedRevision":a["revision"], "expectedDocument":a["document"], "confirmedLosses":["feature.omitted"]}),
+        )
+        .unwrap_err();
+    let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+    assert_eq!(error["error"], "save.stale");
+    assert!(h.state().dialog.is_none());
 }

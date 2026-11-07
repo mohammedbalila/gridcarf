@@ -120,6 +120,11 @@ pub(crate) fn analyze_sheet(doc: &DocState, path: &str, sheet: usize) -> Result<
             }
             if kind == FileKind::Html {
                 for (present, feature, description) in [
+                    (
+                        html_omits_hidden_cell_data(sh),
+                        "hidden cell data",
+                        "This web page omits cell data in hidden rows, and in hidden columns when pictures or charts determine its layout.",
+                    ),
                     (!sh.hyperlinks.is_empty(), "hyperlinks", "Link text is retained, but hyperlink targets are omitted."),
                     (!sh.cond_formats.is_empty(), "conditional formatting", "Conditional formatting rules and their appearance are omitted."),
                 ] {
@@ -170,6 +175,12 @@ pub(crate) fn analyze_sheet(doc: &DocState, path: &str, sheet: usize) -> Result<
         }
     }
     Ok(SaveAnalysis { document: doc.uid, revision: doc.revision, path: path.into(), issues })
+}
+
+fn html_omits_hidden_cell_data(sheet: &gridcraft_model::Sheet) -> bool {
+    // Match to_html: rows are always skipped; hidden columns only in its fixed layout.
+    let fixed = !(sheet.images.is_empty() && sheet.charts.is_empty());
+    sheet.cells.iter().any(|(cell, value)| value.has_content() && (sheet.is_row_hidden(cell.row) || (fixed && sheet.is_col_hidden(cell.col))))
 }
 
 fn has_unadjusted_references(kept: &Preserved) -> bool {

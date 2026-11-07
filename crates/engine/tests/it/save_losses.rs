@@ -254,3 +254,64 @@ fn html_reports_hyperlink_and_conditional_format_omissions() {
         assert!(s.execute_headless("file.saveBytes", json!({"format":"html"})).is_err());
     }
 }
+
+fn html_hidden_data(hidden_row: bool, picture: bool) -> Session {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("cell.set", json!({"cell":"A1", "input":"visible marker"})).unwrap();
+    s.execute("cell.set", json!({"cell":"B2", "input":"hidden marker"})).unwrap();
+    if hidden_row {
+        s.execute("home.hideRows", json!({"rows":"2:2"})).unwrap();
+    } else {
+        s.execute("home.hideColumns", json!({"cols":"B:B"})).unwrap();
+    }
+    if picture {
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        s.execute("insert.picture", json!({"base64":io::base64_encode(png.get_ref()), "at":"D1"})).unwrap();
+    }
+    s
+}
+
+#[test]
+fn html_hidden_data_requires_acknowledgement_before_any_output() {
+    for hidden_row in [true, false] {
+        let mut s = html_hidden_data(hidden_row, !hidden_row);
+        let path = target(&s, "html");
+        std::fs::write(&path, b"original destination").unwrap();
+        let a = analyze(&mut s, &path);
+        assert!(a["issues"].as_array().unwrap().iter().any(|i| i["feature"] == "hidden cell data" && i["code"] == "feature.omitted"), "{a}");
+        for command in ["file.save", "file.exportHtml", "file.saveBytes"] {
+            let mut p = json!({"path":path, "format":"html"});
+            assert!(s.execute_headless(command, p.clone()).is_err(), "{command} wrote hidden data without a decision");
+            assert_eq!(std::fs::read(&path).unwrap(), b"original destination");
+            p["expectedDocument"] = a["document"].clone();
+            p["expectedRevision"] = a["revision"].clone();
+            p["confirmedLosses"] = json!(["feature.omitted"]);
+            let result = s.execute_headless(command, p).unwrap();
+            let bytes = if command == "file.saveBytes" {
+                io::base64_decode(result["base64"].as_str().unwrap()).unwrap()
+            } else {
+                std::fs::read(&path).unwrap()
+            };
+            let html = String::from_utf8(bytes).unwrap();
+            assert!(html.contains("visible marker"));
+            assert!(!html.contains("hidden marker"));
+            std::fs::write(&path, b"original destination").unwrap();
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn html_keeps_hidden_column_data_without_fixed_layout() {
+    let mut s = html_hidden_data(false, false);
+    let a = analyze(&mut s, "copy.html");
+    assert!(a["issues"].as_array().unwrap().is_empty(), "{a}");
+    let result = s.execute_headless("file.saveBytes", json!({"format":"html"})).unwrap();
+    let bytes = io::base64_decode(result["base64"].as_str().unwrap()).unwrap();
+    assert!(String::from_utf8(bytes).unwrap().contains("hidden marker"));
+    s.execute("cell.set", json!({"cell":"B2", "input":""})).unwrap();
+    s.execute("home.hideRows", json!({"rows":"2:2"})).unwrap();
+    assert!(analyze(&mut s, "copy.html")["issues"].as_array().unwrap().is_empty(), "empty hidden rows contain no omitted data");
+}
