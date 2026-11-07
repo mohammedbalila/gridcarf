@@ -319,7 +319,39 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
 
 #[cfg(test)]
 mod fit_tests {
+    use super::compute::aggregation_too_large;
     use super::data_cols_exceed_sheet;
+
+    #[test]
+    fn aggregation_budget_preserves_one_field_group_limit() {
+        assert!(!aggregation_too_large(5_000_000, 1));
+        assert!(aggregation_too_large(5_000_001, 1));
+    }
+
+    #[test]
+    fn aggregation_budget_preserves_zero_width_group_limit() {
+        assert!(!aggregation_too_large(0, 0));
+        assert!(!aggregation_too_large(0, usize::MAX));
+        assert!(!aggregation_too_large(1, 0));
+        assert!(!aggregation_too_large(5_000_000, 0));
+        assert!(aggregation_too_large(5_000_001, 0));
+    }
+
+    #[test]
+    fn aggregation_budget_counts_all_accumulator_columns() {
+        assert!(!aggregation_too_large(5_000_000, 2));
+        assert!(!aggregation_too_large(2_500_000, 4));
+        assert!(aggregation_too_large(2_500_001, 4));
+        assert!(aggregation_too_large(40_000, 256));
+        assert!(aggregation_too_large(1_000_000, 257));
+        assert!(!aggregation_too_large(3_000_000, 3));
+    }
+
+    #[test]
+    fn aggregation_budget_refuses_multiplication_overflow() {
+        assert!(aggregation_too_large(2, usize::MAX / 2 + 1));
+        assert!(aggregation_too_large(usize::MAX, usize::MAX));
+    }
 
     #[test]
     fn column_budget_counts_value_fields_and_grand_total() {

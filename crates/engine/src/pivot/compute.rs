@@ -94,6 +94,14 @@ struct AggregateData {
     col_leaves: HashSet<Vec<u32>>,
 }
 
+const MAX_AGG_ENTRIES: usize = 5_000_000;
+// Counting groups alone lets wide reports allocate too many value and calculated-source accumulators.
+const MAX_ACCUMULATORS: usize = 10_000_000;
+
+pub(super) fn aggregation_too_large(entries: usize, per_entry: usize) -> bool {
+    entries > MAX_AGG_ENTRIES || entries.saturating_mul(per_entry.max(1)) > MAX_ACCUMULATORS
+}
+
 fn aggregate_record(
     input: &AggregateInput<'_>,
     data: &mut AggregateData,
@@ -152,7 +160,7 @@ fn aggregate_record(
     if !input.cols.is_empty() && data_cols_exceed_sheet(data.col_leaves.len(), input.pt.grand_totals_rows, input.vals.len()) {
         return Err("The PivotTable report will not fit on the sheet.".into());
     }
-    if data.aggs.len() > 5_000_000 {
+    if aggregation_too_large(data.aggs.len(), input.vals.len() + input.extra.len()) {
         return Err("The PivotTable report is too large.".into());
     }
     Ok(())
@@ -713,4 +721,90 @@ pub(super) fn compute_from(wb: &Workbook, pt: &PivotTable, src: &Source, mut pro
         }
     }
     Ok(Output { width: g.width as u32, grid: g.rows, row_kinds: g.kinds, body_offset, chart_rows, chart_cols, label_col })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gridcraft_model::PivotCalcField;
+
+    fn aggregate_with_seeded_cardinality(include_calculated: bool, empty: bool) -> (Result<(), String>, AggregateData) {
+        let wb = Workbook::new();
+        let mut pt = PivotTable {
+            values: vec![PivotValue { source_col: "V".into(), ..PivotValue::default() }; 256],
+            calculated_fields: vec![PivotCalcField { name: "Double".into(), formula: "=V*2".into() }],
+            ..PivotTable::default()
+        };
+        if include_calculated {
+            pt.values[255].source_col = "Double".into();
+        }
+        if empty {
+            pt.values.clear();
+        }
+        let src = Source {
+            sheet: 0,
+            range: gridcraft_core::RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 0)),
+            headers: vec!["V".into()],
+            formats: vec!["General".into()],
+            numeric: vec![true],
+            dates: vec![false],
+            rows: vec![vec![Value::Number(2.0)]],
+        };
+        let calc = CalcSet::new(&pt, &src.headers);
+        let vals: Vec<_> =
+            pt.values.iter().map(|value| (if value.source_col == "Double" { ValSrc::Calc(0) } else { ValSrc::Col(0) }, value)).collect();
+        let extra = calculated_source_columns(&vals, &calc, &src);
+        // Internal cardinality fixture, not a complete report: these groups are never visited,
+        // so omit their accumulators instead of allocating ten million of them.
+        let mut data = AggregateData { aggs: (0..38_910).map(|group| ((vec![group], vec![]), vec![])).collect(), ..AggregateData::default() };
+        let input = AggregateInput {
+            wb: &wb,
+            pt: &pt,
+            src: &src,
+            rows: &[],
+            cols: &[],
+            vals: &vals,
+            extra: &extra,
+            filters: &[],
+            filter_fmts: &[],
+            filter_sets: &[],
+            row_fmts: &[],
+            col_fmts: &[],
+            empty,
+        };
+        let result = aggregate_record(&input, &mut data, &mut None, 0, &src.rows[0]);
+        (result, data)
+    }
+
+    #[test]
+    fn aggregate_record_counts_calculated_source_accumulators() {
+        let (result, data) = aggregate_with_seeded_cardinality(true, false);
+        // 38,911 groups x 257 accumulators exceeds the budget; x 256 would fit.
+        assert_eq!(result, Err("The PivotTable report is too large.".into()));
+        assert_eq!(data.aggs.len(), 38_911);
+        let inserted = data.aggs.get(&(vec![], vec![])).unwrap();
+        assert_eq!(inserted.len(), 257);
+        assert_eq!(inserted[256].result(PivotFunc::Sum), Value::Number(2.0));
+    }
+
+    #[test]
+    fn aggregate_record_accepts_values_only_with_same_group_count() {
+        let (result, data) = aggregate_with_seeded_cardinality(false, false);
+        assert_eq!(result, Ok(()));
+        assert_eq!(data.aggs.len(), 38_911);
+        let inserted = data.aggs.get(&(vec![], vec![])).unwrap();
+        assert_eq!(inserted.len(), 256);
+        assert_eq!(inserted[255].result(PivotFunc::Sum), Value::Number(2.0));
+    }
+
+    #[test]
+    fn aggregate_record_skips_empty_report() {
+        let (result, data) = aggregate_with_seeded_cardinality(false, true);
+        assert_eq!(result, Ok(()));
+        assert_eq!(data.aggs.len(), 38_910);
+        assert!(!data.aggs.contains_key(&(vec![], vec![])));
+        assert!(data.row_set.is_empty());
+        assert!(data.col_set.is_empty());
+        assert!(data.col_leaves.is_empty());
+    }
 }

@@ -95,3 +95,24 @@ EOF, invalid UTF-8, one-byte-over payloads and exactly one following ping respon
 cargo test --locked -p gridcraft-mcp framing_
 cargo test --locked -p gridcraft-mcp
 ~~~
+
+## PivotTable accumulator budget includes width
+
+[Accumulator-budget source: PR #2327](https://github.com/storytold/gridcraft/pull/2327),
+reviewed at e3934e2ec3f1ceed721d08c843bf0ea48e1df4d0.
+
+Aggregation retains the existing 5,000,000-group cap and adds a 10,000,000 total
+accumulator cap, counting ordinary values and calculated-source accumulator columns.
+Saturating multiplication prevents overflow from bypassing the budget; zero-width
+reports retain the group limit. The existing error and post-record check stay in place.
+
+Tests cover inclusive boundaries, wide reports, empty/zero-width input and overflow.
+A small internal cardinality fixture checks the actual aggregation guard and its
+calculated-source width without allocating millions of accumulators. It is not a
+complete large report or a memory measurement. Per-record transient overshoot and
+map/key overhead remain outside this count-based guard.
+
+~~~sh
+cargo test --locked -p gridcraft-engine pivot::
+cargo test --locked -p gridcraft-engine
+~~~
