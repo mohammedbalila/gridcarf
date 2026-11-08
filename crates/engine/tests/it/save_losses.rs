@@ -315,3 +315,196 @@ fn html_keeps_hidden_column_data_without_fixed_layout() {
     s.execute("home.hideRows", json!({"rows":"2:2"})).unwrap();
     assert!(analyze(&mut s, "copy.html")["issues"].as_array().unwrap().is_empty(), "empty hidden rows contain no omitted data");
 }
+
+#[path = "../support/owned_directory.rs"]
+mod phonetic_directory;
+use gridcraft_engine::model::{PhoneticProps, PhoneticRun, PhoneticString};
+
+fn phonetic(reading: &str) -> PhoneticString {
+    PhoneticString { text: "東".into(), runs: vec![PhoneticRun { start: 0, end: 1, text: reading.into() }], props: None }
+}
+fn phonetic_session(annotations: Vec<PhoneticString>) -> Session {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("cell.set", json!({"cell":"A1", "input":"東"})).unwrap();
+    Arc::make_mut(&mut s.doc_mut().unwrap().wb).phonetics = annotations;
+    s
+}
+fn phonetic_dir(s: &Session) -> phonetic_directory::Directory {
+    phonetic_directory::Directory::acquire(
+        (0..).map(|n| std::env::temp_dir().join(format!("gridcraft-phonetic-{}-{}-{n}", std::process::id(), s.doc().unwrap().uid))),
+    )
+    .unwrap()
+}
+fn annotation_issue(a: &Value) -> &Value {
+    let issues = a["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{a}");
+    let issue = &issues[0];
+    assert_eq!(issue["feature"], "phonetic annotations");
+    assert_eq!(issue["code"], "feature.omitted");
+    assert_eq!(issue["location"], Value::Null);
+    assert_eq!(issue["effect"], "omitted");
+    assert_eq!(issue["editability"], "preservedOnly");
+    for private in ["東", "ヒガシ", "アズマ", "private property"] {
+        assert!(!a.to_string().contains(private), "{a}");
+    }
+    issue
+}
+fn saved_phonetics(s: &mut Session, format: &str, a: &Value) -> Vec<PhoneticString> {
+    let mut p = if a["issues"].as_array().unwrap().is_empty() { json!({}) } else { confirm(a, &format!("copy.{format}")) };
+    p["format"] = json!(format);
+    let out = s.execute_headless("file.saveBytes", p).unwrap();
+    let bytes = io::base64_decode(out["base64"].as_str().unwrap()).unwrap();
+    io::open_bytes(&format!("copy.{format}"), &bytes).unwrap().0.phonetics
+}
+
+#[test]
+fn phonetic_flat_saves_require_a_decision_and_really_omit_metadata() {
+    let mut description = None;
+    for ext in ["csv", "tsv", "html"] {
+        for property_only in [false, true] {
+            let mut p = phonetic("ヒガシ");
+            if property_only {
+                p.runs.clear();
+                p.props = Some(PhoneticProps::default());
+            }
+            let mut s = phonetic_session(vec![p]);
+            let dir = phonetic_dir(&s);
+            let path = dir.join(format!("copy.{ext}")).to_str().unwrap().to_owned();
+            std::fs::write(&path, b"owned sentinel").unwrap();
+            let a = analyze(&mut s, &path);
+            let issue = annotation_issue(&a);
+            if let Some(expected) = &description {
+                assert_eq!(&issue["description"], expected);
+            } else {
+                description = Some(issue["description"].clone());
+            }
+            for (command, params) in [("file.save", json!({"path":path})), ("file.saveBytes", json!({"format":ext}))] {
+                let err = s.execute_headless(command, params).unwrap_err();
+                let failure: Value = serde_json::from_str(&err.to_string()).unwrap();
+                assert_eq!(failure["error"], "save.losses");
+                annotation_issue(&failure["analysis"]);
+                assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+                assert!(s.doc().unwrap().is_dirty());
+                assert!(s.ui_requests.is_empty());
+            }
+            s.execute_headless("file.save", confirm(&a, &path)).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            assert!(text.contains("東"));
+            assert!(!text.contains("ヒガシ") && !text.contains("<ruby"));
+            if ext != "html" {
+                assert!(io::open_bytes(&path, &bytes).unwrap().0.phonetics.is_empty());
+            }
+        }
+    }
+    let mut s = phonetic_session(vec![PhoneticString { text: "東".into(), runs: vec![], props: None }]);
+    for ext in ["csv", "tsv", "html"] {
+        assert!(analyze(&mut s, &format!("copy.{ext}"))["issues"].as_array().unwrap().is_empty());
+        s.execute_headless("file.saveBytes", json!({"format":ext})).unwrap();
+    }
+}
+
+#[test]
+fn phonetic_xlsx_known_losses_refuse_and_acknowledgement_matches_real_codec() {
+    let normal = phonetic("ヒガシ");
+    let mut cases = Vec::new();
+    for (start, end, reading) in [(0, 99, "ヒガシ"), (0, 0, "ヒガシ"), (1, 0, "ヒガシ"), (9, 10, "ヒガシ"), (0, 1, "")] {
+        let mut p = normal.clone();
+        p.runs = vec![PhoneticRun { start, end, text: reading.into() }];
+        cases.push(vec![p]);
+    }
+    for (kind, alignment) in [(Some("private property"), None), (None, Some("private property")), (Some(" Hiragana"), Some("center "))] {
+        let mut p = normal.clone();
+        p.props = Some(PhoneticProps { font_id: 0, kind: kind.map(str::to_owned), alignment: alignment.map(str::to_owned) });
+        cases.push(vec![p]);
+    }
+    cases.push(vec![normal.clone(), phonetic("アズマ")]);
+    cases.push(vec![normal.clone(), PhoneticString { text: "東".into(), runs: vec![], props: None }]);
+    for annotations in cases {
+        let mut s = phonetic_session(annotations);
+        let dir = phonetic_dir(&s);
+        let path = dir.join("copy.xlsx").to_str().unwrap().to_owned();
+        std::fs::write(&path, b"owned sentinel").unwrap();
+        let a = analyze(&mut s, &path);
+        annotation_issue(&a);
+        assert!(s.execute_headless("file.save", json!({"path":path})).is_err());
+        assert!(s.execute_headless("file.saveBytes", json!({"format":"xlsx"})).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+        assert!(s.doc().unwrap().is_dirty());
+        assert!(s.ui_requests.is_empty());
+    }
+    let mut clamped = normal.clone();
+    clamped.runs[0].end = 99;
+    clamped.props = Some(PhoneticProps { font_id: 0, kind: Some("private property".into()), alignment: Some("center".into()) });
+    let mut s = phonetic_session(vec![phonetic("アズマ"), clamped]);
+    let a = analyze(&mut s, "copy.xlsx");
+    let mut expected = normal;
+    expected.props = Some(PhoneticProps { font_id: 0, kind: None, alignment: Some("center".into()) });
+    assert_eq!(saved_phonetics(&mut s, "xlsx", &a), vec![expected]);
+}
+
+#[test]
+fn phonetic_supported_xlsx_and_exact_json_are_not_blocked() {
+    let normal = phonetic("ヒガシ");
+    let empty = PhoneticString { text: "東".into(), runs: vec![], props: None };
+    let mut props = empty.clone();
+    props.props = Some(PhoneticProps::default());
+    let mut supported = normal.clone();
+    supported.props = Some(PhoneticProps { font_id: 0, kind: Some("Hiragana".into()), alignment: Some("left".into()) });
+    let supplementary =
+        PhoneticString { text: "東😀".into(), runs: vec![PhoneticRun { start: 1, end: 3, text: "ヒガシ".into() }], props: None };
+    for (annotations, expected) in [
+        (vec![], vec![]),
+        (vec![empty.clone()], vec![]),
+        (vec![normal.clone()], vec![normal.clone()]),
+        (vec![props.clone()], vec![props]),
+        (vec![supported.clone()], vec![supported]),
+        (vec![normal.clone(), normal.clone()], vec![normal.clone()]),
+        (vec![empty, normal.clone()], vec![normal.clone()]),
+        (vec![supplementary.clone()], vec![supplementary]),
+    ] {
+        let mut s = phonetic_session(annotations);
+        s.execute("cell.set", json!({"cell":"B1", "input":"東😀"})).unwrap();
+        let a = analyze(&mut s, "copy.xlsx");
+        assert!(a["issues"].as_array().unwrap().is_empty(), "{a}");
+        assert_eq!(saved_phonetics(&mut s, "xlsx", &a), expected);
+    }
+    let mut unusual = normal.clone();
+    unusual.runs = vec![PhoneticRun { start: u32::MAX, end: 0, text: "".into() }];
+    unusual.props = Some(PhoneticProps { font_id: 91, kind: Some("private property".into()), alignment: Some(" odd ".into()) });
+    let exact = vec![normal.clone(), unusual.clone(), normal, unusual];
+    let mut s = phonetic_session(exact.clone());
+    let a = analyze(&mut s, "copy.json");
+    assert!(a["issues"].as_array().unwrap().is_empty(), "{a}");
+    assert_eq!(saved_phonetics(&mut s, "json", &a), exact);
+}
+
+#[test]
+fn phonetic_decisions_remain_document_revision_and_code_scoped() {
+    let mut s = phonetic_session(vec![phonetic("ヒガシ"); 200]);
+    let dir = phonetic_dir(&s);
+    let path = dir.join("copy.csv").to_str().unwrap().to_owned();
+    std::fs::write(&path, b"owned sentinel").unwrap();
+    let a = analyze(&mut s, &path);
+    annotation_issue(&a);
+    let json_analysis = analyze(&mut s, "copy.json");
+    assert!(json_analysis["issues"].as_array().unwrap().is_empty());
+    let mut wrong_document = confirm(&a, &path);
+    wrong_document["expectedDocument"] = json!(a["document"].as_u64().unwrap() + 1);
+    let mut missing_codes = confirm(&a, &path);
+    missing_codes["confirmedLosses"] = json!([]);
+    for p in [wrong_document, missing_codes, confirm(&json_analysis, &path)] {
+        assert!(s.execute_headless("file.save", p).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+    }
+    s.execute("cell.set", json!({"cell":"B1", "input":"revision change"})).unwrap();
+    assert!(s.execute_headless("file.save", confirm(&a, &path)).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+    assert!(s.doc().unwrap().is_dirty());
+    let fresh = analyze(&mut s, &path);
+    assert_eq!(annotation_issue(&a), annotation_issue(&fresh));
+    s.execute_headless("file.save", confirm(&fresh, &path)).unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.contains("東") && !text.contains("ヒガシ"));
+}

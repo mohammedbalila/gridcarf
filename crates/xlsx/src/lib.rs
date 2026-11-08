@@ -54,6 +54,13 @@ pub fn formula_needs_array(wb: &Workbook, sheet: usize, cell: gridcraft_core::Ce
     array_formula::needs_array(wb, sheet, cell, formula)
 }
 
+/// Detects known writer-local phonetic run/property changes and distinct last-wins duplicate loss.
+/// Does not check whether an annotation's base is in the emitted shared string table.
+/// Index scratch is bounded; inability to diagnose returns [`IoError::TooLarge`].
+pub fn xlsx_known_phonetic_loss(wb: &Workbook) -> Result<bool, IoError> {
+    write::known_phonetic_loss_with_budget(&wb.phonetics, write::PHONETIC_INDEX_BYTES)
+}
+
 pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
 pub use ods::read_ods;

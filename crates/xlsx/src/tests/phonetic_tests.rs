@@ -176,3 +176,96 @@ fn comments_and_inline_strings_still_ignore_phonetic_runs() {
     // Neither path has a shared string table entry to key phonetic data by.
     assert!(wb.phonetics.is_empty());
 }
+
+#[test]
+fn phonetic_known_loss_diagnostic_matches_xml_normalization_and_last_winner() {
+    let run = |start, end, text: &str| PhoneticRun { start, end, text: text.into() };
+    let normal = PhoneticString { text: "東😀".into(), runs: vec![run(1, 3, "reading")], props: None };
+    let empty = PhoneticString { text: normal.text.clone(), runs: vec![], props: None };
+    let mut other = normal.clone();
+    other.runs[0].text = "last reading".into();
+    let mut property = empty.clone();
+    property.props = Some(PhoneticProps::default());
+    for (annotations, loss, expected) in [
+        (vec![], false, vec![]),
+        (vec![empty.clone()], false, vec![]),
+        (vec![normal.clone(), normal.clone()], false, vec![normal.clone()]),
+        (vec![empty.clone(), normal.clone()], false, vec![normal.clone()]),
+        (vec![normal.clone(), empty], true, vec![]),
+        (vec![normal.clone(), other.clone()], true, vec![other]),
+        (vec![property.clone(), normal.clone()], true, vec![normal.clone()]),
+        (vec![normal.clone(), property.clone()], true, vec![property]),
+    ] {
+        let mut wb = Workbook::new();
+        text_cell(wb.sheet_mut(0).unwrap(), "A1", "東😀");
+        wb.phonetics = annotations;
+        let before = wb.phonetics.clone();
+        assert_eq!(crate::xlsx_known_phonetic_loss(&wb).unwrap(), loss);
+        assert_eq!(wb.phonetics, before, "diagnosis is read-only");
+        assert_eq!(read_xlsx(&write_xlsx(&wb).unwrap()).unwrap().0.phonetics, expected);
+    }
+    for (start, end, reading, expected) in [
+        (0, 99, "clamped", vec![run(0, 3, "clamped")]),
+        (1, 1, "empty range", vec![]),
+        (3, 1, "reversed", vec![]),
+        (9, 99, "outside", vec![]),
+        (0, 1, "", vec![]),
+    ] {
+        let mut wb = Workbook::new();
+        text_cell(wb.sheet_mut(0).unwrap(), "A1", "東😀");
+        wb.phonetics = vec![PhoneticString { text: "東😀".into(), runs: vec![run(start, end, reading)], props: None }];
+        assert!(crate::xlsx_known_phonetic_loss(&wb).unwrap());
+        let bytes = write_xlsx(&wb).unwrap();
+        let sst = part(&bytes, "xl/sharedStrings.xml");
+        if expected.is_empty() {
+            assert!(!sst.contains("<rPh"), "{sst}");
+            assert!(read_xlsx(&bytes).unwrap().0.phonetics.is_empty());
+        } else {
+            assert!(sst.contains(r#"<rPh sb="0" eb="3"><t>clamped</t></rPh>"#), "{sst}");
+            assert_eq!(read_xlsx(&bytes).unwrap().0.phonetics[0].runs, expected);
+        }
+    }
+    for (kind, alignment, loss) in [
+        ("halfwidthKatakana", "noControl", false),
+        ("fullwidthKatakana", "left", false),
+        ("Hiragana", "center", false),
+        ("noConversion", "distributed", false),
+        ("unknown", "center", true),
+        ("Hiragana", "unknown", true),
+        (" Hiragana", "left ", true),
+    ] {
+        let mut wb = Workbook::new();
+        text_cell(wb.sheet_mut(0).unwrap(), "A1", "東😀");
+        let props = PhoneticProps { font_id: 0, kind: Some(kind.into()), alignment: Some(alignment.into()) };
+        wb.phonetics = vec![PhoneticString { props: Some(props.clone()), ..normal.clone() }];
+        assert_eq!(crate::xlsx_known_phonetic_loss(&wb).unwrap(), loss);
+        let bytes = write_xlsx(&wb).unwrap();
+        let back = read_xlsx(&bytes).unwrap().0;
+        if loss {
+            assert_ne!(back.phonetics[0].props, Some(props));
+            let sst = part(&bytes, "xl/sharedStrings.xml");
+            assert!(!sst.contains("unknown") && !sst.contains(" Hiragana") && !sst.contains("left "));
+        } else {
+            assert_eq!(back.phonetics, wb.phonetics);
+        }
+    }
+    let mut unused = Workbook::new();
+    unused.phonetics = vec![normal];
+    assert!(!crate::xlsx_known_phonetic_loss(&unused).unwrap(), "used-SST membership is explicitly outside this diagnostic");
+    assert!(read_xlsx(&write_xlsx(&unused).unwrap()).unwrap().0.phonetics.is_empty());
+}
+
+#[test]
+fn phonetic_diagnostic_index_budget_and_arithmetic_fail_closed() {
+    use crate::write::{check_phonetic_index_bytes, known_phonetic_loss_with_budget};
+    let width = std::mem::size_of::<usize>();
+    let limit = 8 * 1024 * 1024;
+    assert!(check_phonetic_index_bytes(limit / width, usize::MAX).is_ok());
+    for (count, budget) in [(limit / width + 1, usize::MAX), (usize::MAX, usize::MAX), (1, width - 1)] {
+        assert!(matches!(check_phonetic_index_bytes(count, budget), Err(crate::IoError::TooLarge(_))));
+    }
+    let normal = PhoneticString { text: "東".into(), runs: vec![PhoneticRun { start: 0, end: 1, text: "reading".into() }], props: None };
+    assert!(!known_phonetic_loss_with_budget(&[normal.clone(), normal.clone()], 2 * width).unwrap());
+    assert!(matches!(known_phonetic_loss_with_budget(&[normal], width - 1), Err(crate::IoError::TooLarge(_))));
+    assert!(!known_phonetic_loss_with_budget(&[], 0).unwrap());
+}

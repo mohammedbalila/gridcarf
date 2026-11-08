@@ -520,6 +520,21 @@ pub fn t_el(s: &str) -> String {
     }
 }
 
+fn phonetic_run_bounds(r: &PhoneticRun, len: u32) -> Option<(u32, u32)> {
+    let (start, end) = (r.start.min(len), r.end.min(len));
+    (start < end && !r.text.is_empty()).then_some((start, end))
+}
+
+/// Only the writer-local run/property changes; emitted-SST membership is not checked.
+pub(crate) fn phonetic_local_loss(p: &PhoneticString) -> bool {
+    let len = u32::try_from(p.text.encode_utf16().count()).unwrap_or(u32::MAX);
+    p.runs.iter().any(|r| phonetic_run_bounds(r, len) != Some((r.start, r.end)))
+        || p.props.as_ref().is_some_and(|pr| {
+            pr.kind.as_deref().is_some_and(|k| !PHONETIC_KINDS.contains(&k))
+                || pr.alignment.as_deref().is_some_and(|a| !PHONETIC_ALIGNMENTS.contains(&a))
+        })
+}
+
 /// The contents of a shared string item (`<si>`): the base text, then — when the string has
 /// phonetic (furigana) data — its `<rPh sb="…" eb="…"><t>…</t></rPh>` runs in document order and
 /// its `<phoneticPr …/>`. Behaviour reference: ISO/IEC 29500-1 §18.4.8 `si` with §18.4.6 `rPh` and
@@ -537,11 +552,7 @@ pub fn si_body(text: &str, phonetic: Option<&PhoneticString>) -> String {
     // value). Damaged data is dropped, never written back invalid.
     let len = u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX);
     for r in &p.runs {
-        let start = r.start.min(len);
-        let end = r.end.min(len);
-        if start >= end || r.text.is_empty() {
-            continue;
-        }
+        let Some((start, end)) = phonetic_run_bounds(r, len) else { continue };
         let _ = write!(s, "<rPh sb=\"{start}\" eb=\"{end}\">{}</rPh>", t_el(&r.text));
     }
     if let Some(pr) = &p.props {

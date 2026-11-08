@@ -48,6 +48,22 @@ pub(crate) fn analyze_sheet(doc: &DocState, path: &str, sheet: usize) -> Result<
         issues.push(CompatibilityIssue::new(feature, location, effect, editability, description));
     };
     let flat = matches!(kind, FileKind::Csv | FileKind::Tsv | FileKind::Html);
+    let phonetic_loss = if flat {
+        doc.wb.phonetics.iter().any(|p| !p.runs.is_empty() || p.props.is_some())
+    } else if kind == FileKind::Xlsx {
+        gridcraft_xlsx::xlsx_known_phonetic_loss(&doc.wb).map_err(|e| EngineError::Other(e.to_string()))?
+    } else {
+        false
+    };
+    if phonetic_loss {
+        add(
+            "phonetic annotations",
+            None,
+            Effect::Omitted,
+            Editability::PreservedOnly,
+            "This destination omits or changes known phonetic annotation data.",
+        );
+    }
     if doc.wb.vba_project.is_some() && (flat || (kind == FileKind::Xlsx && !gridcraft_xlsx::XlsxKind::from_path(path).is_macro_enabled())) {
         add(
             "VBA project",

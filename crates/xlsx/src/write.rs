@@ -104,6 +104,37 @@ impl Sst {
     }
 }
 
+/// Logical index scratch only; this does not bound the workbook, allocator overhead or RSS.
+pub(crate) const PHONETIC_INDEX_BYTES: usize = 8 * 1024 * 1024;
+
+pub(crate) fn check_phonetic_index_bytes(count: usize, budget: usize) -> Result<(), IoError> {
+    if count.checked_mul(std::mem::size_of::<usize>()).is_none_or(|bytes| bytes > budget.min(PHONETIC_INDEX_BYTES)) {
+        return Err(IoError::TooLarge("phonetic diagnostic index exceeds its scratch budget".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn known_phonetic_loss_with_budget(phonetics: &[PhoneticString], budget: usize) -> Result<bool, IoError> {
+    check_phonetic_index_bytes(phonetics.len(), budget)?;
+    if phonetics.iter().any(crate::xml::phonetic_local_loss) {
+        return Ok(true);
+    }
+    // Borrow through one fallible index rather than clone text or scan cells per annotation.
+    let mut indices = Vec::new();
+    indices.try_reserve_exact(phonetics.len()).map_err(|_| IoError::TooLarge("cannot reserve phonetic diagnostic index".into()))?;
+    indices.extend(0..phonetics.len());
+    indices.sort_unstable_by(|&a, &b| phonetics[a].text.cmp(&phonetics[b].text).then_with(|| a.cmp(&b)));
+    for group in indices.chunk_by(|&a, &b| phonetics[a].text == phonetics[b].text) {
+        if let Some((&last, earlier)) = group.split_last() {
+            // HashMap collection in write_xlsx selects the last entry in original Vec order.
+            if earlier.iter().any(|&i| (!phonetics[i].runs.is_empty() || phonetics[i].props.is_some()) && phonetics[i] != phonetics[last]) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Package being assembled.
 pub struct Out {
     parts: Vec<(String, Vec<u8>)>,
