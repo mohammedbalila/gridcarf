@@ -622,26 +622,31 @@ fn run_props(f: &ShapeFormat, theme: &Theme) -> (String, String) {
 
 /// File extension for an image MIME type.
 pub fn image_ext(mime: &str, data: &[u8]) -> &'static str {
-    match mime.to_ascii_lowercase().as_str() {
-        "image/png" => "png",
-        "image/jpeg" | "image/jpg" => "jpeg",
-        "image/gif" => "gif",
-        "image/bmp" => "bmp",
-        "image/tiff" => "tiff",
-        "image/svg+xml" => "svg",
-        "image/x-emf" => "emf",
-        "image/x-wmf" => "wmf",
-        "image/webp" => "webp",
-        _ => {
-            if data.starts_with(b"\x89PNG") {
-                "png"
-            } else if data.starts_with(&[0xFF, 0xD8]) {
-                "jpeg"
-            } else if data.starts_with(b"GIF8") {
-                "gif"
-            } else {
-                "png"
-            }
+    for (kind, extension) in [
+        ("image/png", "png"),
+        ("image/jpeg", "jpeg"),
+        ("image/jpg", "jpeg"),
+        ("image/gif", "gif"),
+        ("image/bmp", "bmp"),
+        ("image/tiff", "tiff"),
+        ("image/svg+xml", "svg"),
+        ("image/x-emf", "emf"),
+        ("image/x-wmf", "wmf"),
+        ("image/webp", "webp"),
+    ] {
+        if mime.eq_ignore_ascii_case(kind) {
+            return extension;
+        }
+    }
+    {
+        if data.starts_with(b"\x89PNG") {
+            "png"
+        } else if data.starts_with(&[0xFF, 0xD8]) {
+            "jpeg"
+        } else if data.starts_with(b"GIF8") {
+            "gif"
+        } else {
+            "png"
         }
     }
 }

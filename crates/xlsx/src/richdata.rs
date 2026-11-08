@@ -16,14 +16,14 @@ use crate::xml::{self, El, esc};
 const NS_RICH: &str = "http://schemas.microsoft.com/office/spreadsheetml/2017/richdata";
 const NS_IMAGE_REL: &str = "http://schemas.microsoft.com/office/spreadsheetml/2022/richvaluerel";
 const RICH_EXT: &str = "{3E2802C4-A4D2-4D8B-9148-E3BE6C30E623}";
-const MAX_IMAGE: u64 = 16 * 1024 * 1024;
-const MAX_IMAGES_TOTAL: usize = 128 * 1024 * 1024;
-const MAX_RECORDS: usize = 100_000;
+pub(crate) const MAX_IMAGE: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_IMAGES_TOTAL: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_RECORDS: usize = 100_000;
 const MAX_XML: u64 = 16 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_000_000;
 
 /// Header dimensions bound decode allocations in consumers. Full decoding is left to the UI.
-fn image_type(data: &[u8]) -> Option<(&'static str, &'static str)> {
+pub(crate) fn image_type(data: &[u8]) -> Option<(&'static str, &'static str)> {
     let dimensions = if data.len() >= 33 && data.starts_with(b"\x89PNG\r\n\x1a\n") && data.get(8..16)? == b"\0\0\0\rIHDR" {
         let w = u32::from_be_bytes(data.get(16..20)?.try_into().ok()?);
         let h = u32::from_be_bytes(data.get(20..24)?.try_into().ok()?);

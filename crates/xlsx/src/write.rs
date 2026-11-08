@@ -244,9 +244,7 @@ impl Out {
     /// The `xl/media` file name (`imageN.ext`) holding `data`. A picture used on several sheets,
     /// or twice on one, is written once and every drawing points to that part, as in Excel.
     pub fn image_part(&mut self, ext: &str, data: &[u8]) -> String {
-        let existing = self.parts.iter().find(|(name, bytes)| {
-            name.strip_prefix("xl/media/image").is_some_and(|rest| rest.ends_with(&format!(".{ext}"))) && bytes.as_slice() == data
-        });
+        let existing = self.parts.iter().find(|(name, bytes)| reusable_image_part(name, bytes, ext, data));
         if let Some((name, _)) = existing {
             return name.trim_start_matches("xl/media/").to_string();
         }
@@ -258,6 +256,11 @@ impl Out {
     pub fn default_type(&mut self, ext: &str, ct: &str) {
         self.defaults.entry(ext.to_string()).or_insert_with(|| ct.to_string());
     }
+}
+
+/// Exact first-match predicate; retained nested names participate in legacy image reuse.
+pub(crate) fn reusable_image_part(name: &str, earlier: &[u8], ext: &str, data: &[u8]) -> bool {
+    name.strip_prefix("xl/media/image").is_some_and(|rest| rest.strip_suffix(ext).is_some_and(|s| s.ends_with('.'))) && earlier == data
 }
 
 /// Id of the i-th person of `xl/persons/person.xml`: a GUID-shaped, deterministic id (the

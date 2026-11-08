@@ -188,50 +188,192 @@ impl PivotWriter {
 }
 
 /// Resolves a pivot source to (sheet, range including the header row, worksheetSource XML).
-fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Option<(usize, RangeRef, String)> {
-    let t = text.trim().trim_start_matches('=').trim();
-    if t.is_empty() || depth > 4 {
-        return None;
+struct SourceGeometry<'a> {
+    sheet: usize,
+    range: RangeRef,
+    name: Option<&'a str>,
+}
+
+// Match Core's range grammar without its two temporary full-axis Strings.
+fn source_range(text: &str) -> Option<RangeRef> {
+    let s = text.trim();
+    let Some((a, b)) = s.split_once(':') else { return CellRef::parse(s).map(RangeRef::cell) };
+    if let (Some(a), Some(b)) = (CellRef::parse(a), CellRef::parse(b)) {
+        return Some(RangeRef::new(a, b));
     }
-    if let Some((si, ti)) = wb.table(t)
-        && let Some(sh) = wb.sheet(si)
-        && let Some(tb) = sh.tables.get(ti)
-    {
-        if !tb.header_row {
+    fn strip(s: &str) -> &str {
+        s.strip_prefix('$').unwrap_or(s)
+    }
+    if let (Some(a), Some(b)) = (gridcraft_core::letters_to_col(strip(a)), gridcraft_core::letters_to_col(strip(b))) {
+        return Some(RangeRef::cols(a.min(b), a.max(b)));
+    }
+    fn row(s: &str) -> Option<u32> {
+        let s = s.strip_prefix('$').unwrap_or(s);
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let end_row = tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row);
-        let r = RangeRef::new(tb.range.start, CellRef::new(end_row, tb.range.end.col));
-        // Table names are sanitized when written; refer by range when this one would change.
-        let valid = !tb.name.is_empty()
-            && tb.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-            && tb.name.starts_with(|c: char| c.is_alphabetic() || c == '_')
-            && CellRef::parse(&tb.name).is_none();
-        let xml = if valid { format!("<worksheetSource name=\"{}\"/>", esc_attr(&tb.name)) } else { range_source_xml(&sh.name, r) };
-        return Some((si, r, xml));
+        s.parse().ok()
     }
-    let (sheet, body) = gridcraft_core::split_sheet(t);
-    if let Some(r) = RangeRef::parse(body) {
-        let si = match &sheet {
-            Some(n) => wb.sheet_index(n)?,
-            None => default_sheet,
-        };
-        let sh = wb.sheet(si)?;
-        let r = if r.is_full_cols() || r.is_full_rows() { r.intersection(&sh.used_range()?)? } else { r };
-        return Some((si, r, range_source_xml(&sh.name, r)));
+    let (a, b) = (row(a)?, row(b)?);
+    if a == 0 || b == 0 || a > gridcraft_core::MAX_ROWS || b > gridcraft_core::MAX_ROWS {
+        return None;
     }
-    if sheet.is_none()
-        && let Some(n) = wb.name(t, default_sheet)
-    {
-        let (si, r, _) = resolve_source(wb, &n.formula.clone(), default_sheet, depth + 1)?;
-        let xml = if n.scope.is_none() {
-            format!("<worksheetSource name=\"{}\"/>", esc_attr(&n.name))
+    Some(RangeRef::rows(a.min(b) - 1, a.max(b) - 1))
+}
+
+type NameCharge<'a, E> = Option<&'a mut dyn FnMut(usize, usize) -> Result<(), E>>;
+fn source_geometry<'a, E>(
+    wb: &'a Workbook,
+    text: &str,
+    default_sheet: usize,
+    depth: u32,
+    charge: &mut NameCharge<'_, E>,
+) -> Result<Option<SourceGeometry<'a>>, E> {
+    if let Some(c) = charge.as_mut() {
+        c(1, text.len())?;
+    }
+    let t = text.trim().trim_start_matches('=').trim();
+    if t.is_empty() || depth > 4 {
+        return Ok(None);
+    }
+    for (si, sh) in wb.sheets.iter().enumerate() {
+        for tb in &sh.tables {
+            if let Some(c) = charge.as_mut() {
+                c(1, tb.name.len().saturating_add(t.len()))?;
+            }
+            if !tb.name.eq_ignore_ascii_case(t) {
+                continue;
+            }
+            if !tb.header_row {
+                return Ok(None);
+            }
+            let r = RangeRef::new(
+                tb.range.start,
+                CellRef::new(tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row), tb.range.end.col),
+            );
+            let valid = !tb.name.is_empty()
+                && tb.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                && tb.name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && CellRef::parse(&tb.name).is_none();
+            return Ok(Some(SourceGeometry { sheet: si, range: r, name: valid.then_some(tb.name.as_str()) }));
+        }
+    }
+    let (sheet, body) = t.rsplit_once('!').map_or((None, t), |(s, b)| (Some(s), b));
+    if let Some(mut r) = source_range(body) {
+        let si = if let Some(raw) = sheet {
+            let raw = raw.trim();
+            let quoted = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\''));
+            let mut found = None;
+            for (i, sh) in wb.sheets.iter().enumerate() {
+                if let Some(c) = charge.as_mut() {
+                    c(1, sh.name.len().saturating_add(raw.len()))?;
+                }
+                let mut chars = quoted.unwrap_or(raw).chars().peekable();
+                let decoded = std::iter::from_fn(|| {
+                    let c = chars.next()?;
+                    if quoted.is_some() && c == '\'' && chars.peek() == Some(&'\'') {
+                        chars.next();
+                    }
+                    Some(c.to_ascii_lowercase())
+                });
+                if decoded.eq(sh.name.chars().map(|c| c.to_ascii_lowercase())) {
+                    found = Some(i);
+                    break;
+                }
+            }
+            let Some(i) = found else { return Ok(None) };
+            i
         } else {
-            wb.sheet(si).map(|s| range_source_xml(&s.name, r))?
+            default_sheet
         };
-        return Some((si, r, xml));
+        let Some(sh) = wb.sheet(si) else { return Ok(None) };
+        if r.is_full_cols() || r.is_full_rows() {
+            if let Some(c) = charge.as_mut() {
+                c(sh.cells.len(), 0)?;
+                c(sh.spill_ranges.len(), 0)?;
+            }
+            let Some(used) = sh.used_range().and_then(|u| r.intersection(&u)) else { return Ok(None) };
+            r = used;
+        }
+        return Ok(Some(SourceGeometry { sheet: si, range: r, name: None }));
     }
-    None
+    if sheet.is_none() {
+        for scope in [Some(default_sheet), None] {
+            for n in &wb.names {
+                if let Some(c) = charge.as_mut() {
+                    c(1, n.name.len().saturating_add(t.len()))?;
+                }
+                if n.scope == scope && n.name.eq_ignore_ascii_case(t) {
+                    let result = source_geometry(wb, &n.formula, default_sheet, depth + 1, charge)?;
+                    return Ok(result.map(|mut g| {
+                        g.name = if n.scope.is_none() { Some(&n.name) } else { None };
+                        g
+                    }));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Option<(usize, RangeRef, String)> {
+    let result: Result<_, std::convert::Infallible> = source_geometry(wb, text, default_sheet, depth, &mut None);
+    let geometry = match result {
+        Ok(g) => g?,
+        Err(never) => match never {},
+    };
+    let x = if let Some(n) = geometry.name {
+        format!("<worksheetSource name=\"{}\"/>", esc_attr(n))
+    } else {
+        range_source_xml(&wb.sheet(geometry.sheet)?.name, geometry.range)
+    };
+    Some((geometry.sheet, geometry.range, x))
+}
+
+fn scalar_empty(v: Option<&Value>) -> bool {
+    match v {
+        None => true,
+        Some(Value::Array(a)) => a.data.first().is_none_or(Value::is_empty),
+        Some(v) => v.is_empty(),
+    }
+}
+fn nonblank_row<E>(sh: &gridcraft_model::Sheet, row: u32, r: RangeRef, charge: &mut NameCharge<'_, E>) -> Result<bool, E> {
+    for col in r.start.col..=r.end.col {
+        if let Some(c) = charge.as_mut() {
+            c(1, 0)?;
+        }
+        if !scalar_empty(sh.value_ref(CellRef::new(row, col))) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+impl PivotWriter {
+    pub(crate) fn recovery_name_facts<E>(
+        wb: &Workbook,
+        si: usize,
+        pt: &PivotTable,
+        records: bool,
+        charge: &mut dyn FnMut(usize, usize) -> Result<(), E>,
+    ) -> Result<Option<bool>, E> {
+        let mut charge = Some(charge);
+        let Some(g) = source_geometry(wb, &pt.source, si, 0, &mut charge)? else { return Ok(None) };
+        if g.range.count() > MAX_SOURCE_CELLS {
+            return Ok(None);
+        }
+        if !records {
+            return Ok(Some(false));
+        }
+        let Some(sh) = wb.sheet(g.sheet) else { return Ok(None) };
+        let mut rows = 0u64;
+        if g.range.end.row > g.range.start.row {
+            for row in g.range.start.row + 1..=g.range.end.row {
+                if nonblank_row(sh, row, g.range, &mut charge)? {
+                    rows += 1;
+                }
+            }
+        }
+        Ok(Some(rows.saturating_mul(u64::from(g.range.width())) <= MAX_RECORD_CELLS))
+    }
 }
 
 fn range_source_xml(sheet: &str, r: RangeRef) -> String {
@@ -364,8 +506,12 @@ fn build_cache(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize) -> Option<Cac
     let mut rows: Vec<u32> = Vec::new();
     if r.end.row > r.start.row {
         for row in r.start.row + 1..=r.end.row {
-            let blank = (r.start.col..=r.end.col).all(|c| sh.value(CellRef::new(row, c)).scalar().is_empty());
-            if !blank {
+            let present: Result<bool, std::convert::Infallible> = nonblank_row(sh, row, r, &mut None);
+            let present = match present {
+                Ok(v) => v,
+                Err(never) => match never {},
+            };
+            if present {
                 rows.push(row);
             }
         }

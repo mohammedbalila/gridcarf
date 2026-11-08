@@ -3,6 +3,79 @@ use super::*;
 
 // ---------------------------------------------------------------- writing
 
+/// Borrowed spelling recipe shared by the writer and bounded recovery analysis.
+#[derive(Clone, Copy)]
+pub(crate) enum ClaimName<'a> {
+    Original(&'a str),
+    Renamed { directory: &'a str, stem: &'a str, extension: Option<&'a str>, owned: bool, number: u32 },
+}
+impl std::fmt::Display for ClaimName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Original(s) => f.write_str(s),
+            Self::Renamed { directory, stem, extension, owned, number } => {
+                if !directory.is_empty() {
+                    write!(f, "{directory}/")?;
+                }
+                if *owned {
+                    write!(f, "{stem}_")?;
+                } else {
+                    f.write_str("kept")?;
+                }
+                write!(f, "{number}")?;
+                if let Some(ext) = extension {
+                    write!(f, ".{ext}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+impl ClaimName<'_> {
+    pub(crate) fn byte_len(self) -> Option<usize> {
+        match self {
+            Self::Original(s) => Some(s.len()),
+            Self::Renamed { directory, stem, extension, owned, number } => {
+                let mut digits = 1usize;
+                let mut n = number;
+                while n >= 10 {
+                    digits += 1;
+                    n /= 10;
+                }
+                directory
+                    .len()
+                    .checked_add(usize::from(!directory.is_empty()))?
+                    .checked_add(if owned { stem.len().checked_add(1)? } else { 4 })?
+                    .checked_add(digits)?
+                    .checked_add(extension.map_or(0, |s| s.len() + 1))
+            }
+        }
+    }
+}
+
+pub(crate) fn claim_with<'a, T, E>(
+    original: &'a str,
+    suffix: &mut u32,
+    mut occupy: impl FnMut(ClaimName<'a>) -> Result<(bool, T), E>,
+) -> Result<T, E> {
+    let owned = OWN_DIRS.iter().any(|p| original.get(..p.len()).is_some_and(|s| s.eq_ignore_ascii_case(p)));
+    if owned {
+        let (fresh, value) = occupy(ClaimName::Original(original))?;
+        if fresh {
+            return Ok(value);
+        }
+    }
+    let (directory, file) = package::split_dir(original);
+    let (stem, extension) = file.rsplit_once('.').map_or((file, None), |(s, e)| (s, Some(e)));
+    loop {
+        *suffix = suffix.saturating_add(1);
+        let (fresh, value) = occupy(ClaimName::Renamed { directory, stem, extension, owned, number: *suffix })?;
+        if fresh || *suffix == u32::MAX {
+            return Ok(value);
+        }
+    }
+}
+
 /// Names given to kept parts while a package is written.
 #[derive(Default)]
 pub struct KeptOut {
@@ -38,24 +111,13 @@ impl KeptOut {
     /// A part name for a kept part: its original name when that can't collide with anything
     /// written, otherwise a fresh one in the same folder.
     pub(super) fn claim(&mut self, original: &str) -> String {
-        let lower = original.to_ascii_lowercase();
-        let own = OWN_DIRS.iter().any(|d| lower.starts_with(d));
-        if own && self.used.insert(lower) {
-            return original.to_string();
-        }
-        let (dir, file) = package::split_dir(original);
-        let (stem, ext) = match file.rsplit_once('.') {
-            Some((s, e)) => (s, format!(".{e}")),
-            None => (file, String::new()),
-        };
-        let stem = if own { format!("{stem}_") } else { "kept".to_string() };
-        loop {
-            self.n = self.n.saturating_add(1);
-            let file = format!("{stem}{}{ext}", self.n);
-            let cand = if dir.is_empty() { file } else { format!("{dir}/{file}") };
-            if self.used.insert(cand.to_ascii_lowercase()) || self.n == u32::MAX {
-                return cand;
-            }
+        let result: Result<String, std::convert::Infallible> = claim_with(original, &mut self.n, |recipe| {
+            let name = recipe.to_string();
+            Ok((self.used.insert(name.to_ascii_lowercase()), name))
+        });
+        match result {
+            Ok(name) => name,
+            Err(never) => match never {},
         }
     }
 }
@@ -216,45 +278,61 @@ fn chart_formulas(el: &xml::El, out: &mut Vec<String>) {
 
 /// The sheet names a formula such as `'My Sheet'!$A$1:$A$9,Data!$B$1` refers to. References to
 /// other workbooks (`[1]Sheet!A1`) are not sheets of this one and are left out.
-pub(crate) fn sheet_names_in(formula: &str) -> Vec<String> {
-    let mut names = vec![];
-    let chars: Vec<char> = formula.chars().collect();
-    let at = |i: usize| chars.get(i).copied();
-    let mut i = 0;
-    while let Some(c) = at(i) {
-        let mut name = String::new();
-        let start = i;
-        if c == '\'' {
-            i += 1;
-            while let Some(c) = at(i) {
-                if c == '\'' {
-                    if at(i + 1) == Some('\'') {
-                        name.push('\'');
-                        i += 2;
+/// Borrowed sheet-name spellings in the exact legacy chart-formula scan order.
+/// Quoted spellings retain doubled apostrophes for a fallible/borrowed consumer.
+pub(crate) fn visit_sheet_names<E>(formula: &str, mut visit: impl FnMut(&str, bool) -> Result<(), E>) -> Result<(), E> {
+    let bytes = formula.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let start = at;
+        let quoted = bytes[at] == b'\'';
+        let from;
+        let end;
+        if quoted {
+            at += 1;
+            from = at;
+            while at < bytes.len() {
+                if bytes[at] == b'\'' {
+                    if bytes.get(at + 1) == Some(&b'\'') {
+                        at += 2;
                         continue;
                     }
                     break;
                 }
-                name.push(c);
-                i += 1;
+                at += 1;
             }
-            i += 1;
+            end = at;
+            at = at.saturating_add(1);
         } else {
-            while let Some(c) = at(i).filter(|c| !matches!(c, '!' | ',' | '(' | ')' | '\'' | ' ')) {
-                name.push(c);
-                i += 1;
+            from = at;
+            while at < bytes.len() && !matches!(bytes[at], b'!' | b',' | b'(' | b')' | b'\'' | b' ') {
+                at += 1;
             }
+            end = at;
         }
-        if at(i) == Some('!') {
+        if bytes.get(at) == Some(&b'!') {
+            let name = &formula[from..end];
             if !name.is_empty() && !name.starts_with('[') {
-                names.push(name);
+                visit(name, quoted)?;
             }
-            i += 1;
-        } else if i == start {
-            i += 1;
+            at += 1;
+        } else if at == start {
+            at += 1;
         }
     }
-    names
+    Ok(())
+}
+
+pub(crate) fn sheet_names_in(formula: &str) -> Vec<String> {
+    let mut names = vec![];
+    let result: Result<(), std::convert::Infallible> = visit_sheet_names(formula, |raw, quoted| {
+        names.push(if quoted { raw.replace("''", "'") } else { raw.to_string() });
+        Ok(())
+    });
+    match result {
+        Ok(()) => names,
+        Err(never) => match never {},
+    }
 }
 
 /// Whether a kept chart sheet can be written back: its chart's series must still refer to sheets

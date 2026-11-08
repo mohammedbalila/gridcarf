@@ -1,6 +1,8 @@
 //! Pass-through of unmodelled package content (custom XML, external links, connections, query
 //! tables, printer settings, form controls, OLE objects). Packages are built in code.
 
+mod recovery;
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -748,7 +750,11 @@ fn chartsheet_package() -> Vec<u8> {
             rels(&[("rId1", "drawing", "../drawings/drawing1.xml"), ("rId2", "printerSettings", "../printerSettings/printerSettings1.bin")])
                 .as_bytes(),
         ),
-        ("xl/chartsheets/_rels/sheet2.xml.rels", rels(&[("rId1", "drawing", "../drawings/drawing2.xml")]).as_bytes()),
+        (
+            "xl/chartsheets/_rels/sheet2.xml.rels",
+            rels(&[("rId1", "drawing", "../drawings/drawing2.xml"), ("rId2", "printerSettings", "../printerSettings/printerSettings1.bin")])
+                .as_bytes(),
+        ),
         ("xl/printerSettings/printerSettings1.bin", PRINTER),
         ("xl/drawings/drawing1.xml", d1.as_bytes()),
         ("xl/drawings/drawing2.xml", d2.as_bytes()),
@@ -833,7 +839,13 @@ fn a_chart_sheet_whose_data_sheet_was_renamed_is_dropped_with_its_parts() {
     assert_eq!(written_sheets(&u).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["Renamed", "More", "Spare", "Last"]);
     assert!(u.find(chart_xml("Data!$A$1:$A$3").as_bytes()).is_empty());
     assert!(u.find(drawing_xml("first").as_bytes()).is_empty());
-    assert!(u.find(PRINTER).is_empty());
+    // Last shares the repaired fixture's printer dependency with the dropped Chart1.
+    assert_eq!(u.find(PRINTER).len(), 1);
+    let (last, _, _) = chart_sheet_chain(&u, "Last");
+    let setup_id = attr_of(&u.text(&last), "pageSetup", "r:id");
+    let (kind, printer) = u.target(&last, &setup_id);
+    assert!(kind.ends_with("/printerSettings"));
+    assert_eq!(u.parts[&printer], PRINTER);
     chart_sheet_chain(&u, "Last");
     let wbx = u.text("xl/workbook.xml");
     assert_eq!(attr_of(&wbx, "workbookView", "activeTab"), "1");

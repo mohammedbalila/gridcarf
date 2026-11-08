@@ -12,7 +12,7 @@ use super::package::normalize;
 
 mod controls;
 mod mappings;
-mod xml;
+pub(crate) mod xml;
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";

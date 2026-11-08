@@ -43,14 +43,16 @@ use crate::xml::{self, esc_attr};
 
 mod read;
 mod rebase;
+pub(crate) mod recovery;
 mod references;
 mod write;
 
 pub use read::KeptReader;
 pub use rebase::{SheetKept, rebase_links};
+pub use recovery::{RecoveryPreservedError, validate_recovery_preserved};
 pub use references::{check_preserved_sheet_copy, prepare_preserved_edit};
 #[cfg(test)]
-pub(crate) use write::sheet_names_in;
+pub(crate) use write::{ClaimName, claim_with, sheet_names_in};
 pub use write::{KeptOut, SheetIds, WorkbookKept, workbook_elements, write_package_rels, write_workbook};
 
 /// Most bytes kept for one workbook.

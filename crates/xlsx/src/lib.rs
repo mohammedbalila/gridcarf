@@ -71,7 +71,7 @@ pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
 pub use ods::read_ods;
 pub use package::MAX_PART;
-pub use passthrough::{check_preserved_sheet_copy, prepare_preserved_edit, rebase_links};
+pub use passthrough::{RecoveryPreservedError, check_preserved_sheet_copy, prepare_preserved_edit, rebase_links, validate_recovery_preserved};
 pub use xls::read_xls;
 pub use xlsb::read_xlsb;
 

@@ -62,13 +62,17 @@ fn plan_reserve<T>(v: &mut Vec<T>, count: usize, budget: &mut Option<&mut TextPl
     plan_charge(budget, count.checked_mul(std::mem::size_of::<T>()).ok_or_else(planning_error)?, 0, 0)?;
     v.try_reserve_exact(count).map_err(|_| planning_error())
 }
+pub(crate) fn table_is_written(t: &Table) -> Option<bool> {
+    let height = t.range.end.row.checked_sub(t.range.start.row).and_then(|h| h.checked_add(1))?;
+    Some(height > t.header_row as u32 + t.totals_row as u32 || (t.header_row && height > t.totals_row as u32))
+}
+
 fn prepare_table_text<'a>(tables: &'a [Table], mut budget: Option<&mut TextPlanningBudget>) -> Result<Vec<(&'a Table, Vec<String>)>, IoError> {
     let mut out = Vec::new();
     plan_reserve(&mut out, tables.len(), &mut budget)?;
     for t in tables {
         plan_charge(&mut budget, 0, 1, 0)?;
-        let height = t.range.end.row.checked_sub(t.range.start.row).and_then(|h| h.checked_add(1)).ok_or_else(planning_error)?;
-        if height > t.header_row as u32 + t.totals_row as u32 || (t.header_row && height > t.totals_row as u32) {
+        if table_is_written(t).ok_or_else(planning_error)? {
             out.push((t, table_columns(t, budget.as_deref_mut())?));
         }
     }
@@ -243,6 +247,73 @@ pub(crate) fn visit_shared_text(
         budget.bytes = before;
     }
     Ok(())
+}
+
+pub(crate) enum NativeCellRequest<'a> {
+    Charge(usize, usize),
+    Array(usize, CellRef, &'a gridcraft_model::Formula),
+    Table(&'a Table),
+}
+/// Only stored cells can register Python/dynamic metadata. Header presence suppresses code;
+/// its text/normalization winner is irrelevant to this existential query. Pictures win first.
+pub(crate) fn native_cell_facts<E>(
+    wb: &Workbook,
+    want_python: bool,
+    want_dynamic: bool,
+    mut request: impl FnMut(NativeCellRequest<'_>) -> Result<bool, E>,
+) -> Result<(bool, bool), E> {
+    let (mut python, mut dynamic) = (false, false);
+    for (si, sh) in wb.sheets.iter().enumerate() {
+        request(NativeCellRequest::Charge(1, 0))?;
+        for (at, cell) in sh.cells.iter() {
+            request(NativeCellRequest::Charge(1, 0))?;
+            if cell.formula.is_none() && cell.py.is_none() {
+                continue;
+            }
+            request(NativeCellRequest::Charge(1, 0))?;
+            if sh.cell_pictures.contains_key(&at) {
+                continue;
+            }
+            let mut header = false;
+            for t in &sh.tables {
+                request(NativeCellRequest::Charge(1, 0))?;
+                // Same checked writer predicate; invalid geometry is already a typed-model failure.
+                if request(NativeCellRequest::Table(t))?
+                    && t.header_row
+                    && at.row == t.range.start.row
+                    && at.col >= t.range.start.col
+                    && at.col <= t.range.end.col
+                {
+                    header = true;
+                    break;
+                }
+            }
+            let input = CellWriteInput {
+                reference: at,
+                cell: Some(cell),
+                picture: None,
+                header_override: header.then_some(""),
+                spill_value: None,
+                dynamic_range: None,
+                what_if: None,
+            };
+            let resolved = resolve_cell(&input);
+            python |= resolved.python.is_some();
+            if want_dynamic && !dynamic {
+                request(NativeCellRequest::Charge(1, 0))?;
+                let spill = sh.spill_ranges.get(&at).is_some_and(|r| !r.is_single());
+                dynamic = if let Some(f) = resolved.formula {
+                    f.array.is_none() && (f.dynamic || spill || request(NativeCellRequest::Array(si, at, f))?)
+                } else {
+                    resolved.python.is_some() && spill
+                };
+            }
+            if (!want_python || python) && (!want_dynamic || dynamic) {
+                return Ok((python, dynamic));
+            }
+        }
+    }
+    Ok((python, dynamic))
 }
 
 pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> Result<(String, Rels), IoError> {
