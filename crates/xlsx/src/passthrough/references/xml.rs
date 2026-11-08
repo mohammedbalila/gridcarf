@@ -1,11 +1,10 @@
 //! Bounded, namespace-aware tokens and byte patches for the preserved-reference handlers.
 
-use std::collections::HashSet;
 use std::ops::Range;
 
 use quick_xml::NsReader;
 use quick_xml::events::Event;
-use quick_xml::name::{Namespace, PrefixDeclaration, QName, ResolveResult};
+use quick_xml::name::{Namespace, PrefixDeclaration, ResolveResult};
 
 use super::{Checked, MAIN, require};
 
@@ -23,9 +22,6 @@ pub(crate) struct Field {
 
 pub(crate) struct Tag {
     pub span: Range<usize>,
-    pub main_default: bool,
-    pub r_rel: bool,
-    pub vml_native: bool,
     pub attrs: Vec<(Name, Field)>,
 }
 
@@ -80,13 +76,6 @@ fn pushed<T>(v: &mut Vec<T>, value: T) -> Scanned<()> {
     v.try_reserve(1).map_err(|_| Failure::Allocation)?;
     v.push(value);
     Ok(())
-}
-
-fn binding(reader: &NsReader<&[u8]>, qualified: &[u8], uri: &str, inherited: bool) -> bool {
-    match reader.resolver().resolve_attribute(QName(qualified)).0 {
-        ResolveResult::Bound(ns) => ns.as_ref() == uri.as_bytes(),
-        ResolveResult::Unknown(_) | ResolveResult::Unbound => inherited,
-    }
 }
 
 fn namespace(value: ResolveResult<'_>) -> Scanned<String> {
@@ -326,7 +315,6 @@ fn scan_inner<'i>(
     let mut roots = 0;
     let mut count = 0usize;
     let mut declared = false;
-    let mut rel_prefixes: HashSet<&str> = HashSet::new();
     loop {
         count += 1;
         if count > crate::xml::MAX_XML_NODES {
@@ -416,17 +404,9 @@ fn scan_inner<'i>(
                                 value(raw, true)?;
                                 return Err(Failure::Unsupported);
                             }
-                            if let Some(prefix) = lexical.strip_prefix("xmlns:") {
+                            if lexical.starts_with("xmlns:") {
                                 if raw.is_empty() {
                                     return Err(Failure::Malformed);
-                                }
-                                if remap && fragment {
-                                    if raw == super::REL || raw == "http://purl.oclc.org/ooxml/officeDocument/relationships" {
-                                        rel_prefixes.try_reserve(1).map_err(|_| Failure::Allocation)?;
-                                        rel_prefixes.insert(prefix);
-                                    } else if rel_prefixes.contains(prefix) {
-                                        return Err(Failure::Unsupported);
-                                    }
                                 }
                             } else if matches!(raw, "http://www.w3.org/XML/1998/namespace" | "http://www.w3.org/2000/xmlns/") {
                                 return Err(Failure::Malformed);
@@ -438,21 +418,6 @@ fn scan_inner<'i>(
                     let name = Name { ns: namespace(ns)?, local: copied(std::str::from_utf8(local.as_ref()).map_err(|_| Failure::Malformed)?)? };
                     if attrs.iter().any(|(n, _)| *n == name) {
                         return Err(Failure::Malformed);
-                    }
-                    if recovery
-                        && remap
-                        && fragment
-                        && lexical.split_once(':').is_some_and(|(p, _)| rel_prefixes.contains(p))
-                        && name.ns != super::REL
-                    {
-                        return Err(Failure::Unsupported);
-                    }
-                    if recovery && remap && fragment && name.ns != super::REL && raw.contains('"') {
-                        return Err(Failure::Unsupported);
-                    }
-                    // The current remapper skips every lexical key starting with xmlns.
-                    if recovery && remap && fragment && name.ns == super::REL && lexical.starts_with("xmlns") {
-                        return Err(Failure::Unsupported);
                     }
                     let decoded = value(raw, recovery)?;
                     if recovery && remap && fragment && name.ns == super::REL && (raw != decoded || raw.contains(['\n', '\r', '\t'])) {
@@ -467,18 +432,7 @@ fn scan_inner<'i>(
                     return Err(Failure::Malformed);
                 }
                 pushed(&mut path, name)?;
-                let main_default = matches!(reader.resolver().resolve_prefix(None,true),ResolveResult::Bound(ns) if ns.as_ref()==MAIN.as_bytes());
-                // Generated worksheet children inherit outer r=REL when the fragment has
-                // no local r binding. Input attributes still require declared prefixes.
-                let r_rel = !recovery || !fragment || !remap || binding(&reader, b"r:id", super::REL, true);
-                let vml_native = !recovery
-                    || path.len() != 1
-                    || path[0].local != "xml"
-                    || !path[0].ns.is_empty()
-                    || (binding(&reader, b"v:shape", super::VML, false)
-                        && binding(&reader, b"o:spt", "urn:schemas-microsoft-com:office:office", false)
-                        && binding(&reader, b"x:ClientData", super::EXCEL, false));
-                visit(&path, RecoveryToken::Start(Tag { span: start..end, main_default, r_rel, vml_native, attrs }))?;
+                visit(&path, RecoveryToken::Start(Tag { span: start..end, attrs }))?;
                 if empty {
                     visit(&path, RecoveryToken::End(start..end))?;
                     path.pop();

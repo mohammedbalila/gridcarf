@@ -615,8 +615,9 @@ fn push_fragment(out: &mut SheetScan, frag: &str, local: &[u8], decls: &[(String
         // The kept element is the one the first choice holds.
         let Ok(el) = xml::parse(frag.as_bytes()) else { return };
         match el.child("Choice").and_then(|c| c.children.first()) {
-            Some(c) => c.name.clone(),
-            None => return,
+            Some(c) if SHEET_SLOTS.contains(&c.name.as_str()) => c.name.clone(),
+            _ if crate::controls::controls_of(&el).is_some() => "controls".into(),
+            _ => return,
         }
     } else {
         String::from_utf8_lossy(local).into_owned()
@@ -726,10 +727,81 @@ pub(super) fn first_free_block(kept: &str) -> u64 {
     shape_numbers(kept).into_iter().max().unwrap_or(0) / 1024 + 1
 }
 
+struct VmlInsertion {
+    at: usize,
+    bindings: [bool; 3],
+}
+fn vml_error() -> IoError {
+    IoError::Format("kept VML has no supported insertion context".into())
+}
+fn vml_insertion(text: &str) -> Option<VmlInsertion> {
+    let mut reader = Reader::from_str(text);
+    let cfg = reader.config_mut();
+    // Position lookup shares first_start's legacy caption tolerance, not recovery's dialect.
+    cfg.check_end_names = false;
+    cfg.allow_unmatched_ends = true;
+    cfg.allow_dangling_amp = true;
+    let mut bindings = None;
+    let mut at = None;
+    loop {
+        let start = usize::try_from(reader.buffer_position()).ok()?;
+        match reader.read_event().ok()? {
+            Event::Start(e) if bindings.is_none() => {
+                if e.name().as_ref() != b"xml" {
+                    return None;
+                }
+                let mut native = [false; 3];
+                for a in e.attributes() {
+                    let a = a.ok()?;
+                    for (i, (key, uri)) in VML_BINDINGS.iter().enumerate() {
+                        if a.key.as_ref() == key.as_bytes() {
+                            native[i] = a.normalized_value(quick_xml::XmlVersion::Explicit1_0).ok()?.as_ref() == *uri;
+                        }
+                    }
+                }
+                bindings = Some(native);
+            }
+            Event::End(e) if e.name().as_ref() == b"xml" => {
+                let end = usize::try_from(reader.buffer_position()).ok()?;
+                if text.get(start..end) == Some("</xml>") {
+                    at = Some(start);
+                }
+            }
+            Event::Eof => return Some(VmlInsertion { at: at?, bindings: bindings? }),
+            _ => {}
+        }
+    }
+}
+pub(super) fn vml_insert_at(text: &str) -> Option<usize> {
+    Some(vml_insertion(text)?.at)
+}
+const VML_BINDINGS: [(&str, &str); 3] = [
+    ("xmlns:v", "urn:schemas-microsoft-com:vml"),
+    ("xmlns:o", "urn:schemas-microsoft-com:office:office"),
+    ("xmlns:x", "urn:schemas-microsoft-com:office:excel"),
+];
+fn generated_vml(fragment: &str, bindings: [bool; 3], shape: bool) -> Result<Cow<'_, str>, IoError> {
+    let needed = if shape { 3 } else { 2 };
+    if bindings[..needed].iter().all(|b| *b) {
+        return Ok(Cow::Borrowed(fragment));
+    }
+    let root = if shape { "<v:shape" } else { "<v:shapetype" };
+    let rest = fragment.strip_prefix(root).filter(|s| s.starts_with(' ')).ok_or_else(vml_error)?;
+    let mut out = root.to_string();
+    for (i, (key, uri)) in VML_BINDINGS.iter().take(needed).enumerate() {
+        if !bindings[i] {
+            let _ = write!(out, " {key}=\"{uri}\"");
+        }
+    }
+    out.push_str(rest);
+    Ok(Cow::Owned(out))
+}
+
 /// Kept VML (controls, OLE objects) plus GridCraft's note and form control shapes: ours get ids
 /// in fresh shape blocks so they can't collide with the kept shapes the sheet XML refers to.
-pub(super) fn merge_vml(kept: &str, ours: &str) -> String {
-    let Some(close) = kept.rfind("</xml>") else { return ours.to_string() };
+pub(super) fn merge_vml(kept: &str, ours: &str) -> Result<String, IoError> {
+    let insertion = vml_insertion(kept).ok_or_else(vml_error)?;
+    let close = insertion.at;
     let block = first_free_block(kept);
     let mut add = String::new();
     // Our shape types (notes, form controls) that the kept drawing doesn't define.
@@ -739,20 +811,20 @@ pub(super) fn merge_vml(kept: &str, ours: &str) -> String {
         let ty = ours.get(i..j).unwrap_or("");
         let id = attr_value(ty, "id").unwrap_or("");
         if !id.is_empty() && !kept.contains(&format!("id=\"{id}\"")) && !kept.contains(&format!("id='{id}'")) {
-            add.push_str(ty);
+            add.push_str(&generated_vml(ty, insertion.bindings, false)?);
         }
         from = j;
     }
     let spans = shape_spans(ours);
     let blocks = (spans.len() as u64 + 1).div_ceil(1024).max(1);
     for (k, (a, b)) in spans.into_iter().enumerate() {
-        let shape = ours.get(a..b).unwrap_or("");
+        let shape = generated_vml(ours.get(a..b).unwrap_or(""), insertion.bindings, true)?;
         let id = block.saturating_mul(1024).saturating_add(1 + k as u64);
         match (shape.find("id=\"_x0000_s"), shape.find("id=\"_x0000_s").and_then(|i| shape.get(i + 4..)?.find('"').map(|j| i + 4 + j))) {
             (Some(i), Some(j)) => {
                 let _ = write!(add, "{}id=\"_x0000_s{id}\"{}", shape.get(..i).unwrap_or(""), shape.get(j + 1..).unwrap_or(""));
             }
-            _ => add.push_str(shape),
+            _ => add.push_str(&shape),
         }
     }
     let mut head = kept.get(..close).unwrap_or("").to_string();
@@ -764,7 +836,7 @@ pub(super) fn merge_vml(kept: &str, ours: &str) -> String {
         let claimed: String = (block..block.saturating_add(blocks)).map(|b| format!(",{b}")).collect();
         head.insert_str(e, &claimed);
     }
-    format!("{head}{add}{}", kept.get(close..).unwrap_or(""))
+    Ok(format!("{head}{add}{}", kept.get(close..).unwrap_or("")))
 }
 
 /// The value of the first attribute `name` in XML text `x`, in either quote style (`name="v"` or
@@ -888,9 +960,9 @@ fn controls_kept(child: &str, drop: &HashSet<u64>) -> Option<(String, usize, usi
 /// namespace) of an XML fragment through `map`. `None` when the fragment is damaged or `map` has
 /// no id for one of them.
 pub fn map_rel_ids(x: &str, map: &mut dyn FnMut(&str) -> Option<String>) -> Option<String> {
-    let mut reader = Reader::from_str(x);
+    let mut reader = quick_xml::NsReader::from_str(x);
+    reader.resolver_mut().set_max_declarations_per_element(x.len());
     let mut writer = Writer::new(Vec::with_capacity(x.len()));
-    let mut prefixes: HashSet<Vec<u8>> = HashSet::new();
     let mut depth = 0usize;
     loop {
         match reader.read_event().ok()? {
@@ -900,11 +972,11 @@ pub fn map_rel_ids(x: &str, map: &mut dyn FnMut(&str) -> Option<String>) -> Opti
                 if depth > MAX_FRAGMENT_DEPTH {
                     return None;
                 }
-                let e = map_start(&e, &mut prefixes, map)?;
+                let e = map_start(&e, reader.resolver(), map)?;
                 writer.write_event(Event::Start(e)).ok()?;
             }
             Event::Empty(e) => {
-                let e = map_start(&e, &mut prefixes, map)?;
+                let e = map_start(&e, reader.resolver(), map)?;
                 writer.write_event(Event::Empty(e)).ok()?;
             }
             Event::End(e) => {
@@ -917,28 +989,29 @@ pub fn map_rel_ids(x: &str, map: &mut dyn FnMut(&str) -> Option<String>) -> Opti
     String::from_utf8(writer.into_inner()).ok()
 }
 
-fn map_start(e: &BytesStart<'_>, prefixes: &mut HashSet<Vec<u8>>, map: &mut dyn FnMut(&str) -> Option<String>) -> Option<BytesStart<'static>> {
-    for a in e.attributes().with_checks(false) {
-        let a = a.ok()?;
-        if let Some(p) = a.key.as_ref().strip_prefix(b"xmlns:")
-            && (a.value.as_ref() == NS_REL.as_bytes() || a.value.as_ref() == NS_REL_STRICT.as_bytes())
-        {
-            prefixes.insert(p.to_vec());
-        }
-    }
+fn map_start(
+    e: &BytesStart<'_>,
+    resolver: &quick_xml::name::NamespaceResolver,
+    map: &mut dyn FnMut(&str) -> Option<String>,
+) -> Option<BytesStart<'static>> {
     let name = String::from_utf8(e.name().as_ref().to_vec()).ok()?;
     let mut out = BytesStart::new(name);
     for a in e.attributes().with_checks(false) {
         let a = a.ok()?;
         let key = a.key.as_ref();
-        let is_rel = !key.starts_with(b"xmlns") && a.key.prefix().is_some_and(|p| prefixes.contains(p.as_ref()));
-        if is_rel {
-            let old = std::str::from_utf8(&a.value).ok()?;
-            let new = map(old)?;
-            out.push_attribute(Attribute { key: QName(key), value: Cow::Owned(esc_attr(&new).into_bytes()) });
+        let declaration = key == b"xmlns" || key.starts_with(b"xmlns:");
+        let is_rel = !declaration
+            && matches!(resolver.resolve_attribute(a.key).0,
+            quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == NS_REL.as_bytes() || ns.as_ref() == NS_REL_STRICT.as_bytes());
+        let value = if is_rel {
+            Cow::Owned(esc_attr(&map(std::str::from_utf8(&a.value).ok()?)?).into_bytes())
+        } else if a.value.contains(&b'"') {
+            // The value is already XML-escaped; re-escaping ampersands changes its meaning.
+            Cow::Owned(std::str::from_utf8(&a.value).ok()?.replace('"', "&quot;").into_bytes())
         } else {
-            out.push_attribute(Attribute { key: QName(key), value: a.value.clone() });
-        }
+            a.value.clone()
+        };
+        out.push_attribute(Attribute { key: QName(key), value });
     }
     Some(out)
 }
@@ -991,5 +1064,24 @@ mod namespace_tests {
         );
         assert_eq!(fragment_namespace(&sheet, b"controls"), "urn:child");
         assert_eq!(fragment_namespace(&sheet, b"marker"), "urn:override");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn ordinary_save_writer_scoped_mapper() {
+    for text in [
+        format!("<x xmlns:p='urn:inert'><a xmlns:p='{NS_REL}' p:id='known'/><b p:id='inert'/></x>"),
+        format!("<x xmlns:p='{NS_REL}'><a xmlns:p='urn:inert' p:id='inert'/><b p:id='known'/></x>"),
+        format!("<x xmlns:p='urn:inert'><a xmlns:p='{NS_REL}'><b p:id='known'/></a><b p:id='inert'/></x>"),
+    ] {
+        let mut seen = Vec::new();
+        let mapped = map_rel_ids(&text, &mut |id| {
+            seen.push(id.to_string());
+            (id == "known").then(|| "rId9".into())
+        });
+        assert!(mapped.is_some(), "{text}: inert scoped attributes must not invoke mapper: {seen:?}");
+        assert_eq!(seen, ["known"]);
+        assert!(mapped.unwrap().contains("p:id=\"inert\""));
     }
 }

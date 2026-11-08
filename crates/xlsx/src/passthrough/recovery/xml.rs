@@ -157,9 +157,8 @@ fn slot(e: &gridcraft_model::PreservedXml, c: &mut Claims<'_, '_>, shapes: &[u64
     let mut found = false;
     let mut refs = Vec::new();
     let merge = native_controls && e.slot == "controls";
-    let chosen = if merge { control_insertion(&e.xml) } else { None };
-    let (mut root_controls, mut root_close, mut root_context) = (false, None, false);
-    let mut contexts = [false; 2];
+    let chosen = if merge { super::super::rebase::controls_insert_at(&e.xml) } else { None };
+    let (mut root_controls, mut root_close) = (false, None);
     let (mut seen, mut active, mut waiting) = ([false; 2], [false; 2], [false; 2]);
     let mut containers: [Option<Option<usize>>; 2] = [None, None];
     let branch = |n: &Name| {
@@ -178,7 +177,6 @@ fn slot(e: &gridcraft_model::PreservedXml, c: &mut Claims<'_, '_>, shapes: &[u64
                 if merge {
                     if path.len() == 1 {
                         root_controls = is(name, MAIN, "controls");
-                        root_context = tag.main_default && tag.r_rel;
                     }
                     if path.len() == 2
                         && let Some(k) = branch(name)
@@ -193,7 +191,6 @@ fn slot(e: &gridcraft_model::PreservedXml, c: &mut Claims<'_, '_>, shapes: &[u64
                         && containers[k].is_none()
                     {
                         containers[k] = Some(None);
-                        contexts[k] = tag.main_default && tag.r_rel;
                         waiting[k] = true;
                     }
                 }
@@ -290,14 +287,7 @@ fn slot(e: &gridcraft_model::PreservedXml, c: &mut Claims<'_, '_>, shapes: &[u64
     })?;
     if merge {
         let expected = if root_controls { root_close } else { containers[0].unwrap_or_else(|| containers[1].flatten()) };
-        let default = if root_controls {
-            root_context
-        } else if containers[0].is_some() {
-            contexts[0]
-        } else {
-            contexts[1]
-        };
-        if !default || expected.is_none() || expected != chosen {
+        if expected.is_none() || expected != chosen {
             return Err(Error::UnsupportedXml);
         }
     }
@@ -310,30 +300,8 @@ fn slot(e: &gridcraft_model::PreservedXml, c: &mut Claims<'_, '_>, shapes: &[u64
     Ok(())
 }
 
-/// Same bounded raw selector as SheetKept, without rebuilding XML. After remap, start
-/// names keep their spelling; comments/end tags keep their raw bytes. Valid attributes
-/// contain no literal '<', generated IDs are markup-safe, and the shared scanner refuses
-/// raw nonrel double quotes that rebuild unsafely. Candidate identity/order therefore
-/// survives byte shifts: compare the selected original token, never rewritten offsets.
-fn control_insertion(text: &str) -> Option<usize> {
-    fn local(s: &str) -> &str {
-        s.rsplit(':').next().unwrap_or("")
-    }
-    let from = text
-        .match_indices('<')
-        .find_map(|(i, _)| {
-            let rest = &text[i + 1..];
-            let end = rest.find(|c: char| c.is_whitespace() || c == '>' || c == '/')?;
-            (local(&rest[..end]) == "Choice").then_some(i)
-        })
-        .unwrap_or(0);
-    text[from..].match_indices("</").find_map(|(i, _)| {
-        let rest = &text[from + i + 2..];
-        let end = rest.find('>')?;
-        (local(rest[..end].trim_end()) == "controls").then_some(from + i)
-    })
-}
-
+// The shared producer selectors operate on these original bytes. Remapping can shift
+// offsets, but preserves actual closing-token identity/order; never compare rewritten offsets.
 struct VmlFacts {
     numbers: Vec<u64>,
     raw_max: u64,
@@ -371,9 +339,6 @@ fn vml(q: &PreservedPart, rels: &[&PreservedRel], merge: bool) -> Checked<VmlFac
             Token::Start(tag) => {
                 if path.len() == 1 && !is(name, "", "xml") {
                     return Err(Error::Vml);
-                }
-                if path.len() == 1 && merge && !tag.vml_native {
-                    return Err(Error::UnsupportedXml);
                 }
                 references(&tag, name, rels)?;
                 if is(name, VML, "shape") {
@@ -423,7 +388,7 @@ fn vml(q: &PreservedPart, rels: &[&PreservedRel], merge: bool) -> Checked<VmlFac
     if ids.windows(2).any(|p| p[0] == p[1]) || numbers.windows(2).any(|p| p[0] == p[1]) {
         return Err(Error::Vml);
     }
-    if merge && (close.is_none() || text.rfind("</xml>") != close) {
+    if merge && (close.is_none() || super::super::read::vml_insert_at(text) != close) {
         return Err(Error::UnsupportedXml);
     }
     // Match the actual helpers' raw decimal scan and literal first idmap/data search.

@@ -765,3 +765,69 @@ fn phonetic_xlsx_real_work_cap_refuses_before_publication_and_json_is_exact() {
     assert!(a["issues"].as_array().unwrap().is_empty());
     assert_eq!(saved_phonetics(&mut s, "json", &a), exact);
 }
+
+#[test]
+fn ordinary_save_unmergeable_preserves_destination_and_dirty_document() {
+    use gridcraft_engine::model::PreservedPart;
+    let mut successes = Vec::new();
+    for defect in ["controls", "VML"] {
+        for command in ["codec", "file.save", "file.saveBytes"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            s.execute("cell.set", json!({"cell":"A1","input":"dirty original"})).unwrap();
+            let dir = phonetic_directory::Directory::acquire(
+                (0..).map(|n| std::env::temp_dir().join(format!("gridcraft-writer-loss-{}-{}-{n}", std::process::id(), s.doc().unwrap().uid))),
+            )
+            .unwrap();
+            let path = dir.join("original.xlsx").to_str().unwrap().to_owned();
+            std::fs::write(&path, b"owned original destination").unwrap();
+            {
+                let d = s.doc_mut().unwrap();
+                d.path = Some(path.clone());
+                let w = Arc::make_mut(&mut d.wb);
+                w.source_dir = Some(dir.join("source"));
+                w.source_path = Some(dir.join("source/original.xlsx"));
+                let sh = Arc::make_mut(&mut w.sheets[0]);
+                sh.controls.push(Default::default());
+                let mut p = Preserved::default();
+                if defect == "controls" {
+                    p.elements.push(PreservedXml { slot: "controls".into(), xml: "<controls/>".into() });
+                } else {
+                    p.vml = Some(PreservedPart {
+                        name: "xl/drawings/retained.vml".into(),
+                        content_type: "application/vnd.openxmlformats-officedocument.vmlDrawing".into(),
+                        data: Arc::from(&b"<p:xml xmlns:p='urn:kept'><p:marker/></p:xml>"[..]),
+                        rels: vec![],
+                    });
+                }
+                sh.preserved = Some(Arc::new(p));
+            }
+            let a = analyze(&mut s, &path);
+            let mut params = confirm(&a, &path);
+            params["format"] = json!("xlsx");
+            let d = s.doc().unwrap();
+            let (wb, saved, revision, original_path) = (d.wb.clone(), d.saved.clone(), d.revision, d.path.clone());
+            let result = if command == "codec" { io::save_bytes(&wb, &path).map(|_| json!({})) } else { s.execute(command, params) };
+            if result.is_ok() {
+                eprintln!(
+                    "old producer success: {defect}/{command}; destination changed={}; dirty={}",
+                    std::fs::read(&path).unwrap() != b"owned original destination",
+                    s.doc().unwrap().is_dirty()
+                );
+                successes.push(format!("{defect}/{command}"));
+                continue;
+            }
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(if defect == "controls" { "controls" } else { "VML" }), "{error}");
+            assert!(!error.contains("save.losses"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"owned original destination");
+            let d = s.doc().unwrap();
+            assert!(Arc::ptr_eq(&d.wb, &wb) && Arc::ptr_eq(&d.saved, &saved));
+            assert_eq!((d.revision, &d.path), (revision, &original_path));
+            assert_eq!((&d.wb.source_dir, &d.wb.source_path), (&wb.source_dir, &wb.source_path));
+            assert!(d.is_dirty());
+            assert!(s.ui_requests.is_empty());
+        }
+    }
+    assert!(successes.is_empty(), "actual old codec/save success before repair: {successes:?}");
+}

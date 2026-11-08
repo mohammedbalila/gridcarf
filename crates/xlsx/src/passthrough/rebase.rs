@@ -37,8 +37,8 @@ impl<'a> SheetKept<'a> {
 
     /// GridCraft's notes and form controls VML for part `name`, merged with the kept control and
     /// object shapes.
-    pub fn notes_vml(&self, ours: String, name: &str, out: &mut Out) -> String {
-        let Some(vml) = self.vml() else { return ours };
+    pub fn notes_vml(&self, ours: String, name: &str, out: &mut Out) -> Result<String, IoError> {
+        let Some(vml) = self.vml() else { return Ok(ours) };
         self.write_vml_rels(vml, name, out);
         merge_vml(&String::from_utf8_lossy(&vml.data), &ours)
     }
@@ -60,19 +60,22 @@ impl<'a> SheetKept<'a> {
 
     /// The kept sheet elements, in schema order, with GridCraft's own form control entries
     /// (`controls`, see `controls::write`) in the sheet's one `<controls>` element.
-    pub fn elements(&self, controls: &str) -> String {
+    pub fn elements(&self, controls: &str) -> Result<String, IoError> {
         let mut s = String::new();
         let mut placed = controls.is_empty();
         if let Some(p) = self.p {
             for slot in SHEET_SLOTS {
                 for e in p.elements.iter().filter(|e| e.slot == *slot) {
                     if let Some(mut x) = remap(&e.xml, &self.ids) {
-                        if *slot == "controls"
-                            && !placed
-                            && let Some(i) = controls_insert_at(&x)
-                        {
-                            x.insert_str(i, controls);
-                            placed = true;
+                        if *slot == "controls" && !placed {
+                            match control_insertion(&x).ok_or_else(control_error)? {
+                                ControlSelection::Insertion(at) => {
+                                    x.insert_str(at.at, &controls_for_insertion(controls, at)?);
+                                    placed = true;
+                                }
+                                ControlSelection::SelectedNoInsertion => return Err(control_error()),
+                                ControlSelection::Absent => {}
+                            }
                         }
                         s.push_str(&x);
                     }
@@ -83,44 +86,119 @@ impl<'a> SheetKept<'a> {
         if !placed {
             s.push_str(&crate::controls::controls_element(controls));
         }
-        s
+        Ok(s)
     }
 }
 
-/// Where GridCraft's control entries go in a kept `<controls>` fragment: just before the close
-/// tag of the `<controls>` element the reader reads (`controls::controls_of`), whatever its
-/// namespace prefix. In an `mc:AlternateContent` with separate `<controls>` elements in its
-/// Choice and Fallback branches that is the Choice's, the one an application that knows the
-/// x14 extensions reads; the Fallback's is left as the file had it. With no Choice, or a Choice
-/// without a `<controls>` element, it is the first `<controls>` element (a plain fragment, or a
-/// Fallback alone).
-fn controls_insert_at(x: &str) -> Option<usize> {
-    let from = open_tag(x, "Choice").unwrap_or(0);
-    close_tag_from(x, from, "controls")
+#[derive(Clone, Copy)]
+struct ControlInsertion {
+    at: usize,
+    main_default: bool,
+    r_relationship: bool,
+}
+#[derive(Clone, Copy)]
+enum ControlSelection {
+    Absent,
+    SelectedNoInsertion,
+    Insertion(ControlInsertion),
+}
+fn control_error() -> IoError {
+    IoError::Format("kept controls have no supported insertion context".into())
 }
 
-/// The local name of the tag whose text starts at `name` (`x:controls` → `controls`).
-fn local_name(name: &str) -> &str {
-    name.rsplit(':').next().unwrap_or(name)
+/// Select exactly the reader's plain controls, first Choice's direct controls, else
+/// first Fallback's direct controls. A selected empty element is not an absent one.
+fn control_insertion(x: &str) -> Option<ControlSelection> {
+    use quick_xml::name::{Namespace, PrefixDeclaration, ResolveResult};
+    let mut reader = quick_xml::NsReader::from_str(x);
+    reader.resolver_mut().set_max_declarations_per_element(x.len());
+    reader.resolver_mut().add(PrefixDeclaration::Default, Namespace(crate::write::NS_MAIN.as_bytes())).ok()?;
+    reader.resolver_mut().add(PrefixDeclaration::Named(b"r"), Namespace(NS_REL.as_bytes())).ok()?;
+    let (mut depth, mut alternate, mut active) = (0usize, false, None);
+    let mut seen = [false; 2];
+    let mut fallback = None;
+    loop {
+        let event = reader.read_event().ok()?;
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let empty = matches!(event, Event::Empty(_));
+                let local = e.local_name();
+                let name = local.as_ref();
+                let level = depth + 1;
+                if level == 1 {
+                    alternate = name == b"AlternateContent";
+                }
+                if alternate && level == 2 {
+                    let k = match name {
+                        b"Choice" => Some(0),
+                        b"Fallback" => Some(1),
+                        _ => None,
+                    };
+                    active = k.filter(|k| !seen[*k]);
+                    if let Some(k) = k {
+                        seen[k] = true;
+                    }
+                    if empty {
+                        active = None;
+                    }
+                }
+                if name == b"controls" && (level == 1 || alternate && level == 3 && active.is_some()) {
+                    let main_default = matches!(reader.resolver().resolve_prefix(None, true), ResolveResult::Bound(ns) if ns.as_ref() == crate::write::NS_MAIN.as_bytes());
+                    let r_relationship =
+                        matches!(reader.resolver().resolve_attribute(QName(b"r:id")).0, ResolveResult::Bound(ns) if ns.as_ref() == NS_REL.as_bytes());
+                    let selected = if empty {
+                        ControlSelection::SelectedNoInsertion
+                    } else {
+                        let at = usize::try_from(reader.read_to_end(e.name()).ok()?.end).ok()?;
+                        ControlSelection::Insertion(ControlInsertion { at, main_default, r_relationship })
+                    };
+                    if level == 1 || active == Some(0) {
+                        return Some(selected);
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(selected);
+                    }
+                    continue;
+                }
+                if !empty {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                if depth == 2 {
+                    active = None;
+                }
+                depth = depth.checked_sub(1)?;
+            }
+            Event::Eof => return (depth == 0).then_some(fallback.unwrap_or(ControlSelection::Absent)),
+            _ => {}
+        }
+    }
 }
-
-/// The byte offset of the first open tag of `local` in `x`, with any namespace prefix.
-fn open_tag(x: &str, local: &str) -> Option<usize> {
-    x.match_indices('<').find_map(|(i, _)| {
-        let rest = x.get(i + 1..)?;
-        let end = rest.find(|c: char| c.is_whitespace() || c == '>' || c == '/')?;
-        (local_name(rest.get(..end)?) == local).then_some(i)
-    })
+pub(super) fn controls_insert_at(x: &str) -> Option<usize> {
+    match control_insertion(x)? {
+        ControlSelection::Insertion(at) => Some(at.at),
+        _ => None,
+    }
 }
-
-/// The byte offset of the first close tag of `local` at or after `from` in `x`, with any
-/// namespace prefix (`</controls>`, `</x:controls>`).
-fn close_tag_from(x: &str, from: usize, local: &str) -> Option<usize> {
-    x.get(from..)?.match_indices("</").find_map(|(i, _)| {
-        let rest = x.get(from + i + 2..)?;
-        let name = rest.get(..rest.find('>')?)?.trim_end();
-        (local_name(name) == local).then_some(from + i)
-    })
+fn controls_for_insertion(entries: &str, at: ControlInsertion) -> Result<Cow<'_, str>, IoError> {
+    if at.main_default && at.r_relationship {
+        return Ok(Cow::Borrowed(entries));
+    }
+    // controls::write emits one such root per entry; both branches inherit these bindings.
+    const ROOT: &str = "<mc:AlternateContent xmlns:mc=";
+    if !entries.starts_with(ROOT) {
+        return Err(control_error());
+    }
+    let mut root = String::from("<mc:AlternateContent");
+    if !at.main_default {
+        let _ = write!(root, " xmlns=\"{}\"", crate::write::NS_MAIN);
+    }
+    if !at.r_relationship {
+        let _ = write!(root, " xmlns:r=\"{NS_REL}\"");
+    }
+    root.push_str(" xmlns:mc=");
+    Ok(Cow::Owned(entries.replace(ROOT, &root)))
 }
 
 // ---------------------------------------------------------------- linked workbooks

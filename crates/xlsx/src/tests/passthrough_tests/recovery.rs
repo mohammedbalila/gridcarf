@@ -1028,7 +1028,7 @@ fn passthrough_recovery_scanner_scalar_entity_namespace_refusals_are_finite() {
 fn passthrough_recovery_scanner_writer_remap_representation_and_real_limits() {
     use crate::passthrough::recovery::scanner::{Failure, scan_recovery};
     let rebinding = format!("<x xmlns:r='{NS_R}'><a xmlns:r='urn:other' r:id='inert'/></x>");
-    assert_eq!(scan_recovery(rebinding.as_bytes(), true, true, |_, _| Ok(())), Err(Failure::Unsupported));
+    assert_eq!(scan_recovery(rebinding.as_bytes(), true, true, |_, _| Ok(())), Ok(()));
     assert_eq!(scan_recovery(rebinding.as_bytes(), false, false, |_, _| Ok(())), Ok(()));
     let encoded = format!("<picture xmlns:r='{NS_R}' r:id='r&#49;'/>");
     assert_eq!(scan_recovery(encoded.as_bytes(), true, true, |_, _| Ok(())), Err(Failure::Unsupported));
@@ -1049,7 +1049,7 @@ fn passthrough_recovery_scanner_writer_remap_representation_and_real_limits() {
 fn passthrough_recovery_scanner_prefix_returns_and_reserved_namespace_refuse() {
     use crate::passthrough::recovery::scanner::{Failure, scan_recovery};
     let xml = format!("<x xmlns:r='urn:inert'><a xmlns:r='{NS_R}' r:id='known'/><b r:id='inert'/></x>");
-    assert_eq!(scan_recovery(xml.as_bytes(), true, true, |_, _| Ok(())), Err(Failure::Unsupported));
+    assert_eq!(scan_recovery(xml.as_bytes(), true, true, |_, _| Ok(())), Ok(()));
     assert_eq!(scan_recovery(xml.as_bytes(), false, false, |_, _| Ok(())), Ok(()));
     assert_eq!(scan_recovery(b"<xmlns:root/>", false, false, |_, _| Ok(())), Err(Failure::Malformed));
 }
@@ -1450,19 +1450,19 @@ fn passthrough_recovery_chart_text_line_endings_match_actual_retention() {
 }
 
 #[test]
-fn passthrough_recovery_raw_merge_vml_close_in_trailing_comment_is_unrepresentable() {
+fn passthrough_recovery_merge_vml_ignores_trailing_comment_close() {
     let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
     let p = Arc::make_mut(Arc::make_mut(&mut wb.sheets[0]).preserved.as_mut().unwrap());
     let q = p.vml.as_mut().unwrap();
     q.data = Arc::from(format!("{}<!--</xml>-->", std::str::from_utf8(&q.data).unwrap()).into_bytes());
     let out = Unpacked::new(&write_xlsx(&wb).unwrap());
     let root = xml::parse(&out.parts["xl/drawings/vmlDrawing1.vml"]).unwrap();
-    assert_eq!(root.kids("shape").count(), 2, "the modeled note was inserted inside a comment");
-    assert_eq!(crate::validate_recovery_preserved(&wb), Err(Error::UnsupportedXml));
+    assert_eq!(root.kids("shape").count(), 3, "the modeled note joins both retained shapes");
+    assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
 }
 
 #[test]
-fn passthrough_recovery_raw_merge_controls_close_in_comment_is_unrepresentable() {
+fn passthrough_recovery_merge_controls_ignores_comment_close() {
     let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
     let sh = Arc::make_mut(&mut wb.sheets[0]);
     sh.controls.push(Default::default());
@@ -1472,25 +1472,23 @@ fn passthrough_recovery_raw_merge_controls_close_in_comment_is_unrepresentable()
     let out = Unpacked::new(&write_xlsx(&wb).unwrap());
     let part = sheet_part(&out, "Data");
     let root = xml::parse(&out.parts[&part]).unwrap();
-    assert_eq!(root.child("controls").unwrap().kids("control").count(), 1, "modeled control was inserted inside a comment");
-    assert_eq!(crate::validate_recovery_preserved(&wb), Err(Error::UnsupportedXml));
+    assert_eq!(root.child("controls").unwrap().children.len(), 2, "retained plus generated control entry");
+    assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
 }
 
 #[test]
-fn passthrough_recovery_remapped_literal_double_quote_needs_finite_refusal() {
-    use crate::passthrough::recovery::scanner::{Failure, scan_recovery};
+fn passthrough_recovery_remapped_literal_double_quote_retains_value() {
+    use crate::passthrough::recovery::scanner::scan_recovery;
     let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
     let p = Arc::make_mut(Arc::make_mut(&mut wb.sheets[0]).preserved.as_mut().unwrap());
     let e = p.elements.iter_mut().find(|e| e.slot == "controls").unwrap();
     e.xml = e.xml.replace("name=\"Check Box 1\"", "name='Check \" Box 1'");
     let out = Unpacked::new(&write_xlsx(&wb).unwrap());
     let sheet = sheet_part(&out, "Data");
-    assert_eq!(
-        scan_recovery(&out.parts[&sheet], false, false, |_, _| Ok(())),
-        Err(Failure::Malformed),
-        "actual start-tag rebuild does not escape a raw nonrel double quote"
-    );
-    assert_eq!(crate::validate_recovery_preserved(&wb), Err(Error::UnsupportedXml));
+    assert_eq!(scan_recovery(&out.parts[&sheet], false, false, |_, _| Ok(())), Ok(()), "actual start-tag rebuild safely escapes the literal quote");
+    let written = xml::parse(&out.parts[&sheet]).unwrap();
+    assert_eq!(written.child("controls").unwrap().child("control").unwrap().attr("name"), Some("Check \" Box 1"));
+    assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
     let mut wb = Workbook::new();
     let mut p = Preserved { rels: vec![rel("x", "customXml", "customXml/a.xml")], parts: vec![part("customXml/a.xml")], ..Default::default() };
     let body = b"<root name='literal\"quote'/>";
@@ -1563,7 +1561,7 @@ fn passthrough_recovery_known_chart_role_keeps_formula_checks_when_mime_case_dif
 }
 
 #[test]
-fn passthrough_recovery_control_insertion_requires_the_main_default_namespace() {
+fn passthrough_recovery_control_insertion_isolates_main_default_namespace() {
     use crate::passthrough::recovery::scanner::{RecoveryToken, scan_recovery};
     let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
     let sh = Arc::make_mut(&mut wb.sheets[0]);
@@ -1590,8 +1588,8 @@ fn passthrough_recovery_control_insertion_requires_the_main_default_namespace() 
         Ok(())
     })
     .unwrap();
-    assert_eq!((all, main), (3, 1), "both generated Choice/Fallback control entries inherited the reset default");
-    assert_eq!(crate::validate_recovery_preserved(&wb), Err(Error::UnsupportedXml));
+    assert_eq!((all, main), (3, 3), "both generated branches have the MAIN default");
+    assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
     Arc::make_mut(&mut wb.sheets[0]).controls.clear();
     assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()), "opaque prefixed controls are valid without insertion");
 }
@@ -1632,7 +1630,7 @@ fn passthrough_recovery_chart_entries_can_share_one_valid_local_relationship() {
 }
 
 #[test]
-fn passthrough_recovery_generated_prefix_controls_require_rel_binding_for_r() {
+fn passthrough_recovery_generated_prefix_controls_isolate_r_binding() {
     use crate::passthrough::recovery::scanner::{RecoveryToken, scan_recovery};
     let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
     let sh = Arc::make_mut(&mut wb.sheets[0]);
@@ -1655,15 +1653,16 @@ fn passthrough_recovery_generated_prefix_controls_require_rel_binding_for_r() {
         Ok(())
     })
     .unwrap();
-    assert_eq!((all, linked), (3, 1), "generated r:id binds to the retained inert URI");
-    assert_eq!(crate::validate_recovery_preserved(&wb), Err(Error::UnsupportedXml));
+    ordinary_control_targets(&out, &part);
+    assert_eq!((all, linked), (3, 3), "generated r:id binds to REL in both branches");
+    assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
     Arc::make_mut(&mut wb.sheets[0]).controls.clear();
     assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
 }
 
 #[test]
-fn passthrough_recovery_generated_prefix_vml_require_native_bindings_only_for_merge() {
-    use crate::passthrough::recovery::scanner::{Failure, scan_recovery};
+fn passthrough_recovery_generated_prefix_vml_isolate_native_bindings() {
+    use crate::passthrough::recovery::scanner::scan_recovery;
     let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
     let p = Arc::make_mut(Arc::make_mut(&mut wb.sheets[0]).preserved.as_mut().unwrap());
     let q = p.vml.as_mut().unwrap();
@@ -1677,14 +1676,24 @@ fn passthrough_recovery_generated_prefix_vml_require_native_bindings_only_for_me
         .replace("x:", "z:");
     q.data = Arc::from(text.into_bytes());
     let out = Unpacked::new(&write_xlsx(&wb).unwrap());
-    assert_eq!(scan_recovery(&out.parts["xl/drawings/vmlDrawing1.vml"], false, false, |_, _| Ok(())), Err(Failure::Malformed));
-    assert_eq!(crate::validate_recovery_preserved(&wb), Err(Error::UnsupportedXml));
+    assert_eq!(scan_recovery(&out.parts["xl/drawings/vmlDrawing1.vml"], false, false, |_, _| Ok(())), Ok(()));
+    let tags = ordinary_tags(&out.text("xl/drawings/vmlDrawing1.vml"));
+    assert_eq!(tags.iter().filter(|(ns, n, _)| ns == "urn:schemas-microsoft-com:vml" && n == "shape").count(), 3);
+    assert_eq!(
+        tags.iter()
+            .filter(|(ns, n, a)| ns == "urn:schemas-microsoft-com:office:excel"
+                && n == "ClientData"
+                && a.iter().any(|(_, n, v)| n == "ObjectType" && v == "Note"))
+            .count(),
+        1
+    );
+    assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()));
     Arc::make_mut(&mut Arc::make_mut(&mut wb.sheets[0]).comments).clear();
     assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()), "lone alias-prefixed VML is emitted raw");
 }
 
 #[test]
-fn passthrough_recovery_remapped_xmlns_prefixed_relationship_refuses() {
+fn passthrough_recovery_remapped_xmlns_prefixed_relationship_retains_ids() {
     use gridcraft_model::PreservedXml;
     let image =
         PreservedPart { name: "xl/media/alias.png".into(), content_type: "image/png".into(), data: Arc::from(&b"P3-alias-image"[..]), rels: vec![] };
@@ -1723,10 +1732,9 @@ fn passthrough_recovery_remapped_xmlns_prefixed_relationship_refuses() {
         assert_ne!(id, "old");
         assert_eq!(out.parts[target], image.data.as_ref());
         let value = attr_of(&out.text(&sheet), "picture", &format!("{prefix}:id"));
-        let excluded = prefix.starts_with("xmlns");
-        assert_eq!(value, if excluded { "old" } else { id });
-        assert_eq!(relationships.iter().any(|r| r.0 == value), !excluded);
+        assert_eq!(&value, id);
+        assert!(relationships.iter().any(|r| r.0 == value));
         eprintln!("prefix={prefix}; actual picture ID={value}; emitted relationship ID={id}; target={target}");
-        assert_eq!(crate::validate_recovery_preserved(&wb), if excluded { Err(Error::UnsupportedXml) } else { Ok(()) }, "{prefix}");
+        assert_eq!(crate::validate_recovery_preserved(&wb), Ok(()), "{prefix}");
     }
 }

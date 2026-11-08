@@ -1078,3 +1078,561 @@ fn a_sheet_of_modelled_controls_keeps_nothing_for_them() {
     assert_eq!(sh.controls.len(), 2);
     assert!(sh.preserved.is_none(), "{:?}", sh.preserved);
 }
+
+// Ordinary Save regressions inspect the actual package before import can hide writer loss.
+type OrdinaryTag = (String, String, Vec<(String, String, String)>);
+struct OrdinaryNode {
+    tag: OrdinaryTag,
+    parent: Option<usize>,
+    text: String,
+    span: std::ops::Range<usize>,
+}
+fn ordinary_nodes(text: &str) -> Vec<OrdinaryNode> {
+    use quick_xml::{NsReader, events::Event, name::ResolveResult};
+    let mut reader = NsReader::from_str(text);
+    reader.resolver_mut().set_max_declarations_per_element(text.len());
+    let namespace = |ns: ResolveResult<'_>| match ns {
+        ResolveResult::Bound(n) => quick_xml::escape::unescape(std::str::from_utf8(n.as_ref()).unwrap()).unwrap().into_owned(),
+        ResolveResult::Unbound => String::new(),
+        ResolveResult::Unknown(p) => panic!("unbound prefix {p:?}"),
+    };
+    let mut nodes: Vec<OrdinaryNode> = Vec::new();
+    let mut stack = Vec::new();
+    loop {
+        let start = usize::try_from(reader.buffer_position()).unwrap();
+        let event = reader.read_event().unwrap();
+        let open = matches!(event, Event::Start(_));
+        match event {
+            Event::Start(e) | Event::Empty(e) => {
+                let (ns, local) = reader.resolver().resolve_element(e.name());
+                let mut attrs = Vec::new();
+                for a in e.attributes() {
+                    let a = a.unwrap();
+                    if a.key.as_ref() == b"xmlns" || a.key.as_ref().starts_with(b"xmlns:") {
+                        continue;
+                    }
+                    let (ns, local) = reader.resolver().resolve_attribute(a.key);
+                    attrs.push((
+                        namespace(ns),
+                        String::from_utf8(local.as_ref().to_vec()).unwrap(),
+                        a.normalized_value(quick_xml::XmlVersion::Explicit1_0).unwrap().into_owned(),
+                    ));
+                }
+                let tag = (namespace(ns), String::from_utf8(local.as_ref().to_vec()).unwrap(), attrs);
+                let index = nodes.len();
+                nodes.push(OrdinaryNode {
+                    tag,
+                    parent: stack.last().copied(),
+                    text: String::new(),
+                    span: start..usize::try_from(reader.buffer_position()).unwrap(),
+                });
+                if open {
+                    stack.push(index);
+                }
+            }
+            Event::End(_) => {
+                stack.pop();
+            }
+            Event::Text(e) => {
+                if let Some(&i) = stack.last() {
+                    nodes[i].text.push_str(&e.decode().unwrap());
+                }
+            }
+            Event::GeneralRef(e) => {
+                if let Some(&i) = stack.last() {
+                    nodes[i].text.push_str(&quick_xml::escape::unescape(&format!("&{};", e.decode().unwrap())).unwrap());
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    nodes
+}
+fn ordinary_tags(text: &str) -> Vec<OrdinaryTag> {
+    ordinary_nodes(text).into_iter().map(|n| n.tag).collect()
+}
+fn ordinary_field<'a>(node: &'a OrdinaryNode, ns: &str, name: &str) -> Option<&'a str> {
+    let fields: Vec<_> = node.tag.2.iter().filter(|(n, k, _)| n == ns && k == name).collect();
+    assert!(fields.len() <= 1);
+    fields.first().map(|(_, _, v)| v.as_str())
+}
+fn ordinary_child(nodes: &[OrdinaryNode], parent: usize, ns: &str, name: &str) -> usize {
+    let matches: Vec<_> =
+        nodes.iter().enumerate().filter(|(_, n)| n.parent == Some(parent) && n.tag.0 == ns && n.tag.1 == name).map(|(i, _)| i).collect();
+    assert_eq!(matches.len(), 1, "{ns}:{name}");
+    matches[0]
+}
+fn ordinary_output(out: &Unpacked, label: &str) {
+    if let Ok(root) = std::env::var("GRIDCRAFT_D3_I1_OUTPUTS_DIR") {
+        for (name, bytes) in &out.parts {
+            let path = std::path::Path::new(&root).join(label).join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+}
+
+fn ordinary_slider(wb: &mut gridcraft_model::Workbook) {
+    Arc::make_mut(&mut wb.sheets[0]).controls.push(gridcraft_model::FormControl {
+        id: 900,
+        kind: gridcraft_model::ControlKind::Slider,
+        name: "Native slider".into(),
+        value: 40,
+        link: Some("$B$9".into()),
+        anchor: gridcraft_model::Anchor { cell: gridcraft_core::CellRef::new(8, 1), width: 120.0, height: 20.0, ..Default::default() },
+        ..Default::default()
+    });
+}
+fn ordinary_kept(wb: &mut gridcraft_model::Workbook) -> &mut gridcraft_model::Preserved {
+    Arc::make_mut(Arc::make_mut(&mut wb.sheets[0]).preserved.as_mut().unwrap())
+}
+fn ordinary_reload(wb: &gridcraft_model::Workbook) -> Unpacked {
+    let bytes = write_xlsx(wb).unwrap();
+    let (again, report) = read_xlsx(&bytes).unwrap();
+    assert!(!report.warnings.iter().any(|w| w.contains("dropped")), "{:?}", report.warnings);
+    assert_eq!(again.sheets[0].comments, wb.sheets[0].comments);
+    assert_eq!(again.sheets[0].controls.len(), wb.sheets[0].controls.len());
+    let ids: std::collections::HashSet<_> = again.sheets[0].controls.iter().map(|c| c.id).collect();
+    assert_eq!(ids.len(), again.sheets[0].controls.len());
+    for c in &wb.sheets[0].controls {
+        let matches: Vec<_> = again.sheets[0].controls.iter().filter(|x| x.name == c.name).collect();
+        assert_eq!(matches.len(), 1, "{}", c.name);
+        let got = matches[0];
+        assert_eq!((got.kind, got.value, &got.link, &got.anchor), (c.kind, c.value, &c.link, &c.anchor));
+    }
+    let out = Unpacked::new(&write_xlsx(&again).unwrap());
+    out.assert_valid();
+    for retained in [OLE, EMF, CTRL_PROP.as_bytes()] {
+        assert_eq!(out.find(retained).len(), 1, "retained {:?}", String::from_utf8_lossy(retained));
+    }
+    out
+}
+
+#[test]
+fn ordinary_save_writer_control_real_close_and_branch_selection() {
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    for (before, after) in [("", ""), ("<!--<mc:Choice>-->", "<!--</controls>-->"), ("<?p fake='<Choice>'?>", "<![CDATA[</controls>]]>")] {
+        for branch in ["plain", "choice", "fallback-first", "no-choice-controls", "multiple-choice", "fallback-only", "fallback-before-empty-choice"]
+        {
+            let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+            ordinary_slider(&mut wb);
+            let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+            let original = e.xml.replace("</controls>", &format!("{after}</controls>"));
+            let fallback = "<mc:Fallback><controls><marker/></controls></mc:Fallback>";
+            e.xml = match branch {
+                "plain" => format!("{before}{original}"),
+                "choice" => format!("<mc:AlternateContent xmlns:mc='{mc}'>{before}<mc:Choice>{original}</mc:Choice>{fallback}</mc:AlternateContent>"),
+                "fallback-first" => format!("<mc:AlternateContent xmlns:mc='{mc}'>{fallback}<mc:Choice>{original}</mc:Choice></mc:AlternateContent>"),
+                "fallback-only" => format!("<mc:AlternateContent xmlns:mc='{mc}'><mc:Fallback>{original}</mc:Fallback></mc:AlternateContent>"),
+                "fallback-before-empty-choice" => {
+                    format!("<mc:AlternateContent xmlns:mc='{mc}'><mc:Fallback>{original}</mc:Fallback><mc:Choice/></mc:AlternateContent>")
+                }
+                "no-choice-controls" => format!(
+                    "<mc:AlternateContent xmlns:mc='{mc}'><mc:Choice><wrapper><controls/></wrapper></mc:Choice><mc:Fallback>{original}</mc:Fallback></mc:AlternateContent>"
+                ),
+                _ => format!(
+                    "<mc:AlternateContent xmlns:mc='{mc}'><mc:Choice/><mc:Choice><controls/></mc:Choice><mc:Fallback>{original}</mc:Fallback></mc:AlternateContent>"
+                ),
+            };
+            let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+            let root = xml::parse(&out.parts[&sheet_part(&out, "Data")]).unwrap();
+            let selected = root.children.iter().find_map(crate::controls::controls_of).unwrap();
+            assert_eq!(selected.children.len(), 2, "{branch}: retained plus native entry, outside fake markup");
+            let second = ordinary_reload(&wb);
+            assert!(second.text(&sheet_part(&second, "Data")).contains("Native slider"));
+        }
+    }
+}
+
+#[test]
+fn ordinary_save_writer_vml_real_close() {
+    for suffix in ["<!--</xml>-->", "<?p close='</xml>'?>", ""] {
+        let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+        let v = ordinary_kept(&mut wb).vml.as_mut().unwrap();
+        v.data = Arc::from(format!("{}{suffix}", String::from_utf8_lossy(&v.data)).replacen("</xml>", "<!--harmless--></xml>", 1).into_bytes());
+        let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+        let tags = ordinary_tags(&out.text("xl/drawings/vmlDrawing1.vml"));
+        assert_eq!(tags.iter().filter(|(_, n, _)| n == "shape").count(), 3);
+        assert_eq!(tags.iter().filter(|(_, n, a)| n == "ClientData" && a.iter().any(|(_, n, v)| n == "ObjectType" && v == "Note")).count(), 1);
+        ordinary_reload(&wb);
+    }
+}
+
+#[test]
+fn ordinary_save_writer_quote_scope_and_xmlns_attribute() {
+    for (decl, body, attr) in [
+        ("xmlns:p='urn:inert'".to_string(), format!("<a xmlns:p='{NS_R}' p:id='rId5'/><b p:id='inert'/>"), "name='Check \" Box 1'"),
+        (format!("xmlns:p='{NS_R}'"), "<a xmlns:p='urn:inert'><b p:id='inert'/></a><b p:id='rId5'/>".into(), "name='Check \" Box 1'"),
+        ("xmlns:p='urn:inert'".to_string(), format!("<a xmlns:p='{NS_R}'><b p:id='rId5'/></a><b p:id='inert'/>"), "name='Check \" Box 1'"),
+        (format!("xmlns:xmlnsfoo='{NS_R}'"), "<b xmlnsfoo:id='rId5'/>".into(), "name='Check \" Box 1'"),
+    ] {
+        let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+        let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+        e.xml = e
+            .xml
+            .replacen("<controls", &format!("<controls {decl}"), 1)
+            .replace("name=\"Check Box 1\"", attr)
+            .replace("</controls>", &format!("{body}<marker id='inert' value='&amp;&quot;&#34;'/></controls>"));
+        let expected_marker = "<marker id=\"inert\" value=\"&amp;&quot;&#34;\"/>";
+        let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+        let sheet = sheet_part(&out, "Data");
+        let text = out.text(&sheet);
+        let tags = ordinary_tags(&text);
+        assert!(text.contains(expected_marker), "entity bytes and attribute order: {text}");
+        assert!(tags.iter().any(|(_, n, a)| n == "control" && a.iter().any(|(_, n, v)| n == "name" && v == "Check \" Box 1")));
+        for (_, _, attrs) in tags {
+            for (ns, _, value) in attrs {
+                if ns == NS_R {
+                    assert!(out.rels(&sheet).iter().any(|r| r.0 == value));
+                }
+                if ns == "urn:inert" {
+                    assert_eq!(value, "inert");
+                }
+            }
+        }
+        ordinary_reload(&wb);
+        // Build an actual imported package too: importer must not prune an inert scoped id.
+        let imported = Unpacked::new(&rich_package());
+        let mut parts = imported.parts.clone();
+        let sheet = "xl/worksheets/sheet1.xml";
+        let changed = String::from_utf8(parts[sheet].clone())
+            .unwrap()
+            .replace("<controls>", &format!("<controls {decl}>"))
+            .replace("</controls>", &format!("{body}</controls>"));
+        parts.insert(sheet.into(), changed.into_bytes());
+        let files: Vec<_> = parts.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        let (loaded, rep) = read_xlsx(&make_zip(&files)).unwrap();
+        assert!(!rep.warnings.iter().any(|w| w.contains("controls were dropped")), "{:?}", rep.warnings);
+        assert!(loaded.sheets[0].preserved.as_ref().unwrap().elements.iter().any(|e| e.slot == "controls"));
+    }
+}
+
+fn ordinary_control_targets(out: &Unpacked, sheet: &str) {
+    for (_, _, attrs) in ordinary_tags(&out.text(sheet)).iter().filter(|(ns, n, _)| ns == NS_MAIN && n == "control") {
+        let id = &attrs.iter().find(|(ns, n, _)| ns == NS_R && n == "id").unwrap().2;
+        let (kind, target) = out.target(sheet, id);
+        assert!(kind.ends_with("/ctrlProp"));
+        let properties = xml::parse(&out.parts[&target]).unwrap();
+        assert_eq!(properties.name, "formControlPr");
+        let name = &attrs.iter().find(|(_, n, _)| n == "name").unwrap().2;
+        if let Some((value, link)) = match name.as_str() {
+            "Native slider" => Some(("40", "$B$9")),
+            "Native second" => Some(("73", "$C$10")),
+            _ => None,
+        } {
+            assert_eq!(
+                (properties.attr("objectType"), properties.attr("val"), properties.attr("fmlaLink")),
+                (Some("Scroll"), Some(value), Some(link))
+            );
+        } else if name == "Check Box 1" {
+            assert_eq!(out.parts[&target], CTRL_PROP.as_bytes());
+        }
+    }
+}
+
+fn ordinary_control_namespace_output(out: &Unpacked, wb: &gridcraft_model::Workbook, default: &str, r: &str) {
+    let sheet = sheet_part(out, "Data");
+    let text = out.text(&sheet);
+    let nodes = ordinary_nodes(&text);
+    ordinary_control_targets(out, &sheet);
+    let controls: Vec<_> = nodes.iter().filter(|n| n.tag.1 == "control").collect();
+    assert_eq!(controls.len(), 1 + 2 * wb.sheets[0].controls.len());
+    assert!(controls.iter().all(|n| n.tag.0 == NS_MAIN && ordinary_field(n, NS_R, "id").is_some()));
+    let mut targets = std::collections::HashSet::new();
+    for (i, c) in wb.sheets[0].controls.iter().enumerate() {
+        let own: Vec<_> = controls.iter().filter(|n| ordinary_field(n, "", "name") == Some(c.name.as_str())).collect();
+        assert_eq!(own.len(), 2, "one Choice and one Fallback for {}", c.name);
+        let parents: Vec<_> = own.iter().map(|n| &nodes[n.parent.unwrap()].tag).collect();
+        assert!(parents.iter().all(|n| n.0 == "http://schemas.openxmlformats.org/markup-compatibility/2006"));
+        assert_eq!(parents.iter().map(|n| n.1.as_str()).collect::<Vec<_>>(), ["Choice", "Fallback"]);
+        let ids: Vec<_> = own.iter().map(|n| ordinary_field(n, NS_R, "id").unwrap()).collect();
+        assert_eq!(ids[0], ids[1]);
+        assert!(targets.insert(out.target(&sheet, ids[0]).1));
+        assert!(own.iter().all(|n| ordinary_field(n, "", "shapeId") == Some((2050 + i).to_string().as_str())));
+    }
+    assert_eq!(nodes.iter().filter(|n| n.tag.1 == "marker" && n.tag.0 == default).count(), 1);
+    assert_eq!(text.matches("<marker/><!--child shadow--><child xmlns:r=\"urn:temporary\"/>").count(), 1);
+    if r != NS_R {
+        assert_eq!(nodes.iter().filter(|n| ordinary_field(n, r, "label") == Some("retained")).count(), 1);
+        assert_eq!(text.matches(" r:label=\"retained\"").count(), 1);
+    }
+}
+
+#[test]
+fn ordinary_save_writer_control_namespace_isolation() {
+    for placement in ["container", "choice-ancestor", "fallback-ancestor"] {
+        for (case, (default, r)) in [("", NS_R), ("urn:foreign", "urn:inert"), (NS_MAIN, "urn:inert"), (NS_MAIN, NS_R)].into_iter().enumerate() {
+            let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+            ordinary_slider(&mut wb);
+            ordinary_slider(&mut wb);
+            let second = &mut Arc::make_mut(&mut wb.sheets[0]).controls[1];
+            second.id = 901;
+            second.name = "Native second".into();
+            second.value = 73;
+            second.link = Some("$C$10".into());
+            second.anchor = gridcraft_model::Anchor { cell: gridcraft_core::CellRef::new(9, 2), width: 64.0, height: 40.0, ..Default::default() };
+            let retained = String::from_utf8(ordinary_kept(&mut wb).vml.as_ref().unwrap().data.to_vec()).unwrap();
+            let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+            e.xml = e
+                .xml
+                .replace(&format!("xmlns:r=\"{NS_R}\""), &format!("xmlns:k='{NS_R}' xmlns:r='{r}'"))
+                .replace("r:id=", "k:id=")
+                .replacen("<controls", &format!("<s:controls xmlns:s='{NS_MAIN}' xmlns='{default}'"), 1)
+                .replace("</controls>", "<marker/><!--child shadow--><child xmlns:r='urn:temporary'/></s:controls>")
+                .replace("<control ", "<s:control ");
+            if r != NS_R {
+                e.xml = e.xml.replacen("<s:controls", "<s:controls r:label='retained'", 1);
+            }
+            if placement != "container" {
+                e.xml = e.xml.replace(&format!(" xmlns:k='{NS_R}' xmlns:r='{r}'"), "").replace(&format!(" xmlns='{default}'"), "");
+                let branch = if placement == "choice-ancestor" {
+                    format!("<mc:Choice>{}</mc:Choice>", e.xml)
+                } else {
+                    format!("<mc:Choice/><mc:Fallback>{}</mc:Fallback>", e.xml)
+                };
+                e.xml = format!(
+                    "<mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' xmlns:k='{NS_R}' xmlns:r='{r}' xmlns='{default}'>{branch}</mc:AlternateContent>"
+                );
+            }
+            let first = Unpacked::new(&write_xlsx(&wb).unwrap());
+            for (save, out) in [first, ordinary_reload(&wb)].iter().enumerate() {
+                ordinary_output(out, &format!("controls-{placement}-{case}-{}", save + 1));
+                ordinary_control_namespace_output(out, &wb, default, r);
+                ordinary_vml_output(out, &wb, &retained, save + 1, "");
+            }
+        }
+    }
+}
+
+fn ordinary_vml_context(mut text: String, wrong: &str) -> String {
+    if wrong == "normalized" {
+        return text.replace("com:vml", "com:vm&#108;").replace("office:office", "office:offic&#101;").replace("office:excel", "office:exce&#108;");
+    }
+    for (p, alias) in [("v", "w"), ("o", "f"), ("x", "z")] {
+        if wrong.contains(p) || wrong == "inert" {
+            text = text.replace(&format!("xmlns:{p}="), &format!("xmlns:{alias}=")).replace(&format!("{p}:"), &format!("{alias}:"));
+            if wrong.ends_with("inert") {
+                text = text.replacen("<xml", &format!("<xml xmlns:{p}='urn:inert-{p}'"), 1);
+            }
+        }
+    }
+    if wrong == "inert" {
+        text = text.replace("</xml>", "<v:marker o:label='inert'/></xml>");
+    } else if wrong.is_empty() {
+        text = text.replace("</xml>", "<child xmlns:v='urn:temporary'/></xml>");
+    }
+    text
+}
+fn ordinary_vml_output(out: &Unpacked, wb: &gridcraft_model::Workbook, retained: &str, save: usize, wrong: &str) {
+    const V: &str = "urn:schemas-microsoft-com:vml";
+    const O: &str = "urn:schemas-microsoft-com:office:office";
+    const X: &str = "urn:schemas-microsoft-com:office:excel";
+    let sheet = sheet_part(out, "Data");
+    let part = out.target(&sheet, &attr_of(&out.text(&sheet), "legacyDrawing", "r:id")).1;
+    let text = out.text(&part);
+    let nodes = ordinary_nodes(&text);
+    let controls = &wb.sheets[0].controls;
+    let raw = retained.strip_suffix("</xml>").unwrap();
+    let head = if retained.contains("<o:idmap") { raw.replacen("data=\"1\"", &format!("data=\"1{}\"", ",2".repeat(save)), 1) } else { raw.into() };
+    assert!(text.starts_with(&head), "retained bytes: only each existing idmap claim may change");
+    let named = |kind: &str, id: &str| {
+        let matches: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.tag.0 == V && n.tag.1 == kind && ordinary_field(n, "", "id") == Some(id))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(matches.len(), 1, "{kind} {id}");
+        matches[0]
+    };
+    for (id, spt) in [("_x0000_t202", "202"), ("_x0000_t201", "201")].iter().take(1 + usize::from(!controls.is_empty())) {
+        let i = named("shapetype", id);
+        assert_eq!(ordinary_field(&nodes[i], O, "spt"), Some(*spt));
+        assert!(!text[nodes[i].span.clone()].contains("xmlns:x="));
+        if *spt == "201" {
+            let lock = ordinary_child(&nodes, i, O, "lock");
+            assert_eq!((ordinary_field(&nodes[lock], V, "ext"), ordinary_field(&nodes[lock], "", "shapetype")), (Some("edit"), Some("t")));
+        }
+    }
+    let expected_ids: Vec<_> = [1025, 1026].into_iter().chain(2049..2050 + controls.len()).map(|n| format!("_x0000_s{n}")).collect();
+    let shapes: Vec<_> = nodes.iter().filter(|n| n.tag.1 == "shape").collect();
+    assert!(shapes.iter().all(|n| n.tag.0 == V));
+    assert_eq!(shapes.iter().map(|n| ordinary_field(n, "", "id").unwrap()).collect::<Vec<_>>(), expected_ids);
+    for position in 0..=controls.len() {
+        let shape = named("shape", &format!("_x0000_s{}", 2049 + position));
+        assert_eq!(ordinary_field(&nodes[shape], O, "insetmode"), Some("auto"));
+        let (kind, ty, fields) = if position == 0 {
+            ("Note", "#_x0000_t202", vec![("Row", "0".into()), ("Column", "0".into()), ("Anchor", "1, 15, 0, 2, 3, 15, 4, 16".into())])
+        } else {
+            let c = &controls[position - 1];
+            let lock = ordinary_child(&nodes, shape, O, "lock");
+            assert_eq!((ordinary_field(&nodes[lock], V, "ext"), ordinary_field(&nodes[lock], "", "rotation")), (Some("edit"), Some("t")));
+            (
+                "Scroll",
+                "#_x0000_t201",
+                vec![
+                    ("FmlaLink", c.link.clone().unwrap()),
+                    ("Val", c.value.to_string()),
+                    ("Anchor", ["1, 0, 8, 0, 2, 56, 9, 0", "2, 0, 9, 0, 3, 0, 11, 0"][position - 1].into()),
+                ],
+            )
+        };
+        assert_eq!(ordinary_field(&nodes[shape], "", "type"), Some(ty));
+        let data = ordinary_child(&nodes, shape, X, "ClientData");
+        assert_eq!(ordinary_field(&nodes[data], "", "ObjectType"), Some(kind));
+        for (name, value) in fields {
+            let i = ordinary_child(&nodes, data, X, name);
+            assert_eq!(nodes[i].text, value, "{kind}/{name}");
+        }
+    }
+    let clients: Vec<_> = nodes.iter().filter(|n| n.tag.1 == "ClientData").collect();
+    assert!(clients.iter().all(|n| n.tag.0 == X));
+    let expected: Vec<_> = ["Pict", "Checkbox", "Note"].into_iter().chain(std::iter::repeat_n("Scroll", controls.len())).collect();
+    assert_eq!(clients.iter().map(|n| ordinary_field(n, "", "ObjectType").unwrap()).collect::<Vec<_>>(), expected);
+    if wrong == "inert" {
+        let marker: Vec<_> = nodes.iter().filter(|n| n.tag.0 == "urn:inert-v" && n.tag.1 == "marker").collect();
+        assert_eq!(marker.len(), 1);
+        assert_eq!(ordinary_field(marker[0], "urn:inert-o", "label"), Some("inert"));
+    }
+    if wrong == "normalized" {
+        assert_eq!([text.matches("xmlns:v=").count(), text.matches("xmlns:o=").count(), text.matches("xmlns:x=").count()], [1; 3]);
+    }
+}
+fn ordinary_vml_namespace_case(wrong: &str, slider: bool) {
+    let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+    if slider {
+        ordinary_slider(&mut wb);
+    }
+    let v = ordinary_kept(&mut wb).vml.as_mut().unwrap();
+    let retained = ordinary_vml_context(String::from_utf8(v.data.to_vec()).unwrap(), wrong);
+    v.data = Arc::from(retained.clone().into_bytes());
+    let first = Unpacked::new(&write_xlsx(&wb).unwrap());
+    for (save, out) in [first, ordinary_reload(&wb)].iter().enumerate() {
+        ordinary_output(out, &format!("vml-{wrong}-{slider}-{}", save + 1));
+        ordinary_vml_output(out, &wb, &retained, save + 1, wrong);
+    }
+    Arc::make_mut(&mut Arc::make_mut(&mut wb.sheets[0]).comments).clear();
+    Arc::make_mut(&mut wb.sheets[0]).controls.clear();
+    let lone = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let sheet = sheet_part(&lone, "Data");
+    let part = lone.target(&sheet, &attr_of(&lone.text(&sheet), "legacyDrawing", "r:id")).1;
+    assert_eq!(lone.parts[&part], retained.as_bytes());
+}
+
+#[test]
+fn ordinary_save_writer_vml_namespace_isolation() {
+    for slider in [false, true] {
+        for wrong in ["vox", "v", "o", "x", "v-inert", "o-inert", "x-inert", "inert", "normalized", ""] {
+            ordinary_vml_namespace_case(wrong, slider);
+        }
+    }
+}
+
+#[test]
+fn ordinary_save_writer_selected_empty_refuses_invisible_control() {
+    let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+    ordinary_slider(&mut wb);
+    let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+    e.xml="<mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'><mc:Choice><controls/></mc:Choice><mc:Fallback><controls></controls></mc:Fallback></mc:AlternateContent>".into();
+    match write_xlsx(&wb) {
+        Ok(bytes) => {
+            let out = Unpacked::new(&bytes);
+            let root = xml::parse(&out.parts[&sheet_part(&out, "Data")]).unwrap();
+            let selected = root.children.iter().find_map(crate::controls::controls_of).unwrap();
+            assert!(selected.children.is_empty(), "old writer's real reader target remains empty");
+            let (again, _) = read_xlsx(&bytes).unwrap();
+            assert!(!again.sheets[0].controls.iter().any(|c| c.name == "Native slider"), "reader loses the sheet-only control name");
+            panic!("old producer succeeded with ignored native controls; must refuse before publication");
+        }
+        Err(crate::IoError::Format(message)) => assert!(message.contains("controls")),
+        Err(other) => panic!("wrong writer refusal: {other}"),
+    }
+}
+
+#[test]
+fn ordinary_save_writer_literal_quote_alone() {
+    let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+    let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+    e.xml = e.xml.replace("name=\"Check Box 1\"", "name='Check \" Box 1'");
+    let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let text = out.text(&sheet_part(&out, "Data"));
+    assert!(ordinary_tags(&text).iter().any(|(_, n, a)| n == "control" && a.iter().any(|(_, n, v)| n == "name" && v == "Check \" Box 1")));
+    ordinary_reload(&wb);
+}
+#[test]
+fn ordinary_save_writer_xmlns_prefix_attribute_alone() {
+    let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+    let p = ordinary_kept(&mut wb);
+    p.rels.iter_mut().find(|r| r.id == "rId5").unwrap().id = "old-control".into();
+    let e = p.elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+    e.xml = e.xml.replace("xmlns:r=", "xmlns:xmlnsfoo=").replace("r:id=", "xmlnsfoo:id=").replace("rId5", "old-control");
+    let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let sheet = sheet_part(&out, "Data");
+    for (ns, n, a) in ordinary_tags(&out.text(&sheet)) {
+        if ns == NS_MAIN && n == "control" {
+            for (ns, _, v) in a {
+                if ns == NS_R {
+                    assert!(out.rels(&sheet).iter().any(|r| r.0 == v), "actual REL id {v} must be remapped");
+                }
+            }
+        }
+    }
+    ordinary_reload(&wb);
+}
+#[test]
+fn ordinary_save_writer_controls_comment_alone() {
+    let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+    ordinary_slider(&mut wb);
+    let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+    e.xml = e.xml.replace("</controls>", "<!--</controls>--></controls>");
+    let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let root = xml::parse(&out.parts[&sheet_part(&out, "Data")]).unwrap();
+    assert_eq!(
+        root.children.iter().find_map(crate::controls::controls_of).unwrap().children.len(),
+        2,
+        "actual native entry must be outside the comment"
+    );
+}
+
+#[test]
+fn ordinary_save_writer_empty_absent_large_namespace_and_caption_controls() {
+    use gridcraft_model::{Preserved, PreservedXml, Workbook};
+    for fragment in [
+        "<controls/>",
+        "<controls></controls>",
+        "<mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'><mc:Choice/></mc:AlternateContent>",
+    ] {
+        let mut wb = Workbook::new();
+        ordinary_slider(&mut wb);
+        Arc::make_mut(&mut wb.sheets[0]).preserved =
+            Some(Arc::new(Preserved { elements: vec![PreservedXml { slot: "controls".into(), xml: fragment.into() }], ..Default::default() }));
+        if fragment == "<controls/>" {
+            assert!(matches!(write_xlsx(&wb), Err(crate::IoError::Format(_))));
+        } else {
+            let bytes = write_xlsx(&wb).unwrap();
+            let (again, _) = read_xlsx(&bytes).unwrap();
+            assert_eq!(again.sheets[0].controls[0].name, "Native slider");
+        }
+        Arc::make_mut(&mut wb.sheets[0]).controls.clear();
+        let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+        assert!(out.text(&sheet_part(&out, &wb.sheets[0].name)).contains(fragment.replace('\'', "\"").as_str()));
+    }
+    let (mut wb, _) = read_xlsx(&rich_package()).unwrap();
+    ordinary_slider(&mut wb);
+    let declarations = (0..300).map(|i| format!(" xmlns:p{i}='urn:inert-{i}'")).collect::<String>();
+    let e = ordinary_kept(&mut wb).elements.iter_mut().find(|e| e.slot == "controls").unwrap();
+    e.xml = e.xml.replacen("<controls", &format!("<controls{declarations}"), 1);
+    let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+    assert_eq!(ordinary_tags(&out.text(&sheet_part(&out, "Data"))).iter().filter(|(_, n, _)| n == "control").count(), 3);
+    ordinary_reload(&wb);
+    let v = ordinary_kept(&mut wb).vml.as_mut().unwrap();
+    v.data = Arc::from(
+        String::from_utf8_lossy(&v.data).replace("</v:shape>", "<v:textbox><div>legacy caption<br></div></v:textbox></v:shape>").into_bytes(),
+    );
+    let out = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let text = out.text("xl/drawings/vmlDrawing1.vml");
+    assert!(text.contains("legacy caption<br>"));
+    assert_eq!(text.matches("<v:shape ").count(), 4);
+    ordinary_reload(&wb);
+}

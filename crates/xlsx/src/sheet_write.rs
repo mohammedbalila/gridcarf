@@ -467,7 +467,7 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> R
     let kept = write_sheet_printing(&mut s, sheet, &mut rels, out);
 
     write_sheet_drawing(&mut s, wb, si, sheet, &mut rels, out);
-    write_sheet_notes(&mut s, sheet, si, &kept, &mut rels, out);
+    write_sheet_notes(&mut s, sheet, si, &kept, &mut rels, out)?;
     // Tables.
     if !tables.is_empty() {
         let mut parts = String::new();
@@ -551,7 +551,14 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
     }
 }
 
-fn write_sheet_notes(s: &mut String, sheet: &Sheet, si: usize, kept: &crate::passthrough::SheetKept<'_>, rels: &mut Rels, out: &mut Out) {
+fn write_sheet_notes(
+    s: &mut String,
+    sheet: &Sheet,
+    si: usize,
+    kept: &crate::passthrough::SheetKept<'_>,
+    rels: &mut Rels,
+    out: &mut Out,
+) -> Result<(), IoError> {
     // Notes and form controls share one legacy VML drawing: notes need it for Excel to show them,
     // and controls carry their `x:ClientData` there. Shape ids come from 1024-id blocks listed in
     // the drawing's idmap (after the blocks kept header and footer drawings use), notes first, so
@@ -589,14 +596,15 @@ fn write_sheet_notes(s: &mut String, sheet: &Sheet, si: usize, kept: &crate::pas
         let v = out.vmls;
         out.default_type("vml", "application/vnd.openxmlformats-officedocument.vmlDrawing");
         let vml_name = format!("xl/drawings/vmlDrawing{v}.vml");
-        let vml = kept.notes_vml(vml_xml(sheet, &idmap, base, &control_shapes), &vml_name, out);
+        let vml = kept.notes_vml(vml_xml(sheet, &idmap, base, &control_shapes), &vml_name, out)?;
         out.part(&vml_name, None, vml.into_bytes());
         let rid = rels.add("vmlDrawing", &format!("../drawings/vmlDrawing{v}.vml"));
         let _ = write!(s, "<legacyDrawing r:id=\"{rid}\"/>");
     } else if let Some(rid) = kept.lone_vml(rels, out) {
         let _ = write!(s, "<legacyDrawing r:id=\"{rid}\"/>");
     }
-    s.push_str(&kept.elements(&controls));
+    s.push_str(&kept.elements(&controls)?);
+    Ok(())
 }
 
 fn write_sheet_drawing(s: &mut String, wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut Rels, out: &mut Out) {
