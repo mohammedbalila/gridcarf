@@ -61,6 +61,12 @@ pub fn xlsx_known_phonetic_loss(wb: &Workbook) -> Result<bool, IoError> {
     write::known_phonetic_loss_with_budget(&wb.phonetics, write::PHONETIC_INDEX_BYTES)
 }
 
+/// Detects writer-local phonetic loss and meaningful last-winner bases absent from emitted XLSX shared strings.
+/// Uses bounded read-only writer text planning; inability to diagnose returns [`IoError::TooLarge`].
+pub fn xlsx_phonetic_loss(wb: &Workbook) -> Result<bool, IoError> {
+    write::phonetic_loss_with_budget(wb, &mut sheet_write::TextPlanningBudget::default())
+}
+
 pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
 pub use ods::read_ods;

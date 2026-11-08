@@ -269,3 +269,482 @@ fn phonetic_diagnostic_index_budget_and_arithmetic_fail_closed() {
     assert!(matches!(known_phonetic_loss_with_budget(&[normal], width - 1), Err(crate::IoError::TooLarge(_))));
     assert!(!known_phonetic_loss_with_budget(&[], 0).unwrap());
 }
+
+fn membership_book() -> Workbook {
+    let mut wb = Workbook::new();
+    text_cell(wb.sheet_mut(0).unwrap(), "A1", "東");
+    wb.phonetics = vec![PhoneticString { text: "東".into(), runs: vec![PhoneticRun { start: 0, end: 1, text: "ヒガシ".into() }], props: None }];
+    wb
+}
+fn membership_table(names: &[&str]) -> gridcraft_model::Table {
+    use gridcraft_model::{Table, TableColumn, TotalsFn};
+    Table {
+        id: 1,
+        name: "Data".into(),
+        range: gridcraft_core::RangeRef::new(at("A1"), CellRef::new(1, names.len() as u32 - 1)),
+        header_row: true,
+        totals_row: false,
+        columns: names
+            .iter()
+            .map(|s| TableColumn { name: (*s).into(), totals: TotalsFn::None, totals_label: None, formula: None, unique_name: None, xml: None })
+            .collect(),
+        style: "TableStyleLight1".into(),
+        banded_rows: true,
+        banded_cols: false,
+        first_col: false,
+        last_col: false,
+        filter_button: true,
+        filter: vec![],
+        table_type: None,
+        connection_id: None,
+    }
+}
+fn membership_cache_cases(cases: &mut Vec<(&'static str, Workbook, bool, &'static str)>) {
+    use gridcraft_core::RangeRef;
+    use gridcraft_model::{Formula, PyCode, WhatIfTable};
+    use std::sync::Arc;
+    for name in ["formula", "dynamic", "legacy", "python", "formula_python", "what_if"] {
+        let mut wb = membership_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        let mut cell = Cell::value(Value::text("東"));
+        if name != "python" && name != "what_if" {
+            let mut f = Formula::new("\"東\"");
+            f.dynamic = name == "dynamic";
+            if name == "legacy" {
+                f.array = Some(RangeRef::parse("A1:A2").unwrap());
+            }
+            cell.formula = Some(Arc::new(f));
+        }
+        if name == "python" || name == "formula_python" {
+            cell.py = Some(Arc::new(PyCode::new("'東'")));
+        }
+        if name == "what_if" {
+            sh.what_if_tables.push(WhatIfTable {
+                anchor: at("A1"),
+                range: RangeRef::parse("A1:A2").unwrap(),
+                formula_text: String::new(),
+                input1: Some(at("D1")),
+                input2: None,
+                two_variable: None,
+                row_oriented: None,
+                input1_deleted: None,
+                input2_deleted: None,
+                calculate: None,
+            });
+        }
+        sh.cells.set(at("A1"), cell);
+        cases.push((name, wb.clone(), false, "str"));
+        wb.sheet_mut(0).unwrap().tables.push(membership_table(&["東"]));
+        cases.push((
+            match name {
+                "formula" => "header_formula",
+                "dynamic" => "header_dynamic",
+                "legacy" => "header_legacy",
+                "python" => "header_python",
+                "formula_python" => "header_both",
+                _ => "header_what_if",
+            },
+            wb,
+            name != "what_if",
+            if name == "what_if" { "str" } else { "s" },
+        ));
+    }
+}
+
+fn membership_cases() -> Vec<(&'static str, Workbook, bool, &'static str)> {
+    use gridcraft_core::{Array, CellError, RangeRef};
+    use gridcraft_model::{Formula, PyCode};
+    use std::sync::Arc;
+    let mut cases = vec![("literal", membership_book(), true, "s")];
+    for (name, value) in [
+        ("unused", Value::Number(1.0)),
+        ("boolean", Value::Bool(true)),
+        ("error", Value::Error(CellError::Calc)),
+        ("nonleading", Array::row(vec![Value::Number(1.0), Value::text("東")]).into()),
+        ("two_stage", Array::scalar(Array::scalar(Value::text("東")).into()).into()),
+        ("too_deep", Array::scalar(Array::scalar(Array::scalar(Value::text("東")).into()).into()).into()),
+        ("empty_array", Value::Array(Arc::new(Array { rows: 0, cols: 0, data: vec![] }))),
+    ] {
+        let mut wb = membership_book();
+        wb.sheet_mut(0).unwrap().cells.set(at("A1"), Cell::value(value));
+        cases.push((
+            name,
+            wb,
+            name == "two_stage",
+            if name == "two_stage" {
+                "s"
+            } else if name == "error" {
+                "e"
+            } else {
+                ""
+            },
+        ));
+    }
+    membership_cache_cases(&mut cases);
+    for (name, names, expected) in [
+        ("header_override", vec!["Other"], false),
+        ("header_generated", vec!["東"], true),
+        ("blank", vec![" "], false),
+        ("duplicate", vec!["x", "X"], false),
+        ("unicode", vec!["ΟΣ", "ος", "İ", "i\u{307}"], false),
+    ] {
+        let mut wb = membership_book();
+        wb.sheet_mut(0).unwrap().tables.push(membership_table(&names));
+        cases.push((name, wb, expected, "s"));
+    }
+    for (name, header, totals, end) in [("inactive_header", false, false, 1), ("rejected_table", false, true, 0)] {
+        let mut wb = membership_book();
+        let mut t = membership_table(&["Other"]);
+        t.header_row = header;
+        t.totals_row = totals;
+        t.range.end.row = end;
+        wb.sheet_mut(0).unwrap().tables.push(t);
+        cases.push((name, wb, true, "s"));
+    }
+    let mut wb = membership_book();
+    wb.sheet_mut(0).unwrap().tables.extend([membership_table(&["東"]), membership_table(&["Other"])]);
+    cases.push(("last_header", wb, false, "s"));
+    for name in [
+        "spill",
+        "spill_dynamic",
+        "spill_legacy",
+        "spill_single",
+        "spill_empty",
+        "spill_python",
+        "spill_blocked",
+        "spill_formula",
+        "spill_outside",
+        "spill_anchor",
+        "spill_header",
+        "spill_overlap",
+    ] {
+        let mut wb = membership_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cells.set(at("A1"), Cell::value(Value::Number(1.0)));
+        sh.spill_ranges.insert(at("A1"), RangeRef::parse("A1:A3").unwrap());
+        if name == "spill_single" {
+            sh.spill_ranges.insert(at("A1"), RangeRef::cell(at("A2")));
+        }
+        if name == "spill_dynamic" || name == "spill_legacy" {
+            let mut f = Formula::new("1");
+            if name == "spill_legacy" {
+                f.array = Some(RangeRef::parse("A1:A3").unwrap());
+            }
+            sh.cells.set(at("A1"), Cell { formula: Some(Arc::new(f)), value: Value::Number(1.0), ..Cell::default() });
+        }
+        sh.spill.insert(
+            if name == "spill_outside" {
+                at("A4")
+            } else if name == "spill_anchor" {
+                at("A1")
+            } else {
+                at("A2")
+            },
+            Value::text("東"),
+        );
+        if name == "spill_empty" || name == "spill_python" {
+            let mut c = Cell::default();
+            if name == "spill_python" {
+                c.py = Some(Arc::new(PyCode::new("1")));
+            }
+            sh.cells.set(at("A2"), c);
+        }
+        if name == "spill_blocked" {
+            text_cell(sh, "A2", "Other");
+        }
+        if name == "spill_formula" {
+            sh.cells.set(at("A2"), Cell::formula(Formula::new("1")));
+        }
+        if name == "spill_header" {
+            let mut t = membership_table(&["Other"]);
+            t.range = RangeRef::parse("A2:A3").unwrap();
+            sh.tables.push(t);
+        }
+        if name == "spill_overlap" {
+            sh.spill_ranges.insert(at("B1"), RangeRef::parse("A1:B3").unwrap());
+        }
+        cases.push((name, wb, matches!(name, "spill" | "spill_dynamic" | "spill_legacy" | "spill_empty" | "spill_overlap"), ""));
+    }
+    // Original one-pixel green PNG generated from raw RGB bytes; no external asset.
+    let picture = Arc::new(gridcraft_model::CellPicture {
+        data: vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73,
+            68, 65, 84, 120, 156, 99, 144, 89, 229, 1, 0, 1, 244, 1, 15, 24, 202, 173, 154, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ],
+        mime: "image/png".into(),
+        alt: "original synthetic picture".into(),
+    });
+    for name in ["picture", "picture_header", "picture_spill"] {
+        let mut wb = membership_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cell_pictures.insert(at("A1"), picture.clone());
+        if name == "picture_header" {
+            sh.tables.push(membership_table(&["東"]));
+        }
+        if name == "picture_spill" {
+            sh.spill_ranges.insert(at("B1"), RangeRef::parse("A1:B2").unwrap());
+            sh.spill.insert(at("A1"), Value::text("東"));
+            sh.cells.set(at("A1"), Cell::default());
+        }
+        cases.push((name, wb, false, "e"));
+    }
+    for (name, text) in [("suffix_generated", "X2"), ("blank_generated", "Column1")] {
+        let mut wb = membership_book();
+        wb.phonetics[0].text = text.into();
+        let names = if name == "suffix_generated" { vec!["x", "X"] } else { vec![" "] };
+        wb.sheet_mut(0).unwrap().tables.push(membership_table(&names));
+        cases.push((name, wb, true, "s"));
+    }
+    let mut wb = membership_book();
+    wb.phonetics[0] = PhoneticString { text: "".into(), runs: vec![], props: Some(PhoneticProps::default()) };
+    text_cell(wb.sheet_mut(0).unwrap(), "A1", "");
+    cases.push(("empty_literal", wb, true, "s"));
+    cases
+}
+
+#[test]
+fn phonetic_sst_membership_current_writer_precedence() {
+    use gridcraft_model::{Sheet, Visibility};
+    // Literal expectations catch a raw-cell scan, cached-text scan, recursive scalarization,
+    // wrong header/picture/what-if precedence, and incorrect spill eligibility.
+    for (name, original, emitted, kind) in membership_cases() {
+        for global in [false, true] {
+            let mut wb = original.clone();
+            if global {
+                let mut sh = Sheet::new("Hidden match");
+                sh.visibility = if name.len() % 2 == 0 { Visibility::Hidden } else { Visibility::VeryHidden };
+                text_cell(&mut sh, "B3", &wb.phonetics[0].text);
+                wb.sheets.push(sh.into());
+            }
+            let bytes = write_xlsx(&wb).unwrap();
+            let sst = crate::xml::parse(part(&bytes, "xl/sharedStrings.xml").as_bytes()).unwrap();
+            let texts: Vec<_> = sst.kids("si").map(crate::xml::rich_text).collect();
+            if name == "unicode" && !global {
+                assert_eq!(texts, ["ΟΣ", "ος2", "İ", "i\u{307}2"]);
+            }
+            assert_eq!(texts.contains(&wb.phonetics[0].text), emitted || global, "{name}/{global}: {texts:?}");
+            if !kind.is_empty() {
+                let xml = part(&bytes, "xl/worksheets/sheet1.xml");
+                let root = crate::xml::parse(xml.as_bytes()).unwrap();
+                let a1 = root.child("sheetData").unwrap().kids("row").flat_map(|r| r.kids("c")).find(|c| c.attr("r") == Some("A1")).unwrap();
+                assert_eq!(a1.attr("t"), Some(kind), "{name}: {xml}");
+            }
+            assert_eq!(read_xlsx(&bytes).unwrap().0.phonetics, if emitted || global { wb.phonetics.clone() } else { vec![] }, "{name}/{global}");
+            // Optional owned checkpoint capture: every decompressed member, no normalization.
+            if let Some(dir) = std::env::var_os("GRIDCRAFT_D2_MEMBERS_DIR") {
+                let root = std::path::PathBuf::from(dir).join(format!("{name}-{global}"));
+                std::fs::create_dir(&root).unwrap();
+                std::fs::write(root.join("original.zip"), &bytes).unwrap();
+                let mut pkg = Package::open(&bytes).unwrap();
+                for member in pkg.names() {
+                    let path = root.join(&member);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, pkg.read(&member).unwrap().unwrap()).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn phonetic_shared_text_visitor_matches_real_sst_without_mutation() {
+    use crate::sheet_write::{TextPlanningBudget, visit_shared_text};
+    use std::collections::BTreeSet;
+    for (name, wb, _, _) in membership_cases() {
+        let before = wb.clone();
+        let mut seen = BTreeSet::new();
+        visit_shared_text(&wb, &mut TextPlanningBudget::default(), |t, _| {
+            seen.insert(t.to_owned());
+            Ok(false)
+        })
+        .unwrap();
+        let bytes = write_xlsx(&wb).unwrap();
+        let root = crate::xml::parse(part(&bytes, "xl/sharedStrings.xml").as_bytes()).unwrap();
+        let real: BTreeSet<_> = root.kids("si").map(crate::xml::rich_text).collect();
+        assert_eq!(seen, real, "{name}");
+        assert_eq!(wb, before, "{name}: visitation must be read-only");
+    }
+}
+
+#[test]
+fn phonetic_membership_boundaries_fail_closed() {
+    use crate::sheet_write::{TextPlanningBudget, visit_shared_text};
+    use crate::write::{phonetic_bit_bytes, phonetic_loss_with_budget};
+    assert_eq!(phonetic_bit_bytes(0).unwrap(), 0);
+    assert_eq!(phonetic_bit_bytes(8).unwrap(), 1);
+    assert_eq!(phonetic_bit_bytes(9).unwrap(), 2);
+    assert_eq!(phonetic_bit_bytes(8 * 1024 * 1024 / 8).unwrap(), 131_072);
+    assert_eq!(phonetic_bit_bytes(8 * 1024 * 1024 / 4).unwrap(), 262_144);
+    assert!(matches!(phonetic_bit_bytes(usize::MAX), Err(crate::IoError::TooLarge(_))));
+    let wb = membership_book();
+    for (steps, text, ok) in [(2, 3, true), (1, 3, false), (2, 2, false)] {
+        let result = phonetic_loss_with_budget(&wb, &mut TextPlanningBudget { bytes: 0, steps, text });
+        if ok {
+            assert!(!result.unwrap());
+        } else {
+            assert!(matches!(result, Err(crate::IoError::TooLarge(_))));
+        }
+    }
+    let mut duplicate = membership_book();
+    duplicate.phonetics.push(duplicate.phonetics[0].clone());
+    assert!(matches!(
+        phonetic_loss_with_budget(&duplicate, &mut TextPlanningBudget { bytes: 0, steps: 2, text: 5 }),
+        Err(crate::IoError::TooLarge(_))
+    ));
+    assert!(!phonetic_loss_with_budget(&duplicate, &mut TextPlanningBudget { bytes: 0, steps: 2, text: 6 }).unwrap());
+    let mut wb = membership_book();
+    wb.sheet_mut(0).unwrap().tables.push(membership_table(&["x"]));
+    // One x header: table/column Vecs, two rounded maps, base and lowercase buffers.
+    // Pinned 64/32-bit logical peaks are hand-derived; work=8 visits, text=1+1+80+2.
+    let peak = if usize::BITS == 64 { 401 } else { 261 };
+    for (bytes, steps, text, ok) in [(peak, 8, 84, true), (peak - 1, 8, 84, false), (peak, 7, 84, false), (peak, 8, 83, false)] {
+        let mut budget = TextPlanningBudget { bytes, steps, text };
+        let result = visit_shared_text(&wb, &mut budget, |_, _| Ok(false));
+        if ok {
+            result.unwrap();
+            assert_eq!(budget.bytes, peak);
+        } else {
+            assert!(matches!(result, Err(crate::IoError::TooLarge(_))));
+        }
+    }
+    wb.sheets.push(wb.sheets[0].clone());
+    visit_shared_text(&wb, &mut TextPlanningBudget { bytes: peak, steps: 16, text: 168 }, |_, _| Ok(false)).unwrap();
+    for range in [
+        gridcraft_core::RangeRef { start: CellRef::new(0, 0), end: CellRef::new(1, u32::MAX) },
+        gridcraft_core::RangeRef { start: at("B1"), end: at("A2") },
+    ] {
+        let mut wb = membership_book();
+        let mut t = membership_table(&["x"]);
+        t.range = range;
+        wb.sheet_mut(0).unwrap().tables.push(t);
+        assert!(matches!(visit_shared_text(&wb, &mut TextPlanningBudget::default(), |_, _| Ok(false)), Err(crate::IoError::TooLarge(_))));
+    }
+    let mut wb = Workbook::new();
+    for anchor in [at("A1"), at("B1")] {
+        wb.sheet_mut(0).unwrap().spill_ranges.insert(anchor, gridcraft_core::RangeRef::parse("A1:A3").unwrap());
+    }
+    visit_shared_text(&wb, &mut TextPlanningBudget { bytes: 0, steps: 9, text: 0 }, |_, _| panic!("no sparse payload exists")).unwrap();
+    assert!(matches!(
+        visit_shared_text(&wb, &mut TextPlanningBudget { bytes: 0, steps: 8, text: 0 }, |_, _| Ok(false)),
+        Err(crate::IoError::TooLarge(_))
+    ));
+    wb.phonetics = vec![PhoneticString { text: "unused".into(), runs: vec![], props: None }];
+    assert!(!phonetic_loss_with_budget(&wb, &mut TextPlanningBudget { bytes: 0, steps: 0, text: 0 }).unwrap());
+    wb.phonetics[0].runs = vec![PhoneticRun { start: 0, end: 99, text: "clamped".into() }];
+    assert!(phonetic_loss_with_budget(&wb, &mut TextPlanningBudget { bytes: 0, steps: 0, text: 0 }).unwrap());
+}
+
+#[test]
+fn phonetic_membership_matches_winners_and_exact_unicode() {
+    for (name, wb, emitted, _) in membership_cases() {
+        assert_eq!(crate::xlsx_phonetic_loss(&wb).unwrap(), !emitted, "{name}");
+    }
+    for overlap in [false, true] {
+        let mut wb = Workbook::new();
+        wb.phonetics = membership_book().phonetics;
+        if overlap {
+            wb.sheet_mut(0).unwrap().tables.push(membership_table(&["Other"]));
+        }
+        wb.sheet_mut(0).unwrap().tables.push(membership_table(&["東"]));
+        assert!(!crate::xlsx_phonetic_loss(&wb).unwrap());
+        assert_eq!(read_xlsx(&write_xlsx(&wb).unwrap()).unwrap().0.phonetics, wb.phonetics);
+    }
+    let mut wb = Workbook::new();
+    for i in 0..9 {
+        let text = format!("p{i}");
+        text_cell(wb.sheet_mut(0).unwrap(), &format!("A{}", i + 1), &text);
+        wb.phonetics.push(PhoneticString { text, runs: vec![], props: Some(PhoneticProps::default()) });
+    }
+    wb.phonetics.push(wb.phonetics[8].clone());
+    wb.phonetics.push(PhoneticString { text: "empty wrapper".into(), runs: vec![], props: None });
+    assert!(!crate::xlsx_phonetic_loss(&wb).unwrap());
+    text_cell(wb.sheet_mut(0).unwrap(), "A9", "different");
+    assert!(crate::xlsx_phonetic_loss(&wb).unwrap());
+    for text in ["é", "E"] {
+        let mut wb = membership_book();
+        wb.phonetics[0].text = text.into();
+        text_cell(wb.sheet_mut(0).unwrap(), "A1", if text == "é" { "e\u{301}" } else { "e" });
+        assert!(crate::xlsx_phonetic_loss(&wb).unwrap(), "membership is exact, not folded/normalized");
+    }
+}
+
+#[test]
+fn phonetic_real_million_position_spill_prefix() {
+    for inside in [false, true] {
+        let mut wb = membership_book();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cells.set(at("A1"), Cell::value(Value::Number(1.0)));
+        sh.spill_ranges.insert(at("A1"), gridcraft_core::RangeRef::parse("A1:A1000001").unwrap());
+        sh.spill.insert(at(if inside { "A1000000" } else { "A1000001" }), Value::text("東"));
+        assert_eq!(sh.cells.len(), 1);
+        assert_eq!(sh.spill.len(), 1);
+        let bytes = write_xlsx(&wb).unwrap();
+        assert_eq!(read_xlsx(&bytes).unwrap().0.phonetics, if inside { wb.phonetics.clone() } else { vec![] });
+        assert_eq!(crate::xlsx_phonetic_loss(&wb).unwrap(), !inside);
+        let mut budget = crate::sheet_write::TextPlanningBudget { bytes: 0, steps: 1_000_003, text: 3 };
+        assert_eq!(crate::write::phonetic_loss_with_budget(&wb, &mut budget).unwrap(), !inside);
+        assert!(matches!(
+            crate::write::phonetic_loss_with_budget(&wb, &mut crate::sheet_write::TextPlanningBudget { bytes: 0, steps: 1_000_002, text: 3 }),
+            Err(crate::IoError::TooLarge(_))
+        ));
+    }
+}
+
+#[test]
+fn phonetic_planning_counts_skipped_candidates_and_capacity_requests() {
+    use crate::sheet_write::{TextPlanningBudget, visit_shared_text};
+    let mut wb = membership_book();
+    wb.sheet_mut(0).unwrap().tables.push(membership_table(&["Total", "total3", "Total", "Total"]));
+    for (steps, ok) in [(20, true), (19, false)] {
+        let result = visit_shared_text(&wb, &mut TextPlanningBudget { steps, ..TextPlanningBudget::default() }, |_, _| Ok(false));
+        if ok {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(crate::IoError::TooLarge(_))));
+        }
+    }
+    let mut wb = Workbook::new();
+    let mut t = membership_table(&["ignored"]);
+    t.header_row = false;
+    t.totals_row = true;
+    t.range.end.row = 0;
+    wb.sheet_mut(0).unwrap().tables.push(t);
+    visit_shared_text(
+        &wb,
+        &mut TextPlanningBudget { bytes: std::mem::size_of::<(&gridcraft_model::Table, Vec<String>)>(), steps: 2, text: 0 },
+        |_, _| panic!("rejected table emits nothing"),
+    )
+    .unwrap();
+    assert!(matches!(
+        visit_shared_text(&wb, &mut TextPlanningBudget { steps: 1, ..TextPlanningBudget::default() }, |_, _| Ok(false)),
+        Err(crate::IoError::TooLarge(_))
+    ));
+    for width in [0usize, 1, 3, 4, 7, 8, 10_000] {
+        let mut used = std::collections::HashSet::<String>::new();
+        let mut next = std::collections::HashMap::<String, u32>::new();
+        let mut columns = Vec::<String>::new();
+        used.try_reserve(width).unwrap();
+        next.try_reserve(width).unwrap();
+        columns.try_reserve_exact(width).unwrap();
+        assert!(used.capacity() >= width && next.capacity() >= width && columns.capacity() >= width);
+        assert!(used.capacity() <= width * 4 && next.capacity() <= width * 4);
+        println!(
+            "planning request width={width} used_capacity={} next_capacity={} column_capacity={} rounded_map_request={}",
+            used.capacity(),
+            next.capacity(),
+            columns.capacity(),
+            4 * width * (std::mem::size_of::<String>() + std::mem::size_of::<(String, u32)>() + 2) + 32
+        );
+    }
+    for input in ["", "x", "ΟΣ", "İ", "i\u{307}"] {
+        let lower = input.to_lowercase();
+        assert!(lower.capacity() <= (24 * input.len()).max(8));
+        println!(
+            "lowercase input_bytes={} output_bytes={} actual_capacity={} conservative_precharge={}",
+            input.len(),
+            lower.len(),
+            lower.capacity(),
+            48 * input.len() + 32
+        );
+    }
+}

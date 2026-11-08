@@ -508,3 +508,260 @@ fn phonetic_decisions_remain_document_revision_and_code_scoped() {
     let text = std::fs::read_to_string(path).unwrap();
     assert!(text.contains("東") && !text.contains("ヒガシ"));
 }
+
+#[test]
+fn phonetic_xlsx_unused_sst_base_requires_a_decision() {
+    for property_only in [false, true] {
+        let mut p = phonetic("ヒガシ");
+        if property_only {
+            p.runs.clear();
+            p.props = Some(PhoneticProps::default());
+        }
+        let mut s = phonetic_session(vec![p]);
+        s.execute("cell.set", json!({"cell":"A1", "input":"42"})).unwrap();
+        let dir = phonetic_dir(&s);
+        let path = dir.join("unused.xlsx").to_str().unwrap().to_owned();
+        std::fs::write(&path, b"owned sentinel").unwrap();
+        let a = analyze(&mut s, &path);
+        annotation_issue(&a);
+        for (command, params) in [("file.save", json!({"path":path})), ("file.saveBytes", json!({"format":"xlsx"}))] {
+            let err = s.execute_headless(command, params).unwrap_err();
+            let failure: Value = serde_json::from_str(&err.to_string()).unwrap();
+            assert_eq!(failure["error"], "save.losses");
+            annotation_issue(&failure["analysis"]);
+            assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+            assert!(s.doc().unwrap().is_dirty());
+            assert!(s.ui_requests.is_empty());
+        }
+        assert!(saved_phonetics(&mut s, "xlsx", &a).is_empty());
+        s.execute_headless("file.save", confirm(&a, &path)).unwrap();
+        assert!(io::open_bytes(&path, &std::fs::read(&path).unwrap()).unwrap().0.phonetics.is_empty());
+    }
+}
+
+fn sst_session(branch: &str) -> Session {
+    use gridcraft_core::{Array, CellRef, RangeRef, Value as CellValue};
+    use gridcraft_engine::model::{Cell, CellPicture, Formula, PyCode, Table, TableColumn, TotalsFn, WhatIfTable};
+    let a = CellRef::new(0, 0);
+    let mut s = phonetic_session(vec![phonetic("ヒガシ")]);
+    let sh = Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let mut cell = Cell::value(CellValue::text("東"));
+    if matches!(branch, "unused" | "spill_ignored" | "spill_python" | "spill_dynamic" | "spill_legacy" | "generated_header") {
+        cell.value = CellValue::Number(1.0);
+    }
+    if matches!(branch, "formula" | "dynamic" | "legacy" | "both" | "header_formula" | "spill_dynamic" | "spill_legacy") {
+        let mut f = Formula::new("1");
+        f.dynamic = branch == "dynamic";
+        if branch == "legacy" || branch == "spill_legacy" {
+            f.array = Some(RangeRef::parse("A1:A2").unwrap());
+        }
+        cell.formula = Some(Arc::new(f));
+    }
+    if matches!(branch, "python" | "both" | "header_python") {
+        cell.py = Some(Arc::new(PyCode::new("'東'")));
+    }
+    if matches!(branch, "what_if" | "header_what_if") {
+        sh.what_if_tables.push(WhatIfTable {
+            anchor: a,
+            range: RangeRef::parse("A1:A2").unwrap(),
+            formula_text: String::new(),
+            input1: Some(CellRef::new(0, 3)),
+            input2: None,
+            two_variable: None,
+            row_oriented: None,
+            input1_deleted: None,
+            input2_deleted: None,
+            calculate: None,
+        });
+    }
+    if matches!(branch, "header" | "header_formula" | "header_python" | "header_what_if" | "picture_header" | "generated_header") {
+        sh.tables.push(Table {
+            id: 1,
+            name: "Data".into(),
+            range: RangeRef::parse("A1:A2").unwrap(),
+            header_row: true,
+            totals_row: false,
+            columns: vec![TableColumn {
+                name: if matches!(branch, "header_what_if" | "picture_header" | "generated_header") { "東".into() } else { "Other".into() },
+                totals: TotalsFn::None,
+                totals_label: None,
+                formula: None,
+                unique_name: None,
+                xml: None,
+            }],
+            style: "TableStyleLight1".into(),
+            banded_rows: false,
+            banded_cols: false,
+            first_col: false,
+            last_col: false,
+            filter_button: false,
+            filter: vec![],
+            table_type: None,
+            connection_id: None,
+        });
+    }
+    if branch == "picture" || branch == "picture_header" {
+        // Same original synthetic RGB pixel used by the codec matrix.
+        let data = io::base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQWeUBAAH0AQ8Yyq2aAAAAAElFTkSuQmCC").unwrap();
+        sh.cell_pictures.insert(a, Arc::new(CellPicture { data, mime: "image/png".into(), alt: "original synthetic picture".into() }));
+    }
+    if branch.starts_with("spill_") {
+        sh.spill_ranges.insert(a, RangeRef::parse("A1:A2").unwrap());
+        sh.spill.insert(CellRef::new(if branch == "spill_ignored" { 2 } else { 1 }, 0), CellValue::text("東"));
+        if branch == "spill_python" {
+            sh.cells.set(CellRef::new(1, 0), Cell { py: Some(Arc::new(PyCode::new("1"))), ..Cell::default() });
+        }
+    }
+    if branch == "nonleading" {
+        cell.value = Array::row(vec![CellValue::Number(1.0), CellValue::text("東")]).into();
+    }
+    if branch == "two_stage" {
+        cell.value = Array::scalar(Array::scalar(CellValue::text("東")).into()).into();
+    }
+    if branch == "deep" {
+        cell.value = Array::scalar(Array::scalar(Array::scalar(CellValue::text("東")).into()).into()).into();
+    }
+    sh.cells.set(a, cell);
+    s
+}
+
+#[test]
+fn phonetic_xlsx_emitted_same_base_prevents_false_warning() {
+    use gridcraft_core::{CellRef, Value as CellValue};
+    use gridcraft_engine::model::{Cell, Sheet, Visibility};
+    for (i, branch) in [
+        "unused",
+        "header",
+        "header_formula",
+        "header_python",
+        "header_what_if",
+        "picture",
+        "picture_header",
+        "formula",
+        "dynamic",
+        "legacy",
+        "python",
+        "both",
+        "what_if",
+        "nonleading",
+        "deep",
+        "spill_ignored",
+        "spill_python",
+        "generated_header",
+        "spill_dynamic",
+        "spill_legacy",
+        "two_stage",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for global in [false, true] {
+            let mut s = sst_session(branch);
+            let expected = s.doc().unwrap().wb.phonetics.clone();
+            if global {
+                let mut sh = Sheet::new("Global match");
+                sh.visibility = if i % 2 == 0 { Visibility::Hidden } else { Visibility::VeryHidden };
+                sh.cells.set(CellRef::new(2, 1), Cell::value(CellValue::text("東")));
+                Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheets.push(sh.into());
+            }
+            let retained = global || matches!(*branch, "generated_header" | "spill_dynamic" | "spill_legacy" | "two_stage");
+            let dir = phonetic_dir(&s);
+            let path = dir.join("precedence.xlsx").to_str().unwrap().to_owned();
+            std::fs::write(&path, b"owned sentinel").unwrap();
+            let a = analyze(&mut s, &path);
+            if retained {
+                assert!(a["issues"].as_array().unwrap().is_empty(), "{branch}/{global}: {a}");
+                assert_eq!(saved_phonetics(&mut s, "xlsx", &a), expected);
+                s.execute_headless("file.save", json!({"path":path})).unwrap();
+            } else {
+                annotation_issue(&a);
+                for (command, p) in [("file.save", json!({"path":path})), ("file.saveBytes", json!({"format":"xlsx"}))] {
+                    let err = s.execute_headless(command, p).unwrap_err();
+                    let failure: Value = serde_json::from_str(&err.to_string()).unwrap();
+                    assert_eq!(failure["error"], "save.losses");
+                    annotation_issue(&failure["analysis"]);
+                    assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+                    assert!(s.doc().unwrap().is_dirty());
+                    assert!(s.ui_requests.is_empty());
+                }
+                assert!(saved_phonetics(&mut s, "xlsx", &a).is_empty());
+                s.execute_headless("file.save", confirm(&a, &path)).unwrap();
+            }
+            let actual = io::open_bytes(&path, &std::fs::read(&path).unwrap()).unwrap().0.phonetics;
+            assert_eq!(actual, if retained { expected } else { vec![] }, "{branch}/{global}");
+        }
+    }
+}
+
+#[test]
+fn phonetic_xlsx_membership_decisions_keep_existing_scope() {
+    let mut s = sst_session("unused");
+    let exact = s.doc().unwrap().wb.phonetics.clone();
+    let dir = phonetic_dir(&s);
+    let path = dir.join("scope.xlsx").to_str().unwrap().to_owned();
+    std::fs::write(&path, b"owned sentinel").unwrap();
+    let a = analyze(&mut s, &path);
+    annotation_issue(&a);
+    let json_analysis = analyze(&mut s, "copy.json");
+    assert!(json_analysis["issues"].as_array().unwrap().is_empty());
+    assert_eq!(saved_phonetics(&mut s, "json", &json_analysis), exact);
+    let mut missing = confirm(&a, &path);
+    missing["confirmedLosses"] = json!([]);
+    let mut wrong = confirm(&a, &path);
+    wrong["expectedDocument"] = json!(a["document"].as_u64().unwrap() + 1);
+    for params in [missing, wrong, confirm(&json_analysis, &path)] {
+        for command in ["file.save", "file.saveBytes"] {
+            let mut p = params.clone();
+            p["format"] = json!("xlsx");
+            assert!(s.execute_headless(command, p).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+            assert!(s.doc().unwrap().is_dirty());
+            assert!(s.ui_requests.is_empty());
+        }
+    }
+    s.execute("cell.set", json!({"cell":"B1", "input":"revision"})).unwrap();
+    for command in ["file.save", "file.saveBytes"] {
+        let mut p = confirm(&a, &path);
+        p["format"] = json!("xlsx");
+        let err = s.execute_headless(command, p).unwrap_err();
+        let failure: Value = serde_json::from_str(&err.to_string()).unwrap();
+        assert_eq!(failure["error"], "save.stale");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+    assert!(s.doc().unwrap().is_dirty());
+    assert!(s.ui_requests.is_empty());
+    let fresh = analyze(&mut s, &path);
+    assert_eq!(annotation_issue(&fresh), annotation_issue(&a));
+    assert!(saved_phonetics(&mut s, "xlsx", &fresh).is_empty());
+    s.execute_headless("file.save", confirm(&fresh, &path)).unwrap();
+    assert!(io::open_bytes(&path, &std::fs::read(&path).unwrap()).unwrap().0.phonetics.is_empty());
+}
+
+#[test]
+fn phonetic_xlsx_real_work_cap_refuses_before_publication_and_json_is_exact() {
+    use gridcraft_core::{CellRef, RangeRef};
+    let mut s = sst_session("unused");
+    let wb = Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    for col in 0..5 {
+        wb.sheet_mut(0).unwrap().spill_ranges.insert(CellRef::new(0, col), RangeRef::new(CellRef::new(0, col), CellRef::new(999_999, col)));
+    }
+    assert_eq!(wb.sheet(0).unwrap().cells.len(), 1);
+    assert!(wb.sheet(0).unwrap().spill.is_empty());
+    let exact = wb.phonetics.clone();
+    let dir = phonetic_dir(&s);
+    let path = dir.join("inability.xlsx").to_str().unwrap().to_owned();
+    std::fs::write(&path, b"owned sentinel").unwrap();
+    for (command, params) in
+        [("file.analyzeSave", json!({"path":path})), ("file.save", json!({"path":path})), ("file.saveBytes", json!({"format":"xlsx"}))]
+    {
+        let err = s.execute_headless(command, params).unwrap_err().to_string();
+        assert!(err.contains("the file is too large:") && err.contains("diagnostic budget"), "{err}");
+        assert!(!err.contains("save.losses"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned sentinel");
+        assert!(s.doc().unwrap().is_dirty());
+        assert!(s.ui_requests.is_empty());
+    }
+    let a = analyze(&mut s, "copy.json");
+    assert!(a["issues"].as_array().unwrap().is_empty());
+    assert_eq!(saved_phonetics(&mut s, "json", &a), exact);
+}

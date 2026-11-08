@@ -51,7 +51,7 @@ pub(crate) fn analyze_sheet(doc: &DocState, path: &str, sheet: usize) -> Result<
     let phonetic_loss = if flat {
         doc.wb.phonetics.iter().any(|p| !p.runs.is_empty() || p.props.is_some())
     } else if kind == FileKind::Xlsx {
-        gridcraft_xlsx::xlsx_known_phonetic_loss(&doc.wb).map_err(|e| EngineError::Other(e.to_string()))?
+        gridcraft_xlsx::xlsx_phonetic_loss(&doc.wb).map_err(|e| EngineError::Other(e.to_string()))?
     } else {
         false
     };

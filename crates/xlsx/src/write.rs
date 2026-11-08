@@ -115,9 +115,13 @@ pub(crate) fn check_phonetic_index_bytes(count: usize, budget: usize) -> Result<
 }
 
 pub(crate) fn known_phonetic_loss_with_budget(phonetics: &[PhoneticString], budget: usize) -> Result<bool, IoError> {
+    Ok(phonetic_indices(phonetics, budget)?.is_none())
+}
+
+fn phonetic_indices(phonetics: &[PhoneticString], budget: usize) -> Result<Option<Vec<usize>>, IoError> {
     check_phonetic_index_bytes(phonetics.len(), budget)?;
     if phonetics.iter().any(crate::xml::phonetic_local_loss) {
-        return Ok(true);
+        return Ok(None);
     }
     // Borrow through one fallible index rather than clone text or scan cells per annotation.
     let mut indices = Vec::new();
@@ -128,11 +132,74 @@ pub(crate) fn known_phonetic_loss_with_budget(phonetics: &[PhoneticString], budg
         if let Some((&last, earlier)) = group.split_last() {
             // HashMap collection in write_xlsx selects the last entry in original Vec order.
             if earlier.iter().any(|&i| (!phonetics[i].runs.is_empty() || phonetics[i].props.is_some()) && phonetics[i] != phonetics[last]) {
-                return Ok(true);
+                return Ok(None);
             }
         }
     }
-    Ok(false)
+    Ok(Some(indices))
+}
+
+pub(crate) fn phonetic_bit_bytes(count: usize) -> Result<usize, IoError> {
+    count.checked_add(7).map(|n| n / 8).ok_or_else(|| IoError::TooLarge("phonetic membership bitmap size overflow".into()))
+}
+
+fn phonetic_compare(a: &str, b: &str, budget: &mut crate::sheet_write::TextPlanningBudget) -> Result<std::cmp::Ordering, IoError> {
+    // Include the new compaction pass as well as every streaming membership comparison.
+    budget.text =
+        budget.text.checked_sub(a.len().max(b.len())).ok_or_else(|| IoError::TooLarge("phonetic membership comparison budget exceeded".into()))?;
+    Ok(a.cmp(b))
+}
+
+pub(crate) fn phonetic_loss_with_budget(wb: &Workbook, budget: &mut crate::sheet_write::TextPlanningBudget) -> Result<bool, IoError> {
+    let Some(mut indices) = phonetic_indices(&wb.phonetics, PHONETIC_INDEX_BYTES)? else { return Ok(true) };
+    // All local/last-winner losses are decided before compaction or any membership early exit.
+    let mut start = 0;
+    let mut unique = 0;
+    while start < indices.len() {
+        let mut end = start + 1;
+        while end < indices.len() {
+            if phonetic_compare(&wb.phonetics[indices[start]].text, &wb.phonetics[indices[end]].text, budget)? != std::cmp::Ordering::Equal {
+                break;
+            }
+            end += 1;
+        }
+        let last = indices[end - 1];
+        if !wb.phonetics[last].runs.is_empty() || wb.phonetics[last].props.is_some() {
+            indices[unique] = last;
+            unique += 1;
+        }
+        start = end;
+    }
+    indices.truncate(unique);
+    if unique == 0 {
+        return Ok(false);
+    }
+    let mut bits = Vec::new();
+    let bytes = phonetic_bit_bytes(unique)?;
+    bits.try_reserve_exact(bytes).map_err(|_| IoError::TooLarge("cannot reserve phonetic membership bitmap".into()))?;
+    bits.resize(bytes, 0u8);
+    let mut missing = unique;
+    crate::sheet_write::visit_shared_text(wb, budget, |text, budget| {
+        let (mut low, mut high) = (0, unique);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let base = &wb.phonetics[indices[mid]].text;
+            match phonetic_compare(base, text, budget)? {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => {
+                    let mask = 1 << (mid % 8);
+                    if bits[mid / 8] & mask == 0 {
+                        bits[mid / 8] |= mask;
+                        missing -= 1;
+                    }
+                    return Ok(missing == 0);
+                }
+            }
+        }
+        Ok(false)
+    })?;
+    Ok(missing != 0)
 }
 
 /// Package being assembled.
@@ -313,7 +380,7 @@ pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>) 
     };
 
     let mut wb_rels = Rels::default();
-    let (sheets_xml, kept, pivots) = write_sheets(wb, &mut out, active, &mut wb_rels);
+    let (sheets_xml, kept, pivots) = write_sheets(wb, &mut out, active, &mut wb_rels)?;
 
     let names = write_defined_names(wb, &kept, &out.chart_names);
 
@@ -511,7 +578,7 @@ fn write_sheets(
     out: &mut Out,
     active: usize,
     wb_rels: &mut Rels,
-) -> (String, crate::passthrough::WorkbookKept, crate::pivot::PivotWriter) {
+) -> Result<(String, crate::passthrough::WorkbookKept, crate::pivot::PivotWriter), IoError> {
     // Kept content first: the chart sheets among the worksheets need their relationship ids.
     let kept = crate::passthrough::write_workbook(wb, wb_rels, out);
     let mut pivots = crate::pivot::PivotWriter::default();
@@ -520,7 +587,7 @@ fn write_sheets(
     let mut ids = crate::passthrough::SheetIds::new(wb, &kept);
     for (i, sheet) in wb.sheets.iter().enumerate() {
         sheets_xml.push_str(&kept.sheet_entries(i, false, &mut ids));
-        let (xml, mut rels) = crate::sheet_write::write_sheet(wb, i, i == active, out);
+        let (xml, mut rels) = crate::sheet_write::write_sheet(wb, i, i == active, out)?;
         pivots.add_sheet(wb, i, out, &mut rels);
         let name = format!("xl/worksheets/sheet{}.xml", i + 1);
         out.part(&name, Some(CT_WORKSHEET), xml.into_bytes());
@@ -540,7 +607,7 @@ fn write_sheets(
     }
     sheets_xml.push_str(&kept.sheet_entries(wb.sheets.len(), true, &mut ids));
 
-    (sheets_xml, kept, pivots)
+    Ok((sheets_xml, kept, pivots))
 }
 
 fn write_defined_names(wb: &Workbook, kept: &crate::passthrough::WorkbookKept, chart_names: &[String]) -> String {

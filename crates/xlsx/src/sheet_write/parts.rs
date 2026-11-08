@@ -19,30 +19,100 @@ pub(super) fn table_name(name: &str, used: &mut HashSet<String>, n: u32) -> Stri
     out
 }
 
+/// Allocate the exact owned-name request before appending; integer formatting needs no scratch String.
+fn column_name(base: &str, suffix: Option<usize>, budget: &mut Option<&mut TextPlanningBudget>) -> Result<(String, usize), IoError> {
+    let request = base.len().checked_add(if suffix.is_some() { 20 } else { 0 }).ok_or_else(planning_error)?;
+    plan_charge(budget, request, 0, request)?;
+    let mut out = String::new();
+    out.try_reserve_exact(request).map_err(|_| planning_error())?;
+    out.push_str(base);
+    if let Some(k) = suffix {
+        write!(out, "{k}").map_err(|_| planning_error())?;
+    }
+    Ok((out, request))
+}
+fn column_lowercase(text: &str, budget: &mut Option<&mut TextPlanningBudget>) -> Result<(String, usize), IoError> {
+    // Keep std's contextual Unicode lowercasing. Charge a conservative request/growth estimate
+    // before its internally infallible allocation: <=3 scalars/char, <=4 UTF-8 bytes/scalar,
+    // geometric old/new buffers plus minimum capacity. This is not an allocator/OOM guarantee.
+    let request = text.len().checked_mul(48).and_then(|n| n.checked_add(32)).ok_or_else(planning_error)?;
+    plan_charge(budget, request, 0, request)?;
+    Ok((text.to_lowercase(), request))
+}
+
+fn column_key_work(key: &str, entries: usize, calls: usize, budget: &mut Option<&mut TextPlanningBudget>) -> Result<(), IoError> {
+    // Include hashing and worst-case occupied-key comparisons, independent of hash collisions.
+    let bytes =
+        key.len().checked_mul(entries.checked_add(1).ok_or_else(planning_error)?).and_then(|n| n.checked_mul(calls)).ok_or_else(planning_error)?;
+    plan_charge(budget, 0, 0, bytes)
+}
+
 /// Column names for a table: one per column of its range, unique and non-empty.
-pub(super) fn table_columns(t: &Table) -> Vec<String> {
-    let w = t.range.width() as usize;
+pub(super) fn table_columns(t: &Table, mut budget: Option<&mut TextPlanningBudget>) -> Result<Vec<String>, IoError> {
+    let before = budget.as_ref().map(|b| b.bytes);
+    let width = t.range.end.col.checked_sub(t.range.start.col).and_then(|n| n.checked_add(1)).ok_or_else(planning_error)?;
+    let w = usize::try_from(width).map_err(|_| planning_error())?;
+    let mut out = Vec::new();
+    plan_reserve(&mut out, w, &mut budget)?;
+    let mut retained = w.checked_mul(std::mem::size_of::<String>()).ok_or_else(planning_error)?;
+    // Logical bucket/key slots, conservatively rounded for both maps; allocator/control overhead
+    // is implementation-dependent. Reserve once so insertion never needs input-sized growth.
+    let slots = w
+        .checked_mul(4 * (std::mem::size_of::<String>() + std::mem::size_of::<(String, u32)>() + 2))
+        .and_then(|n| n.checked_add(32))
+        .ok_or_else(planning_error)?;
+    plan_charge(&mut budget, slots, 0, 0)?;
     let mut used = HashSet::new();
-    // The next suffix to try per lowercased base, so repeated headers don't retry every suffix
-    // already handed out.
     let mut next: HashMap<String, u32> = HashMap::new();
-    (0..w)
-        .map(|i| {
-            let base = t.columns.get(i).map(|c| c.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Column{}", i + 1));
-            let lower = base.to_lowercase();
-            if used.insert(lower.clone()) {
-                return base;
-            }
-            let k = next.entry(lower).or_insert(2);
-            loop {
-                let name = format!("{base}{k}");
-                *k += 1;
-                if used.insert(name.to_lowercase()) {
-                    return name;
+    used.try_reserve(w).map_err(|_| planning_error())?;
+    next.try_reserve(w).map_err(|_| planning_error())?;
+    for i in 0..w {
+        plan_charge(&mut budget, 0, 1, 0)?;
+        let source = t.columns.get(i).map(|c| c.name.as_str()).unwrap_or("");
+        plan_charge(&mut budget, 0, 0, source.len())?;
+        let (base, base_bytes) = if source.trim().is_empty() {
+            column_name("Column", Some(i.checked_add(1).ok_or_else(planning_error)?), &mut budget)?
+        } else {
+            column_name(source, None, &mut budget)?
+        };
+        let (lower, lower_bytes) = column_lowercase(&base, &mut budget)?;
+        column_key_work(&lower, used.len(), 2, &mut budget)?;
+        let (name, name_bytes) = if !used.contains(&lower) {
+            used.insert(lower);
+            (base, base_bytes)
+        } else {
+            column_key_work(&lower, next.len(), 1, &mut budget)?;
+            let k = match next.entry(lower) {
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(2),
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    plan_release(&mut budget, lower_bytes)?;
+                    e.into_mut()
                 }
-            }
-        })
-        .collect()
+            };
+            let chosen = loop {
+                plan_charge(&mut budget, 0, 1, 0)?;
+                let (name, bytes) = column_name(&base, Some(*k as usize), &mut budget)?;
+                *k = k.checked_add(1).ok_or_else(planning_error)?;
+                let (lower, lower_bytes) = column_lowercase(&name, &mut budget)?;
+                column_key_work(&lower, used.len(), 1, &mut budget)?;
+                if used.insert(lower) {
+                    break (name, bytes);
+                }
+                drop(name);
+                plan_release(&mut budget, bytes.checked_add(lower_bytes).ok_or_else(planning_error)?)?;
+            };
+            drop(base);
+            plan_release(&mut budget, base_bytes)?;
+            chosen
+        };
+        retained = retained.checked_add(name_bytes).ok_or_else(planning_error)?;
+        out.push(name);
+    }
+    drop((used, next));
+    if let (Some(b), Some(before)) = (budget, before) {
+        b.bytes = before.checked_sub(retained).ok_or_else(planning_error)?;
+    }
+    Ok(out)
 }
 
 fn filter_operator(op: &str) -> &'static str {
@@ -412,7 +482,7 @@ mod tests {
             table_type: None,
             connection_id: None,
         };
-        let names = table_columns(&t);
+        let names = table_columns(&t, None).unwrap();
         assert_eq!(names.len(), 10_000);
         assert_eq!(&names[..4], ["Total", "total3", "Total2", "Total4"]);
         assert_eq!(names.iter().map(|n| n.to_lowercase()).collect::<HashSet<_>>().len(), 10_000);

@@ -9,6 +9,7 @@ use gridcraft_model::{
     Sheet, SparklineKind, Style, Table, TotalsFn, Validation, ValidationKind, Workbook, default_icon_thresholds, icon_count,
 };
 
+use crate::IoError;
 use crate::drawing::{Obj, image_content_type, image_ext};
 use crate::fmla::text_to_file;
 use crate::styles::{color_attrs, dxf_id};
@@ -29,9 +30,224 @@ fn sqref(ranges: &[RangeRef]) -> String {
     ranges.iter().map(|r| r.a1()).collect::<Vec<_>>().join(" ")
 }
 
-pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (String, Rels) {
+/// Logical requests/work, not allocator overhead, RSS or a wall-clock deadline.
+pub(crate) struct TextPlanningBudget {
+    pub(crate) bytes: usize,
+    pub(crate) steps: usize,
+    pub(crate) text: usize,
+}
+impl Default for TextPlanningBudget {
+    fn default() -> Self {
+        Self { bytes: 8 * 1024 * 1024, steps: 4_000_000, text: 64 * 1024 * 1024 }
+    }
+}
+fn planning_error() -> IoError {
+    IoError::TooLarge("XLSX text planning exceeds its diagnostic budget".into())
+}
+fn plan_charge(budget: &mut Option<&mut TextPlanningBudget>, bytes: usize, steps: usize, text: usize) -> Result<(), IoError> {
+    if let Some(b) = budget {
+        b.bytes = b.bytes.checked_sub(bytes).ok_or_else(planning_error)?;
+        b.steps = b.steps.checked_sub(steps).ok_or_else(planning_error)?;
+        b.text = b.text.checked_sub(text).ok_or_else(planning_error)?;
+    }
+    Ok(())
+}
+fn plan_release(budget: &mut Option<&mut TextPlanningBudget>, bytes: usize) -> Result<(), IoError> {
+    if let Some(b) = budget {
+        b.bytes = b.bytes.checked_add(bytes).ok_or_else(planning_error)?;
+    }
+    Ok(())
+}
+fn plan_reserve<T>(v: &mut Vec<T>, count: usize, budget: &mut Option<&mut TextPlanningBudget>) -> Result<(), IoError> {
+    plan_charge(budget, count.checked_mul(std::mem::size_of::<T>()).ok_or_else(planning_error)?, 0, 0)?;
+    v.try_reserve_exact(count).map_err(|_| planning_error())
+}
+fn prepare_table_text<'a>(tables: &'a [Table], mut budget: Option<&mut TextPlanningBudget>) -> Result<Vec<(&'a Table, Vec<String>)>, IoError> {
+    let mut out = Vec::new();
+    plan_reserve(&mut out, tables.len(), &mut budget)?;
+    for t in tables {
+        plan_charge(&mut budget, 0, 1, 0)?;
+        let height = t.range.end.row.checked_sub(t.range.start.row).and_then(|h| h.checked_add(1)).ok_or_else(planning_error)?;
+        if height > t.header_row as u32 + t.totals_row as u32 || (t.header_row && height > t.totals_row as u32) {
+            out.push((t, table_columns(t, budget.as_deref_mut())?));
+        }
+    }
+    Ok(out)
+}
+
+struct HeaderPlan<'a>(Vec<(CellRef, &'a str, usize)>);
+impl<'a> HeaderPlan<'a> {
+    fn new(tables: &'a [(&Table, Vec<String>)], mut budget: Option<&mut TextPlanningBudget>) -> Result<Self, IoError> {
+        let count = tables.iter().try_fold(0usize, |n, (t, c)| {
+            plan_charge(&mut budget, 0, 1, 0)?;
+            n.checked_add(if t.header_row { c.len() } else { 0 }).ok_or_else(planning_error)
+        })?;
+        let mut entries = Vec::new();
+        plan_reserve(&mut entries, count, &mut budget)?;
+        for (ordinal, (t, cols)) in tables.iter().enumerate() {
+            plan_charge(&mut budget, 0, 1, 0)?;
+            if !t.header_row {
+                continue;
+            }
+            for (i, name) in cols.iter().enumerate() {
+                plan_charge(&mut budget, 0, 1, 0)?;
+                let col = t.range.start.col.checked_add(u32::try_from(i).map_err(|_| planning_error())?).ok_or_else(planning_error)?;
+                entries.push((CellRef::new(t.range.start.row, col), name.as_str(), ordinal));
+            }
+        }
+        entries.sort_unstable_by_key(|(c, _, ordinal)| (*c, std::cmp::Reverse(*ordinal)));
+        entries.dedup_by_key(|(c, _, _)| *c);
+        Ok(Self(entries))
+    }
+    fn get(&self, c: CellRef) -> Option<&'a str> {
+        self.0.binary_search_by_key(&c, |e| e.0).ok().map(|i| self.0[i].1)
+    }
+    fn keys(&self) -> impl Iterator<Item = CellRef> + '_ {
+        self.0.iter().map(|e| e.0)
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+fn visit_spill_extras(
+    sheet: &Sheet,
+    mut budget: Option<&mut TextPlanningBudget>,
+    mut visit: impl FnMut(CellRef, &Value, Option<&mut TextPlanningBudget>) -> Result<bool, IoError>,
+) -> Result<bool, IoError> {
+    for (a, r) in &sheet.spill_ranges {
+        plan_charge(&mut budget, 0, 1, 0)?;
+        if r.is_single() {
+            continue;
+        }
+        for c in r.iter().take(1_000_000) {
+            // Examined positions cost work even when no sparse value is yielded.
+            plan_charge(&mut budget, 0, 1, 0)?;
+            if c != *a
+                && let Some(v) = sheet.spill.get(&c)
+                && sheet.cells.get(c).is_none_or(|x| x.formula.is_none() && x.value.is_empty())
+                && visit(c, v, budget.as_deref_mut())?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+enum ResolvedValue<'a> {
+    Header(&'a str),
+    Scalar(&'a Value),
+}
+struct ResolvedCell<'a> {
+    value: ResolvedValue<'a>,
+    formula: Option<&'a gridcraft_model::Formula>,
+    python: Option<&'a gridcraft_model::PyCode>,
+    cached: bool,
+    picture: bool,
+}
+impl ResolvedCell<'_> {
+    fn shared_text(&self) -> Option<&str> {
+        if self.picture || self.cached {
+            return None;
+        }
+        match self.value {
+            ResolvedValue::Header(t) => Some(t),
+            ResolvedValue::Scalar(Value::Text(t)) => Some(t),
+            _ => None,
+        }
+    }
+}
+fn resolve_cell<'a>(input: &CellWriteInput<'a>) -> ResolvedCell<'a> {
+    let formula = input.header_override.is_none().then(|| input.cell.and_then(|c| c.formula.as_deref())).flatten();
+    let python = (input.header_override.is_none() && formula.is_none()).then(|| input.cell.and_then(|c| c.py.as_deref())).flatten();
+    let value = if let Some(t) = input.header_override {
+        ResolvedValue::Header(t)
+    } else {
+        let v = if let Some(v) = input.spill_value {
+            v
+        } else {
+            match input.cell.map(|c| &c.value).unwrap_or(&Value::Empty) {
+                Value::Array(a) => a.data.first().unwrap_or(&Value::Empty),
+                v => v,
+            }
+        };
+        ResolvedValue::Scalar(match v {
+            Value::Array(a) => a.get(0, 0).unwrap_or(&Value::Empty),
+            v => v,
+        })
+    };
+    ResolvedCell {
+        value,
+        formula,
+        python,
+        cached: formula.is_some() || python.is_some() || input.what_if.is_some(),
+        picture: input.picture.is_some(),
+    }
+}
+
+/// The union suffices: stored nonempty cells block extras, Empty cells cannot supply text,
+/// headers override extras, and picture/what-if-only positions cannot add ordinary text.
+/// Repeated candidates do not change membership; this is not the XML ordering/count stream.
+pub(crate) fn visit_shared_text(
+    wb: &Workbook,
+    budget: &mut TextPlanningBudget,
+    mut visit: impl FnMut(&str, &mut TextPlanningBudget) -> Result<bool, IoError>,
+) -> Result<(), IoError> {
+    for sheet in &wb.sheets {
+        let before = budget.bytes;
+        plan_charge(&mut Some(&mut *budget), 0, 1, 0)?;
+        let tables = prepare_table_text(&sheet.tables, Some(budget))?;
+        let headers = HeaderPlan::new(&tables, Some(budget))?;
+        let mut what_if = Vec::new();
+        plan_reserve(&mut what_if, sheet.what_if_tables.len(), &mut Some(&mut *budget))?;
+        for t in &sheet.what_if_tables {
+            plan_charge(&mut Some(&mut *budget), 0, 1, 0)?;
+            what_if.push(t);
+        }
+        what_if.sort_unstable_by_key(|t| t.anchor);
+        let candidate = |c: CellRef,
+                         extra: Option<&Value>,
+                         budget: &mut TextPlanningBudget,
+                         visit: &mut dyn FnMut(&str, &mut TextPlanningBudget) -> Result<bool, IoError>| {
+            let input = CellWriteInput {
+                reference: c,
+                cell: sheet.cells.get(c),
+                picture: sheet.cell_pictures.get(&c),
+                header_override: headers.get(c),
+                spill_value: extra,
+                dynamic_range: None,
+                what_if: what_if.binary_search_by_key(&c, |t| t.anchor).ok().map(|i| what_if[i]),
+            };
+            let resolved = resolve_cell(&input);
+            if let Some(t) = resolved.shared_text() { visit(t, budget) } else { Ok(false) }
+        };
+        for (c, _) in sheet.cells.iter() {
+            plan_charge(&mut Some(&mut *budget), 0, 1, 0)?;
+            if candidate(c, None, budget, &mut visit)? {
+                return Ok(());
+            }
+        }
+        for c in headers.keys() {
+            plan_charge(&mut Some(&mut *budget), 0, 1, 0)?;
+            if candidate(c, None, budget, &mut visit)? {
+                return Ok(());
+            }
+        }
+        if visit_spill_extras(sheet, Some(budget), |c, v, b| candidate(c, Some(v), b.ok_or_else(planning_error)?, &mut visit))? {
+            return Ok(());
+        }
+        drop(headers);
+        drop(tables);
+        drop(what_if);
+        budget.bytes = before;
+    }
+    Ok(())
+}
+
+pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> Result<(String, Rels), IoError> {
     let mut rels = Rels::default();
-    let Some(sheet) = wb.sheet(si) else { return (String::new(), rels) };
+    let Some(sheet) = wb.sheet(si) else { return Ok((String::new(), rels)) };
     let nstyles = wb.styles.len() as u32;
     let sid = |s: gridcraft_model::StyleId| if s.0 < nstyles { s.0 } else { 0 };
 
@@ -60,20 +276,9 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
             .collect(),
         _ => sheet.tables.clone(),
     };
-    // Table header cells must hold the column names.
-    let mut overrides: BTreeMap<CellRef, String> = BTreeMap::new();
-    let tables: Vec<(&Table, Vec<String>)> = folded
-        .iter()
-        .filter(|t| t.range.height() > t.header_row as u32 + t.totals_row as u32 || (t.header_row && t.range.height() > t.totals_row as u32))
-        .map(|t| (t, table_columns(t)))
-        .collect();
-    for (t, cols) in &tables {
-        if t.header_row {
-            for (i, name) in cols.iter().enumerate() {
-                overrides.insert(CellRef::new(t.range.start.row, t.range.start.col + i as u32), name.clone());
-            }
-        }
-    }
+    // Table header cells must hold the final normalized column names.
+    let tables = prepare_table_text(&folded, None)?;
+    let overrides = HeaderPlan::new(&tables, None)?;
     // Dynamic-array spills: anchor → range, and the spilled values to cache.
     let dynamic: BTreeMap<CellRef, RangeRef> = sheet
         .spill_ranges
@@ -85,16 +290,10 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
         .collect();
     let mut extra: BTreeMap<CellRef, Value> = BTreeMap::new();
     // Values inside spills and legacy array ranges.
-    for (a, r) in sheet.spill_ranges.iter().filter(|(_, r)| !r.is_single()) {
-        for c in r.iter().take(1_000_000) {
-            if c != *a
-                && let Some(v) = sheet.spill.get(&c)
-                && sheet.cells.get(c).is_none_or(|x| x.formula.is_none() && x.value.is_empty())
-            {
-                extra.insert(c, v.clone());
-            }
-        }
-    }
+    visit_spill_extras(sheet, None, |c, v, _| {
+        extra.insert(c, v.clone());
+        Ok(false)
+    })?;
 
     let mut s = format!("{XML_DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
     // sheetPr
@@ -120,8 +319,8 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
         s.push_str("</sheetPr>");
     }
     let mut used = sheet.cells.used_range();
-    for c in extra.keys().chain(overrides.keys()) {
-        let r = RangeRef::cell(*c);
+    for c in extra.keys().copied().chain(overrides.keys()) {
+        let r = RangeRef::cell(c);
         used = Some(used.map_or(r, |u| u.union(&r)));
     }
     let _ = write!(s, "<dimension ref=\"{}\"/>", used.map(|u| u.a1()).unwrap_or_else(|| "A1".into()));
@@ -216,14 +415,14 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     }
     write_sheet_extensions(&mut s, sheet, &prio);
     s.push_str("</worksheet>");
-    (s, rels)
+    Ok((s, rels))
 }
 
 struct CellWriteInput<'a> {
     reference: CellRef,
     cell: Option<&'a Cell>,
     picture: Option<&'a std::sync::Arc<gridcraft_model::CellPicture>>,
-    header_override: Option<&'a String>,
+    header_override: Option<&'a str>,
     spill_value: Option<&'a Value>,
     dynamic_range: Option<&'a RangeRef>,
     what_if: Option<&'a gridcraft_model::WhatIfTable>,
@@ -579,7 +778,7 @@ struct SheetCellData<'a> {
     workbook: &'a Workbook,
     index: usize,
     sheet: &'a Sheet,
-    overrides: &'a BTreeMap<CellRef, String>,
+    overrides: &'a HeaderPlan<'a>,
     extra: &'a BTreeMap<CellRef, Value>,
     dynamic: &'a BTreeMap<CellRef, RangeRef>,
 }
@@ -600,7 +799,7 @@ fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcr
         all.extend(sheet.what_if_tables.iter().map(|t| t.anchor));
         all.extend(sheet.cell_pictures.keys().copied());
         all.extend(extra.keys().copied());
-        all.extend(overrides.keys().copied());
+        all.extend(overrides.keys());
         keys = all.into_iter().map(|c| (c, sheet.cells.get(c))).collect();
     }
     s.reserve(keys.len().saturating_mul(32));
@@ -652,7 +851,7 @@ fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcr
         }
         s.push('>');
         for &(cell_ref, cell) in cells {
-            let ov = overrides.get(&cell_ref);
+            let ov = overrides.get(cell_ref);
             let ex = extra.get(&cell_ref);
             let array = dynamic.get(&cell_ref).copied().or_else(|| {
                 let f = cell?.formula.as_ref()?;
@@ -745,7 +944,8 @@ fn write_sheet_views(s: &mut String, sheet: &Sheet, selected: bool) {
 }
 
 fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) {
-    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic, what_if } = input;
+    let resolved = resolve_cell(&input);
+    let CellWriteInput { reference: c, cell, picture, dynamic_range: dynamic, what_if, .. } = input;
     let style = cell.map(|x| sid(x.style)).unwrap_or(0);
     s.push_str("<c r=\"");
     push_a1(s, c);
@@ -758,26 +958,17 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         let _ = write!(s, " t=\"e\" vm=\"{vm}\"><v>#VALUE!</v></c>");
         return;
     }
-    let formula = if ov.is_some() { None } else { cell.and_then(|x| x.formula.as_ref()) };
+    let formula = resolved.formula;
     // A Python cell is saved as [MS-XLSX] 2.3.10 specifies, `_xlfn._xlws.PY(index,0|1)` with its
     // code as script `index` of the Python part, and with its cached value; an application without
     // Python shows the value (and #NAME? if it recalculates).
-    let py_text = if ov.is_some() || formula.is_some() {
-        None
-    } else {
-        cell.and_then(|x| x.py.as_ref()).map(|p| {
-            out.python_scripts.push(p.code.clone());
-            crate::python_part::file_formula(out.python_scripts.len().saturating_sub(1), p.object)
-        })
-    };
-    let value: Value = match (ov, extra) {
-        (Some(t), _) => Value::text(t.as_str()),
-        (None, Some(v)) => v.clone(),
-        _ => cell.map(|x| x.value.scalar()).unwrap_or(Value::Empty),
-    };
-    let value = match value {
-        Value::Array(a) => a.get(0, 0).cloned().unwrap_or(Value::Empty),
-        v => v,
+    let py_text = resolved.python.map(|p| {
+        out.python_scripts.push(p.code.clone());
+        crate::python_part::file_formula(out.python_scripts.len().saturating_sub(1), p.object)
+    });
+    let value = match resolved.value {
+        ResolvedValue::Header(t) => Value::text(t),
+        ResolvedValue::Scalar(v) => v.clone(),
     };
     let value = match value {
         Value::Error(CellError::Circ) => Value::Number(0.0),
@@ -798,7 +989,7 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         out.dynamic_arrays = true;
     }
     let text = formula.map(|f| esc(&crate::fmla::to_file(f))).or_else(|| py_text.map(|t| esc(&t)));
-    if text.is_some() || what_if.is_some() {
+    if resolved.cached {
         let t = match &value {
             Value::Text(_) => " t=\"str\"",
             Value::Bool(_) => " t=\"b\"",
@@ -861,14 +1052,15 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         s.push_str("</c>");
         return;
     }
+    if let Some(t) = resolved.shared_text() {
+        let i = out.sst.index(t);
+        let _ = write!(s, " t=\"s\"><v>{i}</v></c>");
+        return;
+    }
     match &value {
-        Value::Empty | Value::Array(_) => s.push_str("/>"),
+        Value::Empty | Value::Array(_) | Value::Text(_) => s.push_str("/>"),
         Value::Number(n) => {
             let _ = write!(s, "><v>{}</v></c>", num(*n));
-        }
-        Value::Text(t) => {
-            let i = out.sst.index(t);
-            let _ = write!(s, " t=\"s\"><v>{i}</v></c>");
         }
         Value::Bool(b) => {
             let _ = write!(s, " t=\"b\"><v>{}</v></c>", *b as u8);
