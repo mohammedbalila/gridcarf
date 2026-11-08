@@ -207,7 +207,9 @@ impl Eq for Font {}
 impl Hash for Font {
     fn hash<H: Hasher>(&self, h: &mut H) {
         self.name.hash(h);
-        self.size.to_bits().hash(h);
+        // Equal signed zeros must hash equally without changing the stored size's bits.
+        let size_bits = if self.size == 0.0 { 0 } else { self.size.to_bits() };
+        size_bits.hash(h);
         (self.bold, self.italic, self.underline, self.strike, self.color, self.vert, self.charset, self.family, self.minor).hash(h);
     }
 }
@@ -503,6 +505,96 @@ impl StyleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hash(value: &impl Hash) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn font_signed_zero_hashes_equally_without_changing_bits() {
+        let positive = Font { size: 0.0, ..Font::default() };
+        let negative = Font { size: -0.0, ..Font::default() };
+        assert_eq!((positive.size.to_bits(), negative.size.to_bits()), (0, 0x8000_0000));
+        assert_eq!(positive, negative);
+        let positive_hash = hash(&positive);
+        let negative_hash = hash(&negative);
+        assert_eq!((positive.size.to_bits(), negative.size.to_bits()), (0, 0x8000_0000));
+        let positive_style = Style { font: positive, ..Style::default() };
+        let negative_style = Style { font: negative, ..Style::default() };
+        assert_eq!(positive_style, negative_style);
+        let style_hashes = (hash(&positive_style), hash(&negative_style));
+        assert_eq!((positive_style.font.size.to_bits(), negative_style.font.size.to_bits()), (0, 0x8000_0000));
+        assert_eq!(positive_hash, negative_hash, "equal fonts must hash equally");
+        assert_eq!(style_hashes.0, style_hashes.1, "equal containing styles must hash equally");
+    }
+
+    #[test]
+    fn interning_signed_zero_sizes_keeps_first_stored_representation() {
+        for (first, opposite) in [(0.0_f32, -0.0_f32), (-0.0, 0.0)] {
+            let first_style = Style { font: Font { size: first, ..Font::default() }, ..Style::default() };
+            let opposite_style = Style { font: Font { size: opposite, ..Font::default() }, ..Style::default() };
+            for mut table in [StyleTable::default(), StyleTable::with_default(first_style.clone())] {
+                let first_id = table.intern(first_style.clone());
+                let len = table.len();
+                assert_eq!(table.get(first_id).font.size.to_bits(), first.to_bits());
+                let opposite_id = table.intern(opposite_style.clone());
+                assert_eq!(opposite_id, first_id, "first bits: {:08x}", first.to_bits());
+                assert_eq!(table.len(), len);
+                assert_eq!(table.get(first_id).font.size.to_bits(), first.to_bits());
+                let mut finite = first_style.clone();
+                finite.font.size = 12.5;
+                let finite_id = table.intern(finite.clone());
+                assert_ne!(finite_id, first_id);
+                assert_eq!(table.intern(finite), finite_id);
+                let mut bold = first_style.clone();
+                bold.font.bold = true;
+                let bold_id = table.intern(bold.clone());
+                assert_ne!(bold_id, first_id);
+                assert_ne!(bold_id, finite_id);
+                assert_eq!(table.intern(bold), bold_id);
+                assert_eq!(table.len(), len + 2);
+            }
+        }
+    }
+
+    #[test]
+    fn rebuilt_style_index_reuses_signed_zero_without_rewriting_entries() -> Result<(), Box<dyn std::error::Error>> {
+        for (first, opposite) in [(0.0_f32, -0.0_f32), (-0.0, 0.0)] {
+            let first_style = Style { font: Font { size: first, ..Font::default() }, ..Style::default() };
+            let opposite_style = Style { font: Font { size: opposite, ..Font::default() }, ..Style::default() };
+            for duplicates in [false, true] {
+                let mut styles = vec![Style::default(), first_style.clone()];
+                let mut bold = first_style.clone();
+                bold.font.bold = true;
+                styles.push(bold);
+                if duplicates {
+                    styles.push(opposite_style.clone());
+                }
+                let before = styles.clone();
+                let bits: Vec<_> = before.iter().map(|s| s.font.size.to_bits()).collect();
+                let original = StyleTable { styles, index: HashMap::new() };
+                let mut table: StyleTable = serde_json::from_str(&serde_json::to_string(&original)?)?;
+                assert!(table.index.is_empty());
+                for explicit_rebuild in [false, true] {
+                    if explicit_rebuild {
+                        table.rebuild_index();
+                    }
+                    let id = table.intern(opposite_style.clone());
+                    assert!(before.get(id.0 as usize).is_some_and(|s| s == &opposite_style));
+                    assert_eq!(table.get(id), &opposite_style);
+                    assert_eq!(table.len(), before.len());
+                    assert_eq!(table.styles, before);
+                    assert_eq!(table.iter().map(|(_, s)| s.font.size.to_bits()).collect::<Vec<_>>(), bits);
+                    for (i, expected) in before.iter().enumerate() {
+                        assert_eq!(table.get(StyleId(i as u32)), expected);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn interning() {
