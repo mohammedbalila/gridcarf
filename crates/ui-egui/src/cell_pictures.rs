@@ -127,6 +127,20 @@ pub(crate) fn forget_dead(ctx: &egui::Context) {
     cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget_dead();
 }
 
+#[cfg(test)]
+pub(crate) fn lifetime_evidence(ctx: &egui::Context) -> Option<[usize; 6]> {
+    let cache = ctx.data(|data| data.get_temp::<Arc<Mutex<Cache>>>(egui::Id::unique("gridcraft.cell_pictures")))?;
+    let cache = cache.lock().unwrap();
+    Some([
+        cache.entries.len(),
+        cache.entries.capacity(),
+        cache.bytes,
+        cache.entries.values().filter(|entry| entry.source.strong_count() != 0).count(),
+        cache.entries.values().filter(|entry| entry.texture.is_some()).count(),
+        cache.entries.capacity() * std::mem::size_of::<(usize, Entry)>(),
+    ])
+}
+
 /// Draws a cached cell picture fitted inside the cell and clipped to it, or paints the picture fallback icon when no texture is available.
 pub(crate) fn paint(painter: &Painter, cell: Rect, picture: &Arc<CellPicture>) {
     if cell.width() <= 0.0 || cell.height() <= 0.0 || !cell.intersects(painter.clip_rect()) {

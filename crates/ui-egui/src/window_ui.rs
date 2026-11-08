@@ -11,6 +11,9 @@ use gridcraft_engine::core::CellRef;
 use crate::{Notice, SheetApp, backstage, dialogs, editor, grid, keytips, text_box};
 
 #[cfg(test)]
+mod lifetime_evidence;
+
+#[cfg(test)]
 mod cf_tests {
     use super::*;
 

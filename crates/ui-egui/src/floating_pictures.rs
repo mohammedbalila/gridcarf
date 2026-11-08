@@ -154,6 +154,22 @@ pub(crate) fn forget_closed(ctx: &egui::Context, open: &[u64]) {
     cache(ctx).lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget_closed(open);
 }
 
+#[cfg(test)]
+pub(crate) fn lifetime_evidence(ctx: &egui::Context, target: u64) -> Option<[usize; 8]> {
+    let cache = ctx.data(|data| data.get_temp::<Arc<Mutex<Cache>>>(egui::Id::unique("gridcraft.floating_pictures")))?;
+    let cache = cache.lock().unwrap();
+    Some([
+        cache.entries.len(),
+        cache.entries.capacity(),
+        cache.bytes,
+        cache.entries.keys().filter(|key| key.doc == target).count(),
+        cache.docs.len(),
+        cache.docs.capacity(),
+        cache.entries.values().filter(|entry| entry.texture.is_some()).count(),
+        cache.entries.capacity() * std::mem::size_of::<(Key, Entry)>() + cache.docs.capacity() * std::mem::size_of::<u64>(),
+    ])
+}
+
 /// The texture of picture `image` of workbook `doc`, drawn in `rect` (points); `None` when it
 /// can't be decoded or is too large to be.
 pub(crate) fn texture(ctx: &egui::Context, doc: u64, image: &Image, rect: egui::Rect) -> Option<TextureHandle> {
