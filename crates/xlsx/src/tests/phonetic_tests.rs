@@ -748,3 +748,25 @@ fn phonetic_planning_counts_skipped_candidates_and_capacity_requests() {
         );
     }
 }
+
+#[test]
+fn phonetic_uncapped_writer_preserves_wide_header_counterexample() {
+    // This is the review's real writer shape, not a claim that Excel accepts long headers.
+    let mut names: Vec<String> = (0..16_383).map(|n| format!("h{n}")).collect();
+    let long = "L".repeat(131_072);
+    names.push(long.clone());
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut wb = Workbook::new();
+    wb.sheet_mut(0).unwrap().tables.push(membership_table(&borrowed));
+    assert!(wb.phonetics.is_empty(), "uncapped writing must also work without annotations");
+    let bytes = write_xlsx(&wb).unwrap();
+    let root = crate::xml::parse(part(&bytes, "xl/sharedStrings.xml").as_bytes()).unwrap();
+    let items: Vec<_> = root.kids("si").collect();
+    assert_eq!(items.len(), 16_384);
+    assert_eq!(crate::xml::rich_text(items[16_383]), long);
+    assert!(part(&bytes, "xl/worksheets/sheet1.xml").contains("<c r=\"XFD1\" t=\"s\"><v>16383</v></c>"));
+    assert!(matches!(
+        crate::sheet_write::visit_shared_text(&wb, &mut crate::sheet_write::TextPlanningBudget::default(), |_, _| Ok(false)),
+        Err(crate::IoError::TooLarge(_))
+    ));
+}

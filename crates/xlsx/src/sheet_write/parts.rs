@@ -35,12 +35,22 @@ fn column_lowercase(text: &str, budget: &mut Option<&mut TextPlanningBudget>) ->
     // Keep std's contextual Unicode lowercasing. Charge a conservative request/growth estimate
     // before its internally infallible allocation: <=3 scalars/char, <=4 UTF-8 bytes/scalar,
     // geometric old/new buffers plus minimum capacity. This is not an allocator/OOM guarantee.
-    let request = text.len().checked_mul(48).and_then(|n| n.checked_add(32)).ok_or_else(planning_error)?;
-    plan_charge(budget, request, 0, request)?;
+    let request = if budget.is_some() {
+        let request = text.len().checked_mul(48).and_then(|n| n.checked_add(32)).ok_or_else(planning_error)?;
+        plan_charge(budget, request, 0, request)?;
+        request
+    } else {
+        0
+    };
     Ok((text.to_lowercase(), request))
 }
 
 fn column_key_work(key: &str, entries: usize, calls: usize, budget: &mut Option<&mut TextPlanningBudget>) -> Result<(), IoError> {
+    // The real writer disables diagnosis; its successful-output domain must not depend on
+    // overflow of a hypothetical comparison estimate (notably on 32-bit targets).
+    if budget.is_none() {
+        return Ok(());
+    }
     // Include hashing and worst-case occupied-key comparisons, independent of hash collisions.
     let bytes =
         key.len().checked_mul(entries.checked_add(1).ok_or_else(planning_error)?).and_then(|n| n.checked_mul(calls)).ok_or_else(planning_error)?;
@@ -54,14 +64,16 @@ pub(super) fn table_columns(t: &Table, mut budget: Option<&mut TextPlanningBudge
     let w = usize::try_from(width).map_err(|_| planning_error())?;
     let mut out = Vec::new();
     plan_reserve(&mut out, w, &mut budget)?;
-    let mut retained = w.checked_mul(std::mem::size_of::<String>()).ok_or_else(planning_error)?;
+    let mut retained = if budget.is_some() { w.checked_mul(std::mem::size_of::<String>()).ok_or_else(planning_error)? } else { 0 };
     // Logical bucket/key slots, conservatively rounded for both maps; allocator/control overhead
     // is implementation-dependent. Reserve once so insertion never needs input-sized growth.
-    let slots = w
-        .checked_mul(4 * (std::mem::size_of::<String>() + std::mem::size_of::<(String, u32)>() + 2))
-        .and_then(|n| n.checked_add(32))
-        .ok_or_else(planning_error)?;
-    plan_charge(&mut budget, slots, 0, 0)?;
+    if budget.is_some() {
+        let slots = w
+            .checked_mul(4 * (std::mem::size_of::<String>() + std::mem::size_of::<(String, u32)>() + 2))
+            .and_then(|n| n.checked_add(32))
+            .ok_or_else(planning_error)?;
+        plan_charge(&mut budget, slots, 0, 0)?;
+    }
     let mut used = HashSet::new();
     let mut next: HashMap<String, u32> = HashMap::new();
     used.try_reserve(w).map_err(|_| planning_error())?;
@@ -99,13 +111,17 @@ pub(super) fn table_columns(t: &Table, mut budget: Option<&mut TextPlanningBudge
                     break (name, bytes);
                 }
                 drop(name);
-                plan_release(&mut budget, bytes.checked_add(lower_bytes).ok_or_else(planning_error)?)?;
+                if budget.is_some() {
+                    plan_release(&mut budget, bytes.checked_add(lower_bytes).ok_or_else(planning_error)?)?;
+                }
             };
             drop(base);
             plan_release(&mut budget, base_bytes)?;
             chosen
         };
-        retained = retained.checked_add(name_bytes).ok_or_else(planning_error)?;
+        if budget.is_some() {
+            retained = retained.checked_add(name_bytes).ok_or_else(planning_error)?;
+        }
         out.push(name);
     }
     drop((used, next));
@@ -459,6 +475,38 @@ mod tests {
     use gridcraft_model::TableColumn;
 
     use super::*;
+
+    #[test]
+    fn uncapped_column_work_skips_diagnostic_overflow() {
+        // Both counterexamples use tiny real buffers and virtual counts, not huge allocation.
+        assert!(column_key_work("x", usize::MAX, 2, &mut None).is_ok());
+        assert!(column_key_work("xx", usize::MAX / 2, 2, &mut None).is_ok());
+        for (key, entries) in [("x", usize::MAX), ("xx", usize::MAX / 2)] {
+            assert!(matches!(column_key_work(key, entries, 2, &mut Some(&mut TextPlanningBudget::default())), Err(IoError::TooLarge(_))));
+        }
+        // The actual 32-bit writer counterexample is one above its integer maximum.
+        assert_eq!(131_072u64 * 16_384 * 2, 4_294_967_296);
+        assert!(131_072u32.checked_mul(16_384).and_then(|n| n.checked_mul(2)).is_none());
+        let long = "L".repeat(131_072);
+        assert!(column_key_work(&long, 16_383, 2, &mut None).is_ok());
+        assert!(matches!(column_key_work(&long, 16_383, 2, &mut Some(&mut TextPlanningBudget::default())), Err(IoError::TooLarge(_))));
+    }
+
+    #[test]
+    fn uncapped_column_lowercase_skips_diagnostic_request() {
+        let (lower, request) = column_lowercase("ΟΣ", &mut None).unwrap();
+        assert_eq!(lower, "ος");
+        assert_eq!(request, 0, "an uncapped caller has no diagnostic request");
+        let mut budget = TextPlanningBudget::default();
+        let (lower, request) = column_lowercase("ΟΣ", &mut Some(&mut budget)).unwrap();
+        assert_eq!((lower.as_str(), request), ("ος", 224));
+        assert!(matches!(
+            column_lowercase("ΟΣ", &mut Some(&mut TextPlanningBudget { bytes: 223, ..TextPlanningBudget::default() })),
+            Err(IoError::TooLarge(_))
+        ));
+        // Virtual 32-bit estimate overflow; no 89 MB string is allocated by this witness.
+        assert!(89_478_485u32.checked_mul(48).and_then(|n| n.checked_add(32)).is_none());
+    }
 
     #[test]
     fn repeated_headers_are_renamed_without_retrying_suffixes() {
