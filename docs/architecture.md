@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-07 · **Change:** minor (per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -170,6 +170,15 @@ active document, and clear on a successful save, clean state or close. An untitl
 explicitly reports that recovery is not available yet and asks for Save As. This is ordinary
 AutoSave, without a recovery store, asynchronous serializer or additional durability guarantees.
 
+## Recovery codec foundation
+
+The engine exposes [bounded recovery encoding/validation](recovery-codec.md), with inert recorded
+identity and private owned validated state. Decode checks model and preserved graphs, rebuilds
+only detached derived state, and requires exact writer form. It does not install a Session or
+admit Calc/UI dependencies. No public general capture constructor or active native recovery
+exists; ordinary untitled AutoSave remains unavailable. Storage, provenance, trust and live
+capture ownership are separate gates; no privacy/durability guarantee or readiness score changes.
+
 ## Python cells
 
 A Python cell is a `Cell` whose `py` holds a `model::PyCode`: the code, the return type (an Excel
@@ -254,6 +263,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |
 | 2026-11-07 | minor | AutoSave considers every dirty named XLSX-class document, preserves live window views and drafts, and keeps per-document failure notices; untitled recovery remains unavailable |
 | 2026-11-02 | minor | Python mode in the formula bar: Python mode on the shared editor, `code_field` and its stop keys; drafts follow their sheet by `model::SheetUid` |
 | 2026-11-02 | minor | Python cells as data: `model::PyCode`, the file forms, calc laying out kept results, the limits on open, and what copying, filling and sorting do to `xl()` references; edits that would push code past the limit are refused |

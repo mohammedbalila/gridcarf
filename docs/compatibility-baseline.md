@@ -1,6 +1,6 @@
 # Compatibility baseline
 
-> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-08 · **Change:** minor (bounded inert recovery codec foundation; earlier: F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
 
 This baseline pins source `6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214`, before
 stabilization repairs. It covers four small synthetic cases, not general Excel
@@ -146,6 +146,15 @@ bound; the deterministic sharing assertions establish that unrelated edits retai
 one note map. Actual note edits may still clone that whole map. The pre-fix baseline
 table above remains unchanged. No broader cell-store or metadata sharing claim is made.
 
+## Recovery codec foundation
+
+The [codec contract](recovery-codec.md) records 125 focused tests, nine public tests (overlapping
+the ordinary suites), 2,061 ordinary engine/model/XLSX passes and 22 independently reviewed literal
+files. A 180-process/36-point/14-family release campaign separates startup, fixtures and accepted/
+refused operations; its RSS and counter limitations are explicit there. These synthetic codec
+checks do not establish native restore, trust, durable storage, Windows runtime or Excel parity.
+Host qualification remains blocked and untitled AutoSave recovery remains unavailable.
+
 ## Limitations
 
 Excel is unavailable: **Excel open, repair prompts, recalculate, refresh and
@@ -158,6 +167,7 @@ version control. No result here upgrades the repository's parity/readiness claim
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |
 | 2026-11-07 | minor | Record M01 note-map sharing, undo/redo regressions and fresh release RSS separately from the baseline |
 | 2026-11-07 | minor | Record bounded C01 legacy XLSX repair separately from the pinned pre-fix diagnostics |
 | 2026-11-07 | minor | Pin source/toolchain and bounded synthetic fixture recipes before repairs |

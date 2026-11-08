@@ -22,6 +22,7 @@ pub mod pivot;
 pub mod pivot_calc;
 pub mod recent;
 pub mod record;
+pub mod recovery;
 pub mod sample;
 pub mod save;
 pub mod selection;
