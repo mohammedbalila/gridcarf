@@ -104,14 +104,12 @@ pub(super) fn insert_pivot(s: &mut Session, p: &Json) -> Result<Json> {
     let columns = field_list(p.get("columns"));
     let values = field_list(p.get("values"));
     let filters = field_list(p.get("filters"));
-    let mut new_sheet_at: Option<usize> = None;
     let res = edit(s, |cx| {
         let id = next_pivot_id(&cx.wb);
         let (si, anchor) = match target {
             Some(t) => t,
             None => {
                 let at = insert_sheet_before_active(cx);
-                new_sheet_at = Some(at);
                 (at, CellRef::new(2, 0))
             }
         };
@@ -171,11 +169,6 @@ pub(super) fn insert_pivot(s: &mut Session, p: &Json) -> Result<Json> {
             "fields": src.headers,
         }))
     })?;
-    if let Some(at) = new_sheet_at
-        && let Ok(d) = s.doc_mut()
-    {
-        d.sheet_selections.insert(at.min(d.sheet_selections.len()), crate::Selection::default());
-    }
     Ok(res)
 }
 
@@ -219,10 +212,8 @@ pub(super) fn show_details(s: &mut Session, p: &Json) -> Result<Json> {
         return Err(other("The workbook is protected and cannot be changed."));
     }
     let count = records.len();
-    let mut new_sheet_at: Option<usize> = None;
     let res = edit(s, |cx| {
         let si = insert_sheet_before_active(cx);
-        new_sheet_at = Some(si);
         let base = cx.wb.styles.get(StyleId::default()).clone();
         let fmts: Vec<StyleId> = src
             .formats
@@ -277,11 +268,6 @@ pub(super) fn show_details(s: &mut Session, p: &Json) -> Result<Json> {
         cx.structural = true;
         Ok(json!({"sheet": name, "records": count}))
     })?;
-    if let Some(at) = new_sheet_at
-        && let Ok(d) = s.doc_mut()
-    {
-        d.sheet_selections.insert(at.min(d.sheet_selections.len()), crate::Selection::default());
-    }
     Ok(res)
 }
 

@@ -101,7 +101,7 @@ fn step_comment(s: &mut Session, forward: bool) -> Result<Json> {
         return Err(EngineError::Other("There are no comments in this workbook.".into()));
     };
     let d = s.doc_mut()?;
-    d.wb_switch_sheet(sheet);
+    d.try_wb_switch_sheet(sheet)?;
     d.selection = crate::Selection::at(at);
     if let Some(sh) = d.wb.active() {
         d.selection.expand_merges(sh);

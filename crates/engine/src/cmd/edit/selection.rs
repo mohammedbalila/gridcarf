@@ -14,12 +14,12 @@ fn cell_selectable(wb: &gridcraft_model::Workbook, sheet: &gridcraft_model::Shee
 pub(super) fn selection_set(s: &mut Session, p: &Json) -> Result<Json> {
     if p.get("sheet").is_some() {
         let i = target_sheet(s, p)?;
-        s.doc_mut()?.wb_switch_sheet(i);
+        s.doc_mut()?.try_wb_switch_sheet(i)?;
     } else if let Some(r) = str_param(p, "range").or_else(|| str_param(p, "cell"))
         && let (Some(_), _) = split_sheet(r)
     {
         let i = target_sheet(s, p)?;
-        s.doc_mut()?.wb_switch_sheet(i);
+        s.doc_mut()?.try_wb_switch_sheet(i)?;
     }
     let ranges = target_ranges(s, p)?;
     let active = cell_param(s, p, "active")?;
@@ -39,19 +39,26 @@ pub(super) fn selection_set(s: &mut Session, p: &Json) -> Result<Json> {
 impl crate::DocState {
     /// Switches the active sheet, remembering each sheet's selection.
     pub fn wb_switch_sheet(&mut self, i: usize) {
-        if i >= self.wb.sheets.len() || i == self.wb.active_sheet() {
-            return;
+        if self.try_wb_switch_sheet(i).is_err() {
+            log::warn!("Selection memory refresh deferred.");
         }
-        let cur = self.wb.active_sheet();
-        if self.sheet_selections.len() < self.wb.sheets.len() {
-            self.sheet_selections.resize(self.wb.sheets.len(), crate::Selection::default());
+    }
+
+    pub(crate) fn try_wb_switch_sheet(&mut self, i: usize) -> Result<()> {
+        if i >= self.wb.sheets.len() {
+            return Ok(());
         }
-        if let Some(slot) = self.sheet_selections.get_mut(cur) {
-            *slot = self.selection.clone();
+        if self.selection_refresh_deferred {
+            self.refresh_selection_memory()?;
         }
-        // View state: set in place, so the workbook is neither copied nor made dirty.
+        if i == self.wb.active_sheet() {
+            return Ok(());
+        }
+        let plan = self.prepare_selection(&self.wb, crate::selection_memory::Transition::Navigate(i))?;
+        // View state is neither copied nor made dirty. Preparation must finish first.
         self.wb.set_active_sheet(i);
-        self.selection = self.sheet_selections.get(i).cloned().unwrap_or_default();
+        plan.apply(&mut self.sheet_selections, &mut self.selection_memory, &mut self.selection);
+        Ok(())
     }
 }
 

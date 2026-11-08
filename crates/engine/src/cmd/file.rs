@@ -200,7 +200,7 @@ fn close(s: &mut Session, p: &Json) -> Result<Json> {
         && let Some(doc) = s.window(id).map(|w| w.doc_uid)
         && s.windows().iter().filter(|w| w.doc_uid == doc).count() > 1
     {
-        s.close_window(id);
+        s.try_close_window(id)?;
         return Ok(json!({"closed": true, "document": false}));
     }
     let force = bool_param(p, "force").unwrap_or(false);
@@ -278,7 +278,7 @@ fn activate_window(s: &mut Session, p: &Json) -> Result<Json> {
         }
         None => super::extra::window_param(s, "window.activate", p)?,
     };
-    s.unhide_window(id);
+    s.try_unhide_window(id)?;
     ok()
 }
 
@@ -286,18 +286,18 @@ fn close_window(s: &mut Session, p: &Json) -> Result<Json> {
     let id = super::extra::window_param(s, "window.close", p)?;
     let doc = s.window(id).map(|w| w.doc_uid).unwrap_or_default();
     if s.windows().iter().filter(|w| w.doc_uid == doc).count() > 1 {
-        s.close_window(id);
+        s.try_close_window(id)?;
         return Ok(json!({"closed": true, "document": false}));
     }
     let force = bool_param(p, "force").unwrap_or(false);
     let d = s.documents().iter().find(|d| d.uid == doc).ok_or(crate::EngineError::NoDocument)?;
     if d.is_dirty() && !force {
         let title = d.display_title();
-        s.activate_window(id);
+        s.try_enter_window(id, true)?;
         s.ui_requests.push(crate::UiRequest::Dialog("saveChanges".into(), json!({"title": title})));
         return Ok(json!({"closed": false, "dirty": true}));
     }
-    s.close_window(id);
+    s.try_close_window(id)?;
     Ok(json!({"closed": true, "document": true}))
 }
 

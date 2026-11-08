@@ -1685,10 +1685,14 @@ fn a_relative_recording_plays_back_on_another_block() {
 fn an_absolute_recording_keeps_its_references() {
     let mut s = s();
     s.execute("selection.set", json!({"range": "B2:C3"})).unwrap();
+    let original_selection = s.doc().unwrap().selection.clone();
+    let original_uid = s.doc().unwrap().wb.active().unwrap().uid.get();
     s.execute("macro.record", json!({"relative": false})).unwrap();
     s.execute("home.insertSheet", json!({"name": "Two"})).unwrap();
     set(&mut s, "B2", "x");
     s.execute("sheet.activate", json!({"sheet": "Sheet1"})).unwrap();
+    assert_eq!(s.doc().unwrap().selection, original_selection);
+    assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), original_uid);
     set(&mut s, "C3", "y");
     let r = s.execute("macro.record", json!({})).unwrap();
     assert_eq!(r["saved"], "Macro1");
@@ -1703,7 +1707,7 @@ fn an_absolute_recording_keeps_its_references() {
             "selection.set {\"active\":\"A1\",\"range\":\"A1\"}",
             "cell.set {\"cell\":\"B2\",\"input\":\"x\"}",
             "sheet.activate {\"sheet\":\"Sheet1\"}",
-            "selection.set {\"active\":\"A1\",\"range\":\"A1\"}",
+            "selection.set {\"active\":\"B2\",\"range\":\"B2:C3\"}",
             "cell.set {\"cell\":\"C3\",\"input\":\"y\"}",
         ]
     );

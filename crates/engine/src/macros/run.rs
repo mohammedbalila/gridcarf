@@ -29,7 +29,7 @@ use serde_json::{Value as Json, json};
 
 use super::policy::{Policy, macro_policy, previewable, writes_file};
 use super::resolve::{self, Env, Place, ResolveError};
-use crate::{EngineError, Result, Selection, Session, Trust, UiRequest};
+use crate::{EngineError, Result, Session, Trust, UiRequest};
 
 /// The most steps one run executes (counting each pass through a Repeat).
 pub const MAX_EXECUTED_STEPS: u64 = 100_000;
@@ -681,6 +681,7 @@ impl Machine {
         // The frame's steps are shared, so the step (and its bodies) isn't copied to run it.
         let Some((path, steps, i)) = self.frames.last().map(|f| (child_path(&f.prefix, f.next), Arc::clone(&f.steps), f.next)) else { return Ok(()) };
         let Some(st) = steps.get(i) else { return Ok(()) };
+        self.prepare_activation(s).map_err(|e| StepError { wrote_files: self.wrote_files.clone(), ..StepError::new(&path, None, e.to_string()) })?;
         if let Some(f) = self.frames.last_mut() {
             f.next += 1;
         }
@@ -693,6 +694,18 @@ impl Machine {
         r
     }
 
+    pub(super) fn prepare_activation(&self, s: &mut Session) -> Result<()> {
+        // Existing terminal limits take precedence over a retryable view preparation failure.
+        if self.executed >= MAX_EXECUTED_STEPS || self.clock.elapsed_ms().is_some_and(|ms| ms > self.time_limit_ms) {
+            return Ok(());
+        }
+        // A closed workbook keeps exec's existing terminal-error behavior.
+        if let Some(i) = s.document_index(self.doc) {
+            s.try_set_active(i)?;
+        }
+        Ok(())
+    }
+
     fn exec(&mut self, s: &mut Session, path: &str, st: &Step) -> std::result::Result<(), StepError> {
         self.executed += 1;
         let at = |msg: String| StepError::new(path, None, msg);
@@ -703,8 +716,9 @@ impl Machine {
             return Err(at(format!("The macro ran longer than {} seconds and was stopped.", (self.time_limit_ms / 1000.0).round())));
         }
         // Steps run on the macro's workbook, whichever one is in front.
-        let Some(i) = s.docs.iter().position(|d| d.uid == self.doc) else { return Err(at("The workbook was closed.".into())) };
-        s.set_active(i);
+        if s.document_index(self.doc).is_none() {
+            return Err(at("The workbook was closed.".into()));
+        }
         match &st.kind {
             StepKind::Command { id, params } => self.command(s, path, id, params),
             StepKind::Repeat { over, of, max, body } => {
@@ -1040,14 +1054,15 @@ impl Footprint {
 /// history are put back by the dry run's undo group.
 struct Saved {
     active: usize,
-    docs: Vec<u64>,
+    /// Exact original live pairs, restored before the saved parked-window ownership.
+    docs: Vec<(u64, crate::windows::PairedView)>,
     /// The workbook as last saved: `sheet.activate` and the view commands move it to the
     /// current workbook on a clean document, and the rollback puts the workbook back but not this.
     saved: Option<Arc<Workbook>>,
     /// The document's revision: the rollback counts as a change, and front ends key their caches
     /// on it, so a check that changed nothing leaves it as it was.
     revision: Option<u64>,
-    sheet_selections: Vec<Selection>,
+    cleanup_depth: u32,
     unlocked_ranges: Vec<(String, String)>,
     trust: Trust,
     go_to_recent: Vec<String>,
@@ -1074,10 +1089,10 @@ impl Saved {
         let d = s.docs.iter().find(|d| d.uid == doc);
         let saved = Saved {
             active: s.active,
-            docs: s.docs.iter().map(|d| d.uid).collect(),
+            docs: s.docs.iter().map(|d| (d.uid, crate::windows::PairedView::snapshot(d))).collect(),
             saved: d.map(|d| d.saved.clone()),
             revision: d.map(|d| d.revision),
-            sheet_selections: d.map(|d| d.sheet_selections.clone()).unwrap_or_default(),
+            cleanup_depth: s.selection_cleanup_depth,
             unlocked_ranges: d.map(|d| d.unlocked_ranges.clone()).unwrap_or_default(),
             trust: d.map_or(Trust::Local, |d| d.trust),
             go_to_recent: d.map(|d| d.go_to_recent.clone()).unwrap_or_default(),
@@ -1095,12 +1110,13 @@ impl Saved {
             comments_pane: s.comments_pane,
             show_all_notes: s.show_all_notes,
         };
+        s.selection_cleanup_depth = s.selection_cleanup_depth.saturating_add(1);
         s.journal_paused = s.journal_paused.saturating_add(1);
         saved
     }
 
     fn restore(self, s: &mut Session, doc: u64) {
-        s.docs.retain(|d| self.docs.contains(&d.uid));
+        s.docs.retain(|d| self.docs.iter().any(|(uid, _)| *uid == d.uid));
         if let Some(d) = s.docs.iter_mut().find(|d| d.uid == doc) {
             if let Some(saved) = self.saved {
                 d.saved = saved;
@@ -1108,10 +1124,14 @@ impl Saved {
             if let Some(revision) = self.revision {
                 d.revision = revision;
             }
-            d.sheet_selections = self.sheet_selections;
             d.unlocked_ranges = self.unlocked_ranges;
             d.trust = self.trust;
             d.go_to_recent = self.go_to_recent;
+        }
+        for (uid, view) in self.docs {
+            if let Some(d) = s.docs.iter_mut().find(|d| d.uid == uid) {
+                view.restore(d);
+            }
         }
         s.active = self.active.min(s.docs.len().saturating_sub(1));
         s.clipboard = self.clipboard;
@@ -1128,6 +1148,7 @@ impl Saved {
         (s.draw_tool, s.draw_color, s.draw_width) = self.draw;
         s.comments_pane = self.comments_pane;
         s.show_all_notes = self.show_all_notes;
+        s.selection_cleanup_depth = self.cleanup_depth;
     }
 }
 
@@ -1136,7 +1157,7 @@ impl Saved {
 /// bytes of parameters it passed.
 pub fn footprint(s: &mut Session, p: &Prepared, run: &Machine) -> Result<Footprint> {
     let i = s.docs.iter().position(|d| d.uid == p.doc).ok_or(EngineError::NoDocument)?;
-    s.set_active(i);
+    s.try_set_active(i)?;
     let before = s.doc()?.wb.clone();
     let token = s.group_begin("Check Macro")?;
     // After the calls that can fail, so nothing returns between taking and putting back.
@@ -1688,4 +1709,326 @@ pub fn check(s: &mut Session, name: &str, p: &Json) -> Result<Json> {
     }
     out["footprint"] = serde_json::to_value(&fp).unwrap_or(Json::Null);
     Ok(out)
+}
+
+#[cfg(test)]
+mod selection_pair_tests {
+    use super::*;
+    use crate::Selection;
+    #[test]
+    fn saved_dry_run_restores_exact_payload_and_owner_after_topology_rollback() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("home.insertSheet", json!({"name":"B"})).unwrap();
+        let d = s.doc_mut().unwrap();
+        d.sheet_selections = Vec::new();
+        d.refresh_selection_memory().unwrap();
+        let before = (d.sheet_selections.clone(), d.selection_memory.clone(), d.selection.clone());
+        let uid = d.uid;
+        let token = s.group_begin("dry").unwrap();
+        let saved = Saved::take(&mut s, uid);
+        s.execute("home.insertSheet", json!({"name":"Dry temporary"})).unwrap();
+        s.group_rollback(token).unwrap();
+        saved.restore(&mut s, uid);
+        let d = s.doc().unwrap();
+        assert_eq!((d.sheet_selections.clone(), d.selection_memory.clone(), d.selection.clone()), before);
+        assert_eq!(s.journal_paused, 0);
+        assert_eq!(s.selection_cleanup_depth, 0);
+    }
+    #[test]
+    fn footprint_success_error_partial_nested_and_shift_restore_complete_pairs() {
+        for mode in ["success", "error", "partial", "nested", "shift"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            s.execute("cell.set", json!({"cell":"A1", "input":"99"})).unwrap();
+            let second = match mode {
+                "error" => json!({"command":"cell.set", "params":{"cell":"?", "input":"bad"}}),
+                "partial" => json!({"command":"data.solver"}),
+                _ => json!({"command":"cell.set", "params":{"cell":"A1", "input":"42"}}),
+            };
+            let steps =
+                if mode == "shift" { vec![second] } else { vec![json!({"command":"home.insertSheet", "params":{"name":"Temporary"}}), second] };
+            let mac = crate::macros::parse_macro(
+                &json!({"name":"Footprint", "steps":steps, "output":{"onConflict":if mode == "shift" {"shiftDown"} else {"overwrite"}}}),
+            )
+            .unwrap();
+            Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+            s.doc_mut().unwrap().sheet_selections = vec![Selection::at(CellRef::new(3, 2)), Selection::default(), Selection::at(CellRef::new(90, 9))];
+            s.new_window().unwrap();
+            let outer = (mode == "nested").then(|| s.group_begin("outer").unwrap());
+            let d = s.doc().unwrap();
+            let wb = d.wb.clone();
+            let pair = format!("{:?}", crate::windows::PairedView::snapshot(d));
+            let windows = format!("{:?}", s.windows);
+            let counts = (d.undo.len(), d.redo.len(), s.groups.len(), s.journal.len(), s.activation, s.active_window, s.selection_cleanup_depth);
+            let result = check(&mut s, "Footprint", &json!({})).unwrap();
+            assert!(result.get("footprint").is_some(), "{mode}: {result}");
+            if mode == "error" {
+                assert_eq!(result["ok"], false);
+            }
+            if mode == "partial" {
+                assert!(!result["footprint"]["partial"].is_null());
+            }
+            if mode == "shift" {
+                assert_eq!(result["ok"], true, "{result}");
+            }
+            let d = s.doc().unwrap();
+            assert!(Arc::ptr_eq(&wb, &d.wb), "{mode}");
+            assert_eq!(format!("{:?}", crate::windows::PairedView::snapshot(d)), pair, "{mode}");
+            assert_eq!(format!("{:?}", s.windows), windows, "{mode}");
+            assert_eq!(
+                (d.undo.len(), d.redo.len(), s.groups.len(), s.journal.len(), s.activation, s.active_window, s.selection_cleanup_depth),
+                counts
+            );
+            assert_eq!(s.journal_paused, 0);
+            if let Some(outer) = outer {
+                s.group_rollback(outer).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn check_restores_active_uid_after_view_only_switch_and_failed_or_partial_continuation() {
+        for mode in ["success", "error", "partial"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            s.execute("home.insertSheet", json!({"name":"B"})).unwrap();
+            s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+            let next = match mode {
+                "error" => json!({"command":"cell.set", "params":{"cell":"?", "input":"bad"}}),
+                "partial" => json!({"command":"data.solver"}),
+                _ => json!({"command":"selection.set", "params":{"ranges":["C9:D10"]}}),
+            };
+            let mac = crate::macros::parse_macro(&json!({"name":"ViewOnly", "output":{"onConflict":"overwrite"}, "steps":[
+                {"command":"sheet.activate", "params":{"sheet":1}}, next
+            ]}))
+            .unwrap();
+            Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+            s.execute("selection.set", json!({"ranges":["B7:C8", "E9:F10"], "active":"B7"})).unwrap();
+            s.doc_mut().unwrap().sheet_selections = vec![Selection::default(), Selection::at(CellRef::new(8, 2)), Selection::at(CellRef::new(90, 9))];
+            s.new_window().unwrap();
+            let d = s.doc().unwrap();
+            let uid = d.wb.active().unwrap().uid.get();
+            let pair = format!("{:?}", crate::windows::PairedView::snapshot(d));
+            let windows = format!("{:?}", s.windows);
+            let counts = (d.undo.len(), d.redo.len(), s.groups.len(), s.journal.len(), s.activation, s.active_window, s.journal_paused);
+            let result = s.execute("macro.check", json!({"name":"ViewOnly"})).unwrap();
+            assert_eq!(result["ok"], mode != "error", "{mode}: {result}");
+            assert_eq!(!result["footprint"]["partial"].is_null(), mode == "partial");
+            let d = s.doc().unwrap();
+            assert_eq!(d.wb.active().unwrap().uid.get(), uid, "{mode}: check changed the active UID");
+            assert_eq!(format!("{:?}", crate::windows::PairedView::snapshot(d)), pair, "{mode}");
+            assert_eq!(format!("{:?}", s.windows), windows, "{mode}");
+            assert_eq!((d.undo.len(), d.redo.len(), s.groups.len(), s.journal.len(), s.activation, s.active_window, s.journal_paused), counts);
+            assert!(d.wb.sheets.iter().all(|sh| sh.cells.is_empty()));
+        }
+    }
+    #[test]
+    fn saved_restore_keeps_duplicate_position_and_empty_layout_without_identity_claim() {
+        for empty in [false, true] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let d = s.doc_mut().unwrap();
+            let wb = Arc::make_mut(&mut d.wb);
+            if empty {
+                wb.sheets.clear();
+            } else {
+                wb.sheets.push(wb.sheets[0].clone());
+                wb.set_active_sheet(1);
+            }
+            let uid = d.uid;
+            let token = s.group_begin("exact view").unwrap();
+            let pair = format!("{:?}", crate::windows::PairedView::snapshot(s.doc().unwrap()));
+            let saved = Saved::take(&mut s, uid);
+            s.doc().unwrap().wb.set_active_sheet(if empty { 9 } else { 0 });
+            s.group_rollback(token).unwrap();
+            saved.restore(&mut s, uid);
+            assert_eq!(s.doc().unwrap().wb.active_sheet(), usize::from(!empty));
+            assert_eq!(format!("{:?}", crate::windows::PairedView::snapshot(s.doc().unwrap())), pair);
+        }
+    }
+    fn refused_activation(preview: bool) {
+        let mut s = Session::new();
+        s.new_workbook();
+        let a = s.active_window().unwrap();
+        let b = s.new_window().unwrap();
+        s.activate_window(a);
+        s.show_window(b);
+        let mac = crate::macros::parse_macro(&json!({"name":"Once", "steps":[
+            {"command":"cell.set", "params":{"cell":"A1", "input":"once"}}
+        ]}))
+        .unwrap();
+        let p = prepare(&s, &mac, None).unwrap();
+        let mut m = Machine::new(&p, false);
+        s.new_workbook();
+        s.docs[0].selection_preparation_budget = Some(0);
+        let state = |s: &Session| {
+            format!(
+                "{:?}|{:?}",
+                (s.active, s.active_window, s.activation, &s.windows, s.groups.len(), s.next_group, s.group_epoch, s.journal.len(), s.journal_paused),
+                s.docs
+                    .iter()
+                    .map(|d| (crate::windows::PairedView::snapshot(d), &d.edits, &d.touched, d.undo.len(), d.redo.len()))
+                    .collect::<Vec<_>>()
+            )
+        };
+        let before = state(&s);
+        let machine = format!("{m:?}");
+        if preview {
+            assert!(footprint(&mut s, &p, &m).is_err());
+        } else {
+            assert!(m.step(&mut s).is_err());
+        }
+        assert_eq!(format!("{m:?}"), machine, "activation refusal consumed the step");
+        assert_eq!(state(&s), before, "activation refusal published a group/view/log");
+        assert!(s.docs.iter().all(|d| d.wb.sheets[0].cells.is_empty()));
+        s.docs[0].selection_preparation_budget = None;
+        if preview {
+            let result = footprint(&mut s, &p, &m).unwrap();
+            assert_eq!(result.executed, 1);
+            assert!(result.error.is_none());
+            assert!(s.docs[0].wb.sheets[0].cells.is_empty());
+        } else {
+            m.step(&mut s).unwrap();
+            assert_eq!(m.executed, 1);
+            assert!(m.is_done());
+            m.step(&mut s).unwrap();
+            assert_eq!(m.executed, 1);
+            assert_eq!(s.docs[0].wb.sheets[0].value(CellRef::new(0, 0)), Value::text("once"));
+        }
+        assert!(s.docs[1].wb.sheets[0].cells.is_empty());
+    }
+    #[test]
+    fn activation_failure_precedes_machine_position() {
+        refused_activation(false);
+    }
+    #[test]
+    fn activation_failure_precedes_footprint_group_publication() {
+        refused_activation(true);
+    }
+    #[test]
+    fn exhausted_machine_keeps_terminal_error_before_activation_preflight() {
+        for steps in [false, true] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let mac =
+                crate::macros::parse_macro(&json!({"name":"Limit", "steps":[{"command":"cell.set", "params":{"cell":"A1", "input":"no"}}]})).unwrap();
+            let mut m = Machine::new(&prepare(&s, &mac, None).unwrap(), false);
+            if steps {
+                m.executed = MAX_EXECUTED_STEPS;
+            } else {
+                m.time_limit_ms = -1.0;
+            }
+            s.new_workbook();
+            s.docs[0].selection_preparation_budget = Some(0);
+            let before = (s.active, s.active_window, s.activation, format!("{:?}", s.windows));
+            let error = m.step(&mut s).unwrap_err();
+            assert!(m.is_done(), "an existing terminal limit became retryable");
+            assert!(error.message.contains(if steps { "more than" } else { "longer than" }));
+            assert_eq!((s.active, s.active_window, s.activation, format!("{:?}", s.windows)), before);
+            assert!(s.docs.iter().all(|d| d.wb.sheets[0].cells.is_empty()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod final_e2_tests {
+    use super::*;
+    use crate::{Selection, windows::PairedView};
+
+    fn selected(row: u32) -> Selection {
+        Selection {
+            active: CellRef::new(row + 1, 5),
+            anchor: CellRef::new(row, 1),
+            ranges: vec![RangeRef::cell(CellRef::new(row, 1)), RangeRef::cell(CellRef::new(row + 1, 5))],
+        }
+    }
+    fn seed(s: &mut Session, row: u32) {
+        let d = s.doc_mut().unwrap();
+        d.selection = selected(row);
+        d.sheet_selections = vec![selected(row + 10), selected(row + 20), selected(row + 90), Selection::default()];
+        d.refresh_selection_memory().unwrap();
+    }
+    fn state(s: &Session) -> String {
+        format!(
+            "{:?}|{:?}|{:?}",
+            (s.active, s.active_window, s.next_window, s.activation, &s.windows),
+            (&s.groups, &s.journal, s.journal_paused, s.selection_cleanup_depth),
+            s.docs
+                .iter()
+                .map(|d| (
+                    d.uid,
+                    PairedView::snapshot(d),
+                    Arc::as_ptr(&d.wb),
+                    Arc::as_ptr(&d.saved),
+                    d.revision,
+                    &d.undo,
+                    &d.redo,
+                    &d.edits,
+                    &d.touched
+                ))
+                .collect::<Vec<_>>()
+        )
+    }
+    #[test]
+    fn e2_final_preview_restores_every_live_document_pair() {
+        for mode in ["endpoint", "success", "error", "partial"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let a = s.active_window().unwrap();
+            s.execute("home.insertSheet", json!({"name":"A second"})).unwrap();
+            seed(&mut s, 3);
+            s.new_workbook();
+            let b1 = s.active_window().unwrap();
+            s.execute("home.insertSheet", json!({"name":"B second"})).unwrap();
+            s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+            seed(&mut s, 30);
+            let b1_uid = s.doc().unwrap().wb.active().unwrap().uid.get();
+            let b1_pair = format!("{:?}", PairedView::snapshot(s.doc().unwrap()));
+            let b2 = s.new_window().unwrap();
+            s.execute("sheet.activate", json!({"sheet":1})).unwrap();
+            seed(&mut s, 60);
+            let b2_uid = s.doc().unwrap().wb.active().unwrap().uid.get();
+            let b2_pair = format!("{:?}", PairedView::snapshot(s.doc().unwrap()));
+            assert_ne!(b1_uid, b2_uid);
+            assert_ne!(b1_pair, b2_pair);
+            s.execute("view.hideWindow", json!({"window":b2})).unwrap();
+            assert_eq!(s.document_view_window(s.doc().unwrap().uid), Some(b1));
+            assert!(s.window(b2).unwrap().hidden);
+            s.execute("view.switchWindows", json!({"window":a})).unwrap();
+            let mut steps = vec![
+                json!({"command":"cell.set", "params":{"cell":"A1", "input":"preview only"}}),
+                json!({"command":"view.switchWindows", "params":{"window":b2}}),
+            ];
+            match mode {
+                "success" => steps.push(json!({"command":"selection.set", "params":{"range":"C9:D10,F12:G13", "active":"G13"}})),
+                "error" => steps.push(json!({"command":"cell.set", "params":{"cell":"?", "input":"bad"}})),
+                "partial" => steps.push(json!({"command":"data.solver"})),
+                _ => {}
+            }
+            let mac = crate::macros::parse_macro(&json!({"name":"OtherView", "output":{"onConflict":"overwrite"}, "steps":steps})).unwrap();
+            Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+            // Settle history accounting after the fixture installs its macro directly.
+            s.execute("sheet.activate", json!({"sheet":1})).unwrap();
+            let before = state(&s);
+            let uids: Vec<_> = s.docs.iter().map(|d| d.wb.active().unwrap().uid.get()).collect();
+            let result = s.execute("macro.check", json!({"name":"OtherView"})).unwrap();
+            assert_eq!(result["ok"], mode != "error", "{mode}: {result}");
+            assert_eq!(!result["footprint"]["partial"].is_null(), mode == "partial");
+            assert_eq!(s.docs.iter().map(|d| d.wb.active().unwrap().uid.get()).collect::<Vec<_>>(), uids, "{mode}: original live UIDs");
+            assert_eq!(state(&s), before, "{mode}: all live/parked pairs, ownership, history and journal");
+            assert!(s.docs.iter().all(|d| d.wb.sheets.iter().all(|sh| sh.cells.is_empty())));
+            for (window, uid, pair, row, sheet) in [(b1, b1_uid, &b1_pair, 30, 0), (b2, b2_uid, &b2_pair, 60, 1)] {
+                s.execute("view.switchWindows", json!({"window":window})).unwrap();
+                assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), uid);
+                assert_eq!(format!("{:?}", PairedView::snapshot(s.doc().unwrap())), *pair);
+                assert_eq!(s.doc().unwrap().selection, selected(row));
+                s.execute("sheet.activate", json!({"sheet":1-sheet})).unwrap();
+                assert_eq!(s.doc().unwrap().selection, selected(row + if sheet == 0 { 20 } else { 10 }));
+                s.execute("sheet.activate", json!({"sheet":sheet})).unwrap();
+                assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), uid);
+                assert_eq!(s.doc().unwrap().selection, selected(row));
+                assert_eq!(&s.doc().unwrap().sheet_selections[2..], &[selected(row + 90), Selection::default()]);
+            }
+        }
+    }
 }

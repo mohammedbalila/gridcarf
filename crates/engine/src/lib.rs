@@ -25,6 +25,7 @@ pub mod record;
 pub mod sample;
 pub mod save;
 pub mod selection;
+mod selection_memory;
 pub mod tables;
 pub mod windows;
 
@@ -107,6 +108,8 @@ struct OpenGroup {
     start: usize,
     wb: Arc<Workbook>,
     selection: Selection,
+    /// The shared workbook can navigate without changing versions; this UID owns selection.
+    selection_uid: Option<u64>,
     /// The redo stack when the group began (a rollback puts it back).
     redo: Vec<HistoryEntry>,
     /// Where the recording was when the group began (`None` when nothing was recording): a
@@ -204,6 +207,10 @@ pub struct DocState {
     pub title: String,
     /// Per-sheet selection memory.
     pub sheet_selections: Vec<Selection>,
+    selection_memory: selection_memory::SelectionMemory,
+    selection_refresh_deferred: bool,
+    #[cfg(test)]
+    selection_preparation_budget: Option<usize>,
     /// Allow Edit Ranges unlocked with their password in this session: (sheet name, title).
     pub unlocked_ranges: Vec<(String, String)>,
     /// The format `path`'s content was recognised as when its extension doesn't name one (an
@@ -366,6 +373,10 @@ impl DocState {
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title,
             sheet_selections: vec![],
+            selection_memory: selection_memory::SelectionMemory::default(),
+            selection_refresh_deferred: false,
+            #[cfg(test)]
+            selection_preparation_budget: None,
             unlocked_ranges: vec![],
             content_kind: None,
             scripts_trusted,
@@ -518,6 +529,8 @@ pub type TextWidth = Arc<dyn Fn(&str, &model::Font, bool) -> f32 + Send + Sync>;
 
 #[derive(Default)]
 pub struct Session {
+    // Execute owns restoration snapshots even after its command nesting depth falls to zero.
+    selection_cleanup_depth: u32,
     docs: Vec<DocState>,
     /// Index in `docs` of the active window's workbook.
     active: usize,
@@ -605,12 +618,8 @@ impl Session {
     /// Makes the workbook at `i` active, in its most recently active window (unless the active
     /// window already shows it).
     pub fn set_active(&mut self, i: usize) {
-        let Some(uid) = self.docs.get(i).map(|d| d.uid) else { return };
-        if self.active == i && self.active_window.and_then(|w| self.window(w)).is_some_and(|w| w.doc_uid == uid) {
-            return;
-        }
-        if let Some(w) = self.doc_window(uid) {
-            self.activate_window(w);
+        if i < self.docs.len() && self.try_set_active(i).is_err() {
+            log::warn!("Window view preparation failed.");
         }
     }
     pub fn active(&self) -> Option<&DocState> {
@@ -654,6 +663,44 @@ impl Session {
             }
         }
     }
+    fn cleanup_selection_memories(&mut self) {
+        if self.depth != 0 || self.selection_cleanup_depth != 0 {
+            return;
+        }
+        self.group_step = None;
+        for i in 0..self.docs.len() {
+            let mut keep = Vec::new();
+            let mut failed = false;
+            self.visit_document_workbooks(self.docs[i].uid, |wb| {
+                if failed || keep.try_reserve(wb.sheets.len()).is_err() {
+                    failed = true;
+                    return;
+                }
+                keep.extend(wb.sheets.iter().map(|sh| sh.uid.get()));
+            });
+            let d = &mut self.docs[i];
+            let plan = if failed {
+                Err(EngineError::Other("selection memory preparation failed".into()))
+            } else {
+                keep.sort_unstable();
+                keep.dedup();
+                d.prepare_selection_prune(&keep)
+            };
+            match plan {
+                Ok(plan) => {
+                    plan.apply(&mut d.sheet_selections, &mut d.selection_memory, &mut d.selection);
+                    d.selection_refresh_deferred = false;
+                }
+                Err(_) => {
+                    d.selection_refresh_deferred = true;
+                    log::warn!("Selection memory refresh deferred.");
+                }
+            }
+            let uid = d.uid;
+            self.prune_window_selections(uid, &keep, failed);
+        }
+    }
+
     /// The warning an edit of `at` on `sheet` gets from sheet protection, or `None` when the edit
     /// is allowed. Front ends ask before opening an editor, so typing into a locked cell never
     /// leaves a draft that can't be entered (and so blocks saving).
@@ -676,6 +723,8 @@ impl Session {
     /// Closes a workbook and its windows; the most recently active remaining window comes forward.
     pub fn close_document(&mut self, i: usize) {
         if i < self.docs.len() {
+            let uid = self.docs[i].uid;
+            self.prepare_document_close(uid);
             let d = self.docs.remove(i);
             self.groups.retain(|g| g.doc != d.uid);
             // A macro being debugged in this workbook ends with it; its group just went.
@@ -683,9 +732,7 @@ impl Session {
                 self.macro_debug = None;
             }
             self.windows.retain(|w| w.doc_uid != d.uid);
-            if self.active_window.is_some_and(|w| self.window(w).is_none()) {
-                self.activate_recent();
-            } else if let Some(di) = self.active_window.and_then(|w| self.window(w)).and_then(|w| self.document_index(w.doc_uid)) {
+            if let Some(di) = self.active_window.and_then(|w| self.window(w)).and_then(|w| self.document_index(w.doc_uid)) {
                 self.active = di;
             }
         }
@@ -752,6 +799,24 @@ impl Session {
     /// unless an undo group is open on the document (the group then makes the step).
     /// Panics inside commands are caught and reported; the workbook is restored.
     pub fn execute(&mut self, id: &str, params: Json) -> Result<Json> {
+        let staged_view = windows::is_window_command(id) || matches!(id, "file.close" | "macro.debug");
+        if self.depth == 0 && !staged_view {
+            for d in &mut self.docs {
+                d.refresh_selection_memory()?;
+            }
+        }
+        // The inner call owns temporary restoration snapshots. Retire them before pruning.
+        self.selection_cleanup_depth = self.selection_cleanup_depth.saturating_add(1);
+        let result = self.execute_command(id, params);
+        self.selection_cleanup_depth = self.selection_cleanup_depth.saturating_sub(1);
+        // Staged view handlers own preparation; their refusal must remain an exact no-op.
+        if !staged_view || result.is_ok() {
+            self.cleanup_selection_memories();
+        }
+        result
+    }
+
+    fn execute_command(&mut self, id: &str, params: Json) -> Result<Json> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         if let Err(why) = (spec.enabled)(self) {
             return Err(EngineError::Disabled(id.to_string(), why));
@@ -776,6 +841,7 @@ impl Session {
         // A dry run inside this command that a panic cuts short leaves journaling paused and its
         // touch log open; the panic branch puts both back.
         let paused_before = self.journal_paused;
+        let cleanup_before = self.selection_cleanup_depth;
         let params = if params.is_null() { Json::Object(Default::default()) } else { params };
         let (first_group, group_epoch) = (self.next_group, self.group_epoch);
         // Whether a group was open on the document before the command, and how long its history was.
@@ -844,7 +910,9 @@ impl Session {
                         d.redo.clear();
                     }
                     d.calc.rebuild(&d.wb);
+                    d.restore_selection_memory();
                 }
+                self.selection_cleanup_depth = cleanup_before;
                 if self.journal_paused != paused_before {
                     self.journal_paused = paused_before;
                     for d in self.docs.iter_mut() {
@@ -1018,6 +1086,8 @@ impl Session {
     /// [`Session::group_rollback`], undoable commands on that document add no undo steps of their
     /// own, and Undo and Redo are unavailable there.
     pub fn group_begin(&mut self, label: &str) -> Result<GroupToken> {
+        self.doc_mut()?.refresh_selection_memory()?;
+        self.cleanup_selection_memories();
         let d = self.doc()?;
         let g = OpenGroup {
             id: self.next_group,
@@ -1026,6 +1096,7 @@ impl Session {
             start: d.undo.len(),
             wb: d.wb.clone(),
             selection: d.selection.clone(),
+            selection_uid: d.selection_memory.active_uid(),
             redo: d.redo.clone(),
             recorded: self.recorder.as_ref().map(record::Recorder::mark),
         };
@@ -1040,6 +1111,12 @@ impl Session {
     /// nested in another open group on the same document, which then owns the step. Groups opened
     /// inside it and still open end with it. Returns whether the workbook changed.
     pub fn group_end(&mut self, token: GroupToken) -> Result<bool> {
+        let result = self.finish_group(token);
+        self.cleanup_selection_memories();
+        result
+    }
+
+    fn finish_group(&mut self, token: GroupToken) -> Result<bool> {
         let g = self.take_group(&token)?;
         let outer = self.in_group(g.doc);
         let Some(d) = self.docs.iter_mut().find(|d| d.uid == g.doc) else { return Ok(false) };
@@ -1120,13 +1197,30 @@ impl Session {
     /// Ends an undo group by putting back the workbook, selection, undo and redo history as they
     /// were when it began.
     pub fn group_rollback(&mut self, token: GroupToken) -> Result<()> {
+        let result = self.restore_group(token);
+        self.cleanup_selection_memories();
+        result
+    }
+
+    fn restore_group(&mut self, token: GroupToken) -> Result<()> {
         let g = self.take_group(&token)?;
         let Some(d) = self.docs.iter_mut().find(|d| d.uid == g.doc) else { return Ok(()) };
         if !Arc::ptr_eq(&d.wb, &g.wb) {
             d.wb = g.wb;
             d.calc.rebuild(&d.wb);
         }
+        // Restore identity without allocating, even when mandatory reconciliation must defer.
+        // Missing or ambiguous identity supplies no authority to change the existing scalar.
+        if let Some(uid) = g.selection_uid {
+            let mut matches = d.wb.sheets.iter().enumerate().filter(|(_, sh)| sh.uid.get() == uid);
+            if let Some((sheet, _)) = matches.next()
+                && matches.next().is_none()
+            {
+                d.wb.set_active_sheet(sheet);
+            }
+        }
         d.selection = g.selection;
+        d.restore_selection_memory();
         d.undo.truncate(g.start);
         d.redo = g.redo;
         d.revision = d.revision.saturating_add(1);

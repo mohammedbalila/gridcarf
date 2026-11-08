@@ -102,7 +102,7 @@ pub(super) fn find(s: &mut Session, p: &Json) -> Result<Json> {
     let next = hits.iter().find(|(si, c, _)| key(*si, *c) > key(cur.0, cur.1)).or_else(|| hits.first()).cloned();
     let Some((si, c, t)) = next else { return Err(EngineError::Other("not found".into())) };
     let dd = s.doc_mut()?;
-    dd.wb_switch_sheet(si);
+    dd.try_wb_switch_sheet(si)?;
     if in_selection {
         // The range stays selected and the active cell moves through it, as in Excel.
         dd.selection.active = c;
