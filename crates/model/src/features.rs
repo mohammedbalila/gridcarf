@@ -764,6 +764,8 @@ impl EquationCache {
         if self.holds(src) {
             return false;
         }
+        #[cfg(test)]
+        recovery_equations::LAYOUT_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.store(src, gridcraft_math::layout(src).map(std::sync::Arc::new));
         true
     }
@@ -1238,3 +1240,6 @@ mod equation_cache_tests {
         assert!(took < std::time::Duration::from_millis(500), "{took:?}");
     }
 }
+
+#[cfg(test)]
+mod recovery_equations;

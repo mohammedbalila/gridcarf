@@ -123,6 +123,19 @@ impl SelectionMemory {
         self.prepare_with(values, before, after, live, transition, &mut Preparation::default())
     }
 
+    #[cfg(test)]
+    pub(crate) fn prepare_with_budget(
+        &self,
+        values: &[Selection],
+        before: &Workbook,
+        after: &Workbook,
+        live: &Selection,
+        transition: Transition<'_>,
+        budget: usize,
+    ) -> Result<PreparedSelectionMemory> {
+        self.prepare_with(values, before, after, live, transition, &mut Preparation { keep: None, remaining: Some(budget) })
+    }
+
     /// Caller supplies only borrowed numeric identities, after temporary restoration roots die.
     pub(crate) fn prepare_prune(&self, values: &[Selection], wb: &Workbook, live: &Selection, keep: &[u64]) -> Result<PreparedSelectionMemory> {
         self.prepare_with(

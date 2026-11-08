@@ -17,6 +17,7 @@ mod format;
 mod lambda;
 mod reference_fns;
 mod special;
+pub(crate) use special::recovery_precedents;
 
 use array::map_unary;
 pub use array::{binary_values, zip2};

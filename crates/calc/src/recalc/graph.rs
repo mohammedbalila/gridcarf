@@ -4,6 +4,11 @@ use gridcraft_core::CellRef;
 use std::collections::BTreeSet;
 use std::hash::{BuildHasherDefault, Hasher};
 
+#[cfg(test)]
+mod recovery_sizing;
+
+mod recovery;
+
 /// A fast, non-cryptographic hasher for cell keys (FxHash-style multiply-rotate).
 #[derive(Default, Clone, Copy)]
 pub struct FxHasher(u64);

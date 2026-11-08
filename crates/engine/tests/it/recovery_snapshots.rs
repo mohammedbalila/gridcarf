@@ -248,3 +248,117 @@ fn actual_public_errors_are_finite_std_errors_without_hostile_payload_text() {
         }
     }
 }
+
+#[test]
+fn public_restore_retains_literal_content_and_inert_identity() {
+    use gridcraft_engine::{
+        Trust,
+        core::{CellRef, RangeRef, Value},
+    };
+    let input = edit(ORDINARY, "\"text\":\"bad(\"", &format!("\"text\":\"{}\"", "x".repeat(4097)));
+    let doc = gridcraft_engine::recovery::restore(good(&input)).unwrap();
+    assert_eq!(doc.trust, Trust::FromFile);
+    assert!(!doc.scripts_trusted);
+    assert!(doc.is_dirty());
+    assert!(doc.path.is_none());
+    assert_eq!(doc.recovery_id(), Some("0123456789abcdef0123456789abcdef".parse().unwrap()));
+    assert_eq!(doc.recovery_captured_revision(), Some(u64::MAX));
+    assert_eq!(doc.revision, 1);
+    assert_eq!(doc.title, "golden 😀\n\"\\");
+    assert_eq!(doc.import_issues().len(), 2);
+    assert_eq!(doc.import_issues()[0].code, "raw.code");
+    assert_eq!(doc.import_issues()[0].description, "kept");
+    assert_eq!(doc.selection.active, CellRef::new(7, 3));
+    assert_eq!(doc.selection.anchor, CellRef::new(9, 9));
+    assert_eq!(doc.sheet_selections.len(), 5);
+    assert_eq!(doc.sheet_selections[3].active, CellRef::new(200, 200));
+    assert_eq!(doc.sheet_selections[4].ranges, [RangeRef::new(CellRef::default(), CellRef::new(1048575, 16383))]);
+    let sh = doc.wb.sheet(0).unwrap();
+    assert_eq!(sh.cells.get(CellRef::new(6, 0)).unwrap().value, Value::Number(42.));
+    let f = sh.cells.get(CellRef::default()).unwrap().formula.as_ref().unwrap();
+    assert_eq!(f.text, "=retained broken(");
+    assert_eq!(f.eval_mode, gridcraft_model::FormulaEvalMode::Legacy);
+    assert!(f.expr.is_none());
+    assert_eq!(sh.cells.get(CellRef::new(1, 0)).unwrap().py.as_ref().unwrap().code, "x\r\n\"😀\"");
+    assert_eq!(sh.spill.get(&CellRef::new(0, 1)), Some(&Value::Empty));
+    assert_eq!(doc.calc.last_recalc_cells, 0);
+    assert_eq!(doc.wb.calc.mode, gridcraft_model::CalcMode::Manual);
+    assert_eq!(doc.content_kind, Some(gridcraft_engine::io::FileKind::Sylk));
+    for input in [OWNERS, PICTURES, WITNESS] {
+        let doc = gridcraft_engine::recovery::restore(good(input)).unwrap();
+        assert!(doc.is_dirty());
+        assert!(!doc.scripts_trusted);
+    }
+}
+struct RestoreFiles(std::path::PathBuf);
+impl RestoreFiles {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!("rcv-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        Self(path)
+    }
+}
+impl Drop for RestoreFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+#[test]
+fn only_successful_real_json_xlsx_save_clears_recovery_dirty() {
+    use gridcraft_engine::Session;
+    use serde_json::json;
+    let files = RestoreFiles::new();
+    for extension in ["json", "xlsx"] {
+        let doc = gridcraft_engine::recovery::restore(good(MINIMAL)).unwrap();
+        let id = doc.recovery_id();
+        let mut session = Session::new();
+        session.add_document(doc);
+        session.execute_headless("file.saveBytes", json!({"format":extension})).unwrap();
+        assert!(session.doc().unwrap().is_dirty());
+        assert!(session.execute_headless("file.save", json!({})).is_err());
+        assert!(session.doc().unwrap().is_dirty());
+        let unavailable = files.0.join("missing").join(format!("book.{extension}"));
+        assert!(session.execute_headless("file.save", json!({"path":unavailable})).is_err());
+        assert!(session.doc().unwrap().is_dirty());
+        session.execute_headless("file.save", json!({"path":files.0.join(format!("export-{extension}.csv"))})).unwrap();
+        assert!(session.doc().unwrap().is_dirty());
+        assert!(session.doc().unwrap().path.is_none());
+        let path = files.0.join(format!("book.{extension}"));
+        session.execute_headless("file.save", json!({"path":path})).unwrap();
+        assert!(!session.doc().unwrap().is_dirty());
+        assert_eq!(session.doc().unwrap().recovery_id(), id);
+        assert_eq!(session.doc().unwrap().path.as_deref(), path.to_str());
+        assert!(std::fs::metadata(path).unwrap().len() > 0);
+    }
+}
+#[test]
+fn restore_never_adopts_original_hint_or_changes_original_bytes() {
+    use gridcraft_engine::core::CellRef;
+    let files = RestoreFiles::new();
+    let original = files.0.join("original.json");
+    std::fs::write(&original, b"inert original sentinel").unwrap();
+    #[cfg(unix)]
+    let hint = {
+        use std::os::unix::ffi::OsStrExt;
+        serde_json::json!({"unix":original.as_os_str().as_bytes()})
+    };
+    #[cfg(windows)]
+    let hint = {
+        use std::os::windows::ffi::OsStrExt;
+        serde_json::json!({"windows":original.as_os_str().encode_wide().collect::<Vec<_>>()})
+    };
+    #[cfg(not(any(unix, windows)))]
+    let hint = serde_json::json!({"unix":[1,2,3]});
+    let input = edit(MINIMAL, "\"original_path_hint\":null", &format!("\"original_path_hint\":{hint}"));
+    let mut doc = gridcraft_engine::recovery::restore(good(&input)).unwrap();
+    assert!(doc.path.is_none());
+    doc.store_view(&[(0, CellRef::new(5, 5))]);
+    assert!(doc.is_dirty());
+    assert_eq!(std::fs::read(original).unwrap(), b"inert original sentinel");
+}

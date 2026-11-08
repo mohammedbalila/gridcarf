@@ -201,6 +201,8 @@ pub struct DocState {
     pub path: Option<String>,
     pub saved: Arc<Workbook>,
     pub revision: u64,
+    recovery_context: Option<Arc<recovery::RestoreContext>>,
+    recovery_needs_save: bool,
     import_issues: Vec<gridcraft_model::CompatibilityIssue>,
     /// Identifies this open workbook for the rest of the session: it never changes while the
     /// workbook is open (saving, renaming, reordering) and is never reused for another one.
@@ -359,6 +361,9 @@ impl DocState {
         // Equations arrive without a layout (files never store one); painting reads only the cache.
         wb.refresh_equations();
         let scripts_trusted = !cmd::extra::has_scripts(&wb);
+        Self::finish(wb, calc, path, title, trust, scripts_trusted)
+    }
+    fn finish(wb: Workbook, calc: Calc, path: Option<String>, title: String, trust: Trust, scripts_trusted: bool) -> DocState {
         let wb = Arc::new(wb);
         let sel = Selection::at(wb.active().map(|s| s.view_active).unwrap_or_default());
         DocState {
@@ -370,6 +375,8 @@ impl DocState {
             redo: vec![],
             path,
             revision: 1,
+            recovery_context: None,
+            recovery_needs_save: false,
             import_issues: vec![],
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title,
@@ -403,7 +410,15 @@ impl DocState {
         }
     }
     pub fn is_dirty(&self) -> bool {
-        !Arc::ptr_eq(&self.wb, &self.saved)
+        self.recovery_needs_save || !Arc::ptr_eq(&self.wb, &self.saved)
+    }
+    /// Inert snapshot identity; it confers no capture or storage authority.
+    pub fn recovery_id(&self) -> Option<recovery::RecoveryId> {
+        self.recovery_context.as_ref().map(|context| context.id())
+    }
+    /// The recorded revision is separate from this document's fresh live revision.
+    pub fn recovery_captured_revision(&self) -> Option<u64> {
+        self.recovery_context.as_ref().map(|context| context.captured_revision())
     }
     pub fn sheet_index(&self) -> usize {
         self.wb.active_sheet()

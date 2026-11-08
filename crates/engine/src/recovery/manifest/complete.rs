@@ -129,3 +129,6 @@ pub(super) fn measure(bytes: &[u8], limits: &RecoveryLimits) -> (Result<Validate
     let result = decode_run(bytes, limits, &mut stats);
     (result, serde_json::to_value(stats).unwrap())
 }
+
+mod restore;
+pub(in crate::recovery) use restore::restore;

@@ -237,3 +237,33 @@ impl PreparedRecovery<'_> {
 pub fn decode(bytes: &[u8]) -> Result<ValidatedRecovery, RecoveryError> {
     manifest::complete::decode(bytes, &RecoveryLimits::default())
 }
+
+/// Restore an owned validated snapshot as a detached, untrusted, unsaved document.
+/// This does not install it in a Session or grant source/capture/storage authority.
+pub fn restore(validated: ValidatedRecovery) -> Result<crate::DocState, RecoveryError> {
+    manifest::complete::restore(validated)
+}
+
+// Retained opaquely for later recovery policy. No path conversion, constructor or public getter.
+#[allow(dead_code, reason = "inert context is retained even when current policy has no consumer")]
+pub(crate) struct RestoreContext {
+    original_path_hint: Option<NativePath>,
+    id: RecoveryId,
+    captured_revision: u64,
+    sequence: u64,
+    dirty_at_capture: bool,
+    provenance: RecoveryProvenance,
+}
+impl std::fmt::Debug for RestoreContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("RestoreContext").finish_non_exhaustive()
+    }
+}
+impl RestoreContext {
+    pub(crate) fn id(&self) -> RecoveryId {
+        self.id
+    }
+    pub(crate) fn captured_revision(&self) -> u64 {
+        self.captured_revision
+    }
+}

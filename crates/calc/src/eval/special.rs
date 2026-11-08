@@ -47,47 +47,90 @@ pub fn precedents(wb: &Workbook, sheet: usize, e: &Expr) -> (Vec<Area>, bool) {
             }
         }
     };
-    e.walk(&mut |x| match x {
-        Expr::Ref(r) => push(&mut out, r, r.range()),
-        // The cells SUMIF/AVERAGEIF really read from the sum range (see `resized_sum_range`); when
-        // the criteria range's size isn't known statically, recalculate the formula every time.
-        Expr::Call(n, args) if resizes_sum_range(n, args.len()) => match (args.first(), args.get(2)) {
-            (Some(Expr::Ref(c)), Some(Expr::Ref(s))) => {
-                let (crit, sum) = (c.range(), s.range());
-                push(&mut out, s, resized_sum_range(sum, crit.height(), crit.width()));
-            }
-            (_, Some(Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Array(_) | Expr::Missing)) => {}
-            _ => dynamic = true,
-        },
-        Expr::Call(n, _)
-            if matches!(n.as_str(), "INDIRECT" | "OFFSET" | "NOW" | "TODAY" | "RAND" | "RANDBETWEEN" | "RANDARRAY" | "CELL" | "INFO") =>
-        {
-            dynamic = true
-        }
-        // A database criterion is evaluated at each record's row: its shifted references can
-        // lie outside both explicit argument ranges and the criterion cell's own precedents.
-        // Criteria can also be replaced after this graph node is built, so keep every database
-        // caller dynamic, using the same conservative invalidation as INDIRECT and OFFSET.
-        Expr::Call(n, _) if gridcraft_functions::lookup(n).is_some_and(|s| s.category == gridcraft_functions::Category::Database) => dynamic = true,
-        Expr::Name(_) | Expr::Struct(_) => dynamic = true,
-        Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() && !is_special(n) => dynamic = true,
-        // A range ending in a function's result (`A1:INDEX(B1:B9,n)`) covers the cells between
-        // the references inside it, not only those references.
-        Expr::Binary(BinOp::Range, a, b) if !matches!((&**a, &**b), (Expr::Ref(_), Expr::Ref(_))) => {
-            let mut inner = precedents(wb, sheet, a).0;
-            inner.extend(precedents(wb, sheet, b).0);
-            let mut boxes: Vec<Area> = Vec::new();
-            for area in inner {
-                match boxes.iter_mut().find(|x| x.sheet == area.sheet) {
-                    Some(x) => x.range = x.range.union(&area.range),
-                    None => boxes.push(area),
+    e.walk(&mut |x| {
+        let action = match precedent_action(x, &mut Ordinary) {
+            Ok(action) => action,
+            Err(never) => match never {},
+        };
+        match action {
+            PrecedentAction::Reference(r, range) => push(&mut out, r, range),
+            PrecedentAction::Dynamic => dynamic = true,
+            PrecedentAction::Range(a, b) => {
+                let mut inner = precedents(wb, sheet, a).0;
+                inner.extend(precedents(wb, sheet, b).0);
+                let mut boxes: Vec<Area> = Vec::new();
+                for area in inner {
+                    match boxes.iter_mut().find(|x| x.sheet == area.sheet) {
+                        Some(x) => x.range = x.range.union(&area.range),
+                        None => boxes.push(area),
+                    }
                 }
+                out.extend(boxes);
             }
-            out.extend(boxes);
+            PrecedentAction::None => {}
         }
-        _ => {}
     });
     (out, dynamic)
+}
+
+// Shared semantic dispatch: admission and scheduling differ, reference meaning does not.
+enum PrecedentAction<'a> {
+    Reference(&'a Reference, RangeRef),
+    Dynamic,
+    Range(&'a Expr, &'a Expr),
+    None,
+}
+trait Classification {
+    type Error;
+    fn eq(&mut self, a: &str, b: &str) -> Result<bool, Self::Error>;
+    fn lookup(&mut self, name: &str) -> Result<Option<bool>, Self::Error>;
+    fn any(&mut self, name: &str, names: &[&str]) -> Result<bool, Self::Error> {
+        for other in names {
+            if self.eq(name, other)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+struct Ordinary;
+impl Classification for Ordinary {
+    type Error = std::convert::Infallible;
+    fn eq(&mut self, a: &str, b: &str) -> Result<bool, Self::Error> {
+        Ok(a == b)
+    }
+    fn lookup(&mut self, n: &str) -> Result<Option<bool>, Self::Error> {
+        Ok(gridcraft_functions::lookup(n).map(|s| s.category == gridcraft_functions::Category::Database))
+    }
+}
+fn precedent_action<'a, C: Classification>(x: &'a Expr, c: &mut C) -> Result<PrecedentAction<'a>, C::Error> {
+    Ok(match x {
+        Expr::Ref(r) => PrecedentAction::Reference(r, r.range()),
+        Expr::Call(n, args) => {
+            if args.len() == 3 && c.any(n, &["SUMIF", "AVERAGEIF"])? {
+                match (args.first(), args.get(2)) {
+                    (Some(Expr::Ref(a)), Some(Expr::Ref(b))) => {
+                        PrecedentAction::Reference(b, resized_sum_range(b.range(), a.range().height(), a.range().width()))
+                    }
+                    (_, Some(Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Array(_) | Expr::Missing)) => {
+                        PrecedentAction::None
+                    }
+                    _ => PrecedentAction::Dynamic,
+                }
+            } else if c.any(n, &["INDIRECT", "OFFSET", "NOW", "TODAY", "RAND", "RANDBETWEEN", "RANDARRAY", "CELL", "INFO"])? {
+                PrecedentAction::Dynamic
+            } else {
+                match c.lookup(n)? {
+                    Some(true) => PrecedentAction::Dynamic,
+                    None if !c.any(n, SPECIAL_FUNCTIONS)? => PrecedentAction::Dynamic,
+                    _ => PrecedentAction::None,
+                }
+            }
+        }
+        Expr::Name(_) | Expr::Struct(_) => PrecedentAction::Dynamic,
+        Expr::Binary(BinOp::Range, a, b) if !matches!((&**a, &**b), (Expr::Ref(_), Expr::Ref(_))) => PrecedentAction::Range(a, b),
+        _ => PrecedentAction::None,
+    })
 }
 
 fn is_special(n: &str) -> bool {
@@ -168,3 +211,6 @@ pub const SPECIAL_FUNCTIONS: &[&str] = &[
 pub fn is_known_function(n: &str) -> bool {
     is_special(&n.to_ascii_uppercase()) || gridcraft_functions::lookup(n).is_some()
 }
+
+mod recovery;
+pub(crate) use recovery::recovery_precedents;

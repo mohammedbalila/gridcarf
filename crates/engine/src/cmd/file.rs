@@ -151,6 +151,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
         }
         d.saved = d.wb.clone();
         d.path = Some(path.clone());
+        d.recovery_needs_save = false;
     }
     Ok(json!({"path": path, "bytes": bytes.len()}))
 }

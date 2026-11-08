@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -172,10 +172,17 @@ AutoSave, without a recovery store, asynchronous serializer or additional durabi
 
 ## Recovery codec foundation
 
+The detached restore boundary now consumes a validated snapshot into an untrusted unsaved
+`DocState`, preserving caches and inert context without evaluation. Its Calc graph has shared
+node/depth/schedule/area/index/offer/work/name and requested-storage limits; any equation source
+of at most 4,096 UTF-8 bytes refuses the entire candidate before layout. See the
+[restore contract](recovery-codec.md#detached-restore-admission). Live Session adoption, UI
+projection, native storage/provider qualification and Windows runtime remain separate gates.
+
 The engine exposes [bounded recovery encoding/validation](recovery-codec.md), with inert recorded
 identity and private owned validated state. Decode checks model and preserved graphs, rebuilds
 only detached derived state, and requires exact writer form. It does not install a Session or
-admit Calc/UI dependencies. No public general capture constructor or active native recovery
+admit Calc/UI dependencies by itself. The separate restore boundary admits bounded Calc state; UI admission is still pending. No public general capture constructor or active native recovery
 exists; ordinary untitled AutoSave remains unavailable. Storage, provenance, trust and live
 capture ownership are separate gates; no privacy/durability guarantee or readiness score changes.
 
@@ -263,6 +270,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Add bounded detached restore with preserved caches, untrusted unsaved state and no equation layout; native activation/readiness remain unchanged |
 | 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |
 | 2026-11-07 | minor | AutoSave considers every dirty named XLSX-class document, preserves live window views and drafts, and keeps per-document failure notices; untitled recovery remains unavailable |
 | 2026-11-02 | minor | Python mode in the formula bar: Python mode on the shared editor, `code_field` and its stop keys; drafts follow their sheet by `model::SheetUid` |

@@ -1,6 +1,6 @@
 # Recovery codec
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (bounded engine codec foundation; native recovery remains inactive)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached restore; native recovery remains inactive)
 
 The engine's recovery codec encodes and validates a supported, lossless subset of modeled
 workbook state plus preserved XLSX graphs. It is an internal foundation, not an active recovery
@@ -17,7 +17,8 @@ Windows runtime is **NOT_TESTED** and no Excel oracle has run.
 | `decode(&[u8])` | Complete fixed-limit validation returning `Result<ValidatedRecovery, RecoveryError>` |
 | `RecoveryCapture<'a>` | Private borrowed fields; public `prepare()`, with no public general constructor |
 | `PreparedRecovery<'a>` | Private frozen manifest and payload-reference plan; `len()`, `is_empty()`, `write_to(&mut dyn Write)` |
-| `ValidatedRecovery` | Private owned state; recorded `id()`, `sequence()`, `captured_revision()` only |
+| `ValidatedRecovery` | Private owned state; recorded `id()`, `sequence()`, `captured_revision()`, consumed by `restore` |
+| `restore(ValidatedRecovery)` | `Result<DocState, RecoveryError>`; detached untrusted unsaved copy, no Session installation |
 | `RecoveryId`, `RecoveryProvenance` | Inert recorded data; IDs parse/serialize as 32 lowercase hexadecimal digits |
 | `RecoveryError` | `UnsupportedVersion`, `Malformed`, `TooLarge`, `UnsupportedRepresentation`, `Ineligible`, `Io` |
 
@@ -25,8 +26,8 @@ Validation does not restore a Session or admit Calc dependencies, dynamic ranges
 UI projections. Live policy-aware capture/CaptureGuard ownership, runtime provenance, storage
 and trust remain separate gates. Untrusted bytes labelled `Plain` never grant runtime Plain
 provenance; recorded Unknown/EncryptedOrigin and persisted encryption-origin facts refuse.
-There is no public arbitrary Workbook constructor, limits override, workbook getter or owned
-part extraction through accepted recovery types.
+There is no public arbitrary capture constructor, limits override or workbook/part extraction
+getter on the validated type. The separate restore boundary admits a complete detached document.
 
 Errors retain finite variants/static reasons, version numbers, provenance or sink ErrorKind,
 without attached input, path, helper/serde text or OS messages. `Display`/`Error` are implemented.
@@ -174,3 +175,61 @@ failed structural-audit scratch peaks and true simultaneous heap totals remain u
 all process fixtures had zero physical spills. There is no production-maximum RSS, global leak
 freedom, universal OOM or external-oracle claim. Host safe-root qualification is blocked, Windows
 runtime remains NOT_TESTED, Excel validation is unavailable, and native recovery remains inactive.
+
+## Detached restore admission
+
+`restore` preserves cached values, spills, formula evaluation modes, opaque modeled content,
+typed import facts, content kind and the entire selection vector (including its anonymous tail).
+It uses a bounded, parser-free Calc constructor with ordinary precedent semantics and bulk
+indexes; it never evaluates or performs an ordinary graph rebuild. Fresh live document/sheet
+identities and live revision 1 are distinct from the inert recorded ID/revision accessors.
+Trust is always `FromFile`, script consent is false even without scripts, path is `None`, and
+undo/redo/unlocks start empty. All recorded context is retained behind a private shared owner
+whose Debug is redacted. The original path hint is never converted, including foreign native
+representations; workbook source paths remain independent.
+
+All limits below are inclusive and shared across the whole restore, including nested/revisited
+expressions, all sheets, index families and adjacency rows. Refusal aborts the owned candidate.
+
+| Resource | Limit |
+|---|---:|
+| Graph nodes N | 8,192 |
+| Active precedent invocations D (root = 1) | 8 |
+| AST schedules C (including revisits) | 262,144 |
+| Area emissions/copies/transfers A | 16,384 |
+| Index attempts I (before deduplication) | 16,384 |
+| Circular dependent offers E (before deduplication/filtering, including wide-column misses) | 65,536 |
+| Recovery-owned work/calls W | 16,777,216 |
+| Full string comparison/normalization operand bytes B | 16,777,216 |
+| Calc-owned cumulative requested dynamic payload | 67,108,864 bytes |
+
+The storage ledger conservatively retains every request, even after temporary storage is freed,
+and includes old/new vector growth overlap. Empty final-size hash reservations and bounded
+fixed-tuple unstable sorts avoid populated rehashes and input-sized sort scratch. Hash payload
+estimates use the actual compiled sizes/alignment and conservative control-group space; vector
+requests check the resulting capacity. Standard-library collision/sort tails remain finite but
+are not charged as individual CPU instructions. The qualified Rust 1.95 implementation is not
+an all-future-toolchain, latency or RSS guarantee. Allocator residency/rounding, native stack,
+Workbook/codec/AST storage, fixed cold function-registry initialization and Arc headers are outside
+this Calc requested-payload ceiling; fallible requests do not establish universal OOM recovery.
+Long unknown function names may exhaust the comparison-byte budget earlier than graph limits.
+
+Structural scans use verified `CellStore.len` after codec/model validation: S is prepaid before
+sheet-header inventory, then `3S + 3Cstore + 2T` for Calc/equation/no-stale-refresh passes. Selection
+identity preparation additionally prepays at most `10S + 4` owned visits/calls. These initial
+charges only consume the same fixed W ceiling passed to `Calc::from_recovery`; they cannot raise
+limits or establish validation/provenance for arbitrary external Workbook callers.
+
+Any equation source of 0 through 4,096 UTF-8 bytes rejects the entire candidate before refresh.
+Only sources above 4,096 bytes use the existing shared `SourceTooLong` no-layout cache response;
+the exact source is retained. UI projection admission remains outstanding.
+
+A separate recovery dirty reason survives saved-pointer/view housekeeping. Only the existing
+successful real XLSX/JSON document-save branch clears it, after existing loss/write/sync guards
+and publication succeed. Save As cancellation, saveBytes, exports, failures and snapshot writing
+do not clear it. This does not extend ordinary save durability or activate native recovery.
+
+Verification uses synthetic public decode/restore and real Save commands, bounded collector/
+graph tests, and paired model layout-call-site instrumentation with engine equation admission.
+Windows native execution and Excel oracle verification remain **NOT_TESTED**; no new release/RSS
+campaign or native storage activation is claimed.

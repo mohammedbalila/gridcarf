@@ -1,6 +1,10 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached recovery restore; earlier: retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
+
+Detached recovery restore is an internal bounded foundation; UI projection, Session adoption,
+qualified native storage and scheduling are still required before activation. See the
+[restore contract](recovery-codec.md#detached-restore-admission). No readiness estimate changes.
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
 list is [`gaps.md`](gaps.md); numbers and method are in
@@ -121,6 +125,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Bound detached recovery restore and retain untrusted unsaved state; activation, platform qualification and readiness remain separate |
 | 2026-11-07 | minor | Complete retention accounting; track repeated band-root/current-inventory work before large-workbook parity |
 | 2026-10-23 | minor | Measuring: tests run through `cargo xtask test` |
 | 2026-10-11 | minor | PivotTable calculated fields landed |

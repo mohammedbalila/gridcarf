@@ -20,6 +20,7 @@ use crate::eval::{Evaluator, Host, precedents, stack_position};
 
 mod graph;
 mod pass_host;
+pub(crate) mod recovery;
 
 #[cfg(test)]
 use graph::Intervals;
