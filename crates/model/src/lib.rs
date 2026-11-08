@@ -14,6 +14,8 @@ pub mod password;
 pub mod preserved;
 pub use compatibility::{CompatibilityEffect, CompatibilityIssue, Editability};
 pub mod python;
+mod recovery_validation;
+pub use recovery_validation::{RecoveryModelError, RecoveryRepresentation, validate_recovery_model};
 mod retained;
 pub use retained::RetainedBytes;
 pub mod sheet;
