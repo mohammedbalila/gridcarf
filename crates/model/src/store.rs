@@ -42,6 +42,40 @@ impl CellStore {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Checks raw serde storage before fallback lookup or rebuild can conceal malformed data.
+    pub(crate) fn validate_recovery_storage(&self) -> Result<usize, crate::recovery_validation::RecoveryModelError> {
+        use crate::recovery_validation::RecoveryModelError;
+        use gridcraft_core::{MAX_COLS, MAX_ROWS};
+
+        let mut actual = 0usize;
+        for (key, band) in &self.bands {
+            if *key > (MAX_ROWS - 1) / BAND || band.rows.is_empty() {
+                return Err(RecoveryModelError::Storage);
+            }
+            for (row, cols) in &band.rows {
+                if *row >= MAX_ROWS {
+                    return Err(RecoveryModelError::Coordinate);
+                }
+                if *row / BAND != *key || cols.is_empty() {
+                    return Err(RecoveryModelError::Storage);
+                }
+                for (col, cell) in cols {
+                    if *col >= MAX_COLS {
+                        return Err(RecoveryModelError::Coordinate);
+                    }
+                    if cell.is_blank() {
+                        return Err(RecoveryModelError::Storage);
+                    }
+                    actual = actual.checked_add(1).ok_or(RecoveryModelError::Capacity)?;
+                }
+            }
+        }
+        if actual != self.len {
+            return Err(RecoveryModelError::Storage);
+        }
+        Ok(actual)
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -460,5 +494,109 @@ mod retained_cache_tests {
         assert!(store.retained_bytes_against(&empty) >= 64 * 1024);
         store.rebuild();
         assert!(store.retained_bytes_against(&empty) >= 64 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::{StyleId, recovery_validation::RecoveryModelError};
+    use gridcraft_core::{MAX_COLS, MAX_ROWS, Value};
+
+    fn raw(band: u32, row: u32, col: u32, cell: Cell, len: usize) -> CellStore {
+        CellStore {
+            bands: BTreeMap::from([(band, Arc::new(Band { rows: BTreeMap::from([(row, BTreeMap::from([(col, cell)]))]), ..Band::default() }))]),
+            len,
+        }
+    }
+
+    #[test]
+    fn recovery_raw_store_accepts_empty_styled_edges_and_multiple_bands() {
+        let mut store = CellStore::new();
+        assert_eq!(store.validate_recovery_storage(), Ok(0));
+        for at in [CellRef::new(0, 0), CellRef::new(64, 1), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1)] {
+            store.set(at, Cell::styled(Value::Empty, StyleId(1)));
+        }
+        assert_eq!(store.validate_recovery_storage(), Ok(3));
+    }
+
+    #[test]
+    fn recovery_raw_store_refuses_placement_duplicates_counts_and_blank_loss() {
+        let cell = Cell::value(Value::Number(1.0));
+        let valid = raw(0, 0, 0, cell.clone(), 1);
+        assert_eq!(valid.validate_recovery_storage(), Ok(1));
+        for bad in [
+            raw(1, 0, 0, cell.clone(), 1),
+            raw(u32::MAX, 0, 0, cell.clone(), 1),
+            raw(0, 0, 0, cell.clone(), 0),
+            raw(0, 0, 0, cell.clone(), 2),
+            raw(0, 0, 0, cell.clone(), usize::MAX),
+            raw(0, 0, 0, Cell::default(), 1),
+            CellStore { bands: BTreeMap::from([(0, Arc::new(Band::default()))]), len: 0 },
+            CellStore { bands: BTreeMap::from([(0, Arc::new(Band { rows: BTreeMap::from([(0, BTreeMap::new())]), ..Band::default() }))]), len: 0 },
+        ] {
+            assert_eq!(bad.validate_recovery_storage(), Err(RecoveryModelError::Storage));
+        }
+        let mut duplicate = valid;
+        duplicate.bands.insert(1, raw(0, 0, 0, cell, 1).bands.remove(&0).unwrap());
+        duplicate.len = 2;
+        assert_eq!(duplicate.iter().count(), 2);
+        assert_eq!(duplicate.validate_recovery_storage(), Err(RecoveryModelError::Storage));
+        for bad in [raw(MAX_ROWS / 64, MAX_ROWS, 0, Cell::value(Value::Bool(true)), 1), raw(0, 0, MAX_COLS, Cell::value(Value::Bool(true)), 1)] {
+            assert!(bad.validate_recovery_storage().is_err());
+        }
+    }
+
+    #[test]
+    fn recovery_raw_store_validation_preserves_cached_and_uncached_band_identity() {
+        for cached in [false, true] {
+            let mut store = raw(0, 0, 0, Cell::value(Value::Number(f64::from_bits(0x7ff8_0000_0000_0022))), 1);
+            if cached {
+                assert!(store.retained_bytes_against(&CellStore::new()) > 0);
+            }
+            let snapshot = store.clone();
+            let band = store.bands.get(&0).unwrap();
+            let pointer = Arc::as_ptr(band);
+            let count = Arc::strong_count(band);
+            let summary = band.accounting.0.get().map(std::ptr::from_ref);
+            assert_eq!(store.validate_recovery_storage(), Ok(1));
+            assert_eq!(Arc::as_ptr(store.bands.get(&0).unwrap()), pointer);
+            assert_eq!(Arc::strong_count(store.bands.get(&0).unwrap()), count);
+            assert_eq!(store.bands.get(&0).unwrap().accounting.0.get().map(std::ptr::from_ref), summary);
+            store.len = 7;
+            assert_eq!(store.validate_recovery_storage(), Err(RecoveryModelError::Storage));
+            assert_eq!(store.len, 7);
+            assert!(Arc::ptr_eq(store.bands.get(&0).unwrap(), snapshot.bands.get(&0).unwrap()));
+            assert_eq!(store.bands.get(&0).unwrap().accounting.0.get().map(std::ptr::from_ref), summary);
+            let Value::Number(n) = store.get(CellRef::new(0, 0)).unwrap().value else {
+                panic!("number");
+            };
+            assert_eq!(n.to_bits(), 0x7ff8_0000_0000_0022);
+        }
+    }
+
+    #[test]
+    fn recovery_characterization_ordinary_serde_rebuild_repairs_and_overwrites() {
+        let cell = Cell::value(Value::Number(1.0));
+        let mut store = raw(0, 0, 0, cell, 999);
+        store.bands.insert(1, raw(1, 0, 0, Cell::value(Value::Number(2.0)), 1).bands.remove(&1).unwrap());
+        let json = serde_json::to_string(&store).unwrap();
+        let mut decoded: CellStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.len(), 999);
+        assert_eq!(decoded.iter().count(), 2);
+        assert_eq!(decoded.rebuild(), 0);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded.get(CellRef::new(0, 0)).unwrap().value, Value::Number(2.0));
+        let mut misplaced = raw(77, 64, 3, Cell::value(Value::Bool(true)), 0);
+        assert!(misplaced.get(CellRef::new(64, 3)).is_none());
+        assert_eq!(misplaced.rebuild(), 0);
+        assert_eq!(misplaced.len(), 1);
+        assert!(misplaced.get(CellRef::new(64, 3)).is_some());
+        let mut blank = raw(0, 0, 0, Cell::default(), 1);
+        assert_eq!(blank.rebuild(), 0);
+        assert_eq!(blank.len(), 0, "blank loss is not reported in dropped count");
+        let mut outside = raw(MAX_ROWS / 64, MAX_ROWS, 0, Cell::value(Value::Bool(true)), 1);
+        assert_eq!(outside.rebuild(), 1);
+        assert_eq!(outside.len(), 0);
     }
 }
