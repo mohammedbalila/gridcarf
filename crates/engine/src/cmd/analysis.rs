@@ -1801,10 +1801,12 @@ fn write_report(s: &mut Session, p: &Json, tool: &str, g: Grid) -> Result<Json> 
         return Err(EngineError::Other(format!("The output range {} {OVERWRITE_ERROR}; pass overwrite: true to replace it.", rect.a1())));
     }
     let sheet_name = new_sheet.clone().or_else(|| d.wb.sheet(si).map(|sh| sh.name.clone())).unwrap_or_default();
-    let new_index = edit(s, |cx| {
+    edit(s, |cx| {
         let pct_fmt = NumFmt::new("0.00%");
         if let Some(name) = &new_sheet {
             cx.wb.sheets.push(std::sync::Arc::new(Sheet::new(name.clone())));
+            cx.wb.set_active_sheet(si);
+            *cx.sel = crate::Selection::default();
             cx.structural = true;
         }
         let pct_styles: Vec<(CellRef, gridcraft_model::StyleId)> = {
@@ -1830,9 +1832,6 @@ fn write_report(s: &mut Session, p: &Json, tool: &str, g: Grid) -> Result<Json> 
         }
         Ok(new_sheet.as_ref().map(|_| si))
     })?;
-    if let Some(i) = new_index {
-        s.doc_mut()?.wb_switch_sheet(i);
-    }
     Ok(json!({"tool": tool, "sheet": sheet_name, "range": rect.a1(), "rows": rows, "cols": cols}))
 }
 

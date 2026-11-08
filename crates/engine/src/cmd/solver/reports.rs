@@ -373,14 +373,6 @@ pub(super) fn write_reports(cx: &mut Ctx, at: usize, built: Vec<(String, Lines)>
     names
 }
 
-pub(super) fn insert_report_selections(s: &mut Session, at: usize, count: usize) {
-    if let Ok(d) = s.doc_mut() {
-        for i in 0..count {
-            d.sheet_selections.insert((at + i).min(d.sheet_selections.len()), crate::Selection::default());
-        }
-    }
-}
-
 /// `data.solverReport`: reports for a solution of the sheet's saved model.
 pub(super) fn report(s: &mut Session, p: &Json) -> Result<Json> {
     let kinds = report_kinds(REPORT_CMD, p)?.ok_or_else(|| bad(REPORT_CMD, "missing `reports` (answer, sensitivity, limits)"))?;
@@ -431,7 +423,6 @@ pub(super) fn report(s: &mut Session, p: &Json) -> Result<Json> {
     let (built, skipped) = prepare_reports(s.doc()?, &kinds, &inp, not_optimal)?;
     // Nothing left to write (every report skipped): no edit, so no Undo step.
     let sheets = if built.is_empty() { Vec::new() } else { edit(s, |cx| Ok(write_reports(cx, model.sheet, built)))? };
-    insert_report_selections(s, model.sheet, sheets.len());
     let mut out = json!({"sheets": sheets});
     if !skipped.is_empty() {
         out["skippedReports"] = json!(skipped);

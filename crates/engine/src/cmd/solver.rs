@@ -49,7 +49,7 @@ pub use model::{saved_model, sensitivity_applies, sensitivity_status};
 use model_range::{load_model_cells, reset_model, save_model_cells};
 use nlp::{nlp, project};
 use problem::{Evaluator, as_num, build_problem};
-use reports::{NotOptimal, ReportInput, insert_report_selections, prepare_reports, report, report_kinds, write_reports};
+use reports::{NotOptimal, ReportInput, prepare_reports, report, report_kinds, write_reports};
 
 const CMD: &str = "data.solver";
 const REPORT_CMD: &str = "data.solverReport";
@@ -321,7 +321,6 @@ fn run(s: &mut Session, p: &Json) -> Result<Json> {
     } else {
         Vec::new()
     };
-    insert_report_selections(s, model.sheet, count);
     if reports.is_some() && solution.is_some() {
         out["reports"] = json!(names);
     }

@@ -241,7 +241,7 @@ pub(super) fn scenario_summary(s: &mut Session, p: &Json) -> Result<Json> {
         .find(|n| d.wb.sheet_index(n).is_none())
         .unwrap_or_else(|| "Scenario Summary".into());
     let names: Vec<String> = scenarios.iter().map(|x| x.name.clone()).collect();
-    let new_index = edit(s, |cx| {
+    edit(s, |cx| {
         let bold = cx.wb.styles.derive(StyleId::DEFAULT, |st| st.font.bold = true);
         let mut sheet = Sheet::new(name.clone());
         let put = |sheet: &mut Sheet, row: u32, col: u32, v: Value, style: StyleId| {
@@ -289,9 +289,10 @@ pub(super) fn scenario_summary(s: &mut Session, p: &Json) -> Result<Json> {
         sheet.cols.insert(1, gridcraft_model::LineInfo { size: Some(110.0), ..Default::default() });
         sheet.cols.insert(2, gridcraft_model::LineInfo { size: Some(100.0), ..Default::default() });
         cx.wb.sheets.push(std::sync::Arc::new(sheet));
+        cx.wb.set_active_sheet(cx.wb.sheets.len() - 1);
+        *cx.sel = crate::Selection::default();
         cx.structural = true;
         Ok(cx.wb.sheets.len() - 1)
     })?;
-    s.doc_mut()?.wb_switch_sheet(new_index);
     Ok(json!({"sheet": name, "scenarios": names.len(), "changingCells": changing.len(), "resultCells": results.len()}))
 }

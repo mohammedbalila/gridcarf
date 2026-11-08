@@ -197,13 +197,15 @@ fn undo(s: &mut Session, p: &Json) -> Result<Json> {
     let mut label = String::new();
     let now = d.wb.clone();
     for _ in 0..steps {
+        let Some(e) = d.undo.last() else { break };
+        let selection_plan = d.prepare_selection(&e.wb, crate::selection_memory::Transition::Publish(&e.selection))?;
         let Some(e) = d.undo.pop() else { break };
         let cur_wb = d.wb.clone();
         // Redo goes back to the undone edit's cells, not wherever the user clicked before undoing (#1855).
         let cur_selection = e.selection.clone();
         label = e.label.clone();
         d.wb = e.wb;
-        d.selection = e.selection;
+        selection_plan.apply(&mut d.sheet_selections, &mut d.selection_memory, &mut d.selection);
         // Step by step: a rename and a new sheet undone together match up only one step apart.
         super::extra::keep_view_modes(d, &cur_wb);
         crate::push_history(&mut d.redo, label.clone(), cur_wb, &d.wb, cur_selection);
@@ -220,12 +222,14 @@ fn redo(s: &mut Session, p: &Json) -> Result<Json> {
     let mut label = String::new();
     let now = d.wb.clone();
     for _ in 0..steps {
+        let Some(e) = d.redo.last() else { break };
+        let selection_plan = d.prepare_selection(&e.wb, crate::selection_memory::Transition::Publish(&e.selection))?;
         let Some(e) = d.redo.pop() else { break };
         let cur_wb = d.wb.clone();
         let cur_selection = d.selection.clone();
         label = e.label.clone();
         d.wb = e.wb;
-        d.selection = e.selection;
+        selection_plan.apply(&mut d.sheet_selections, &mut d.selection_memory, &mut d.selection);
         super::extra::keep_view_modes(d, &cur_wb);
         crate::push_history(&mut d.undo, label.clone(), cur_wb, &d.wb, cur_selection);
     }

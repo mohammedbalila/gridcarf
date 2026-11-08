@@ -395,6 +395,9 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     // reads the wall clock without the (disallowed) `now`.
     let t0 = if cfg!(target_arch = "wasm32") { None } else { std::env::var_os("GRIDCRAFT_PROFILE").map(|_| wall_clock()) };
     let since = |t0: std::time::Duration| wall_clock().saturating_sub(t0);
+    if d.selection_refresh_deferred {
+        d.refresh_selection_memory()?;
+    }
     let mut sel = d.selection.clone();
     let mut ctx = Ctx {
         wb: (*d.wb).clone(),
@@ -428,6 +431,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     if let Some(prepared) = gridcraft_xlsx::prepare_preserved_edit(&d.wb, &wb, &edits, &fit_rows).map_err(EngineError::Other)? {
         wb = prepared;
     }
+    let selection_plan = d.prepare_selection(&wb, crate::selection_memory::Transition::Publish(&sel))?;
     if let Some(log) = d.touched.as_mut() {
         for (si, c) in changed.iter().take(TOUCH_LOG_LIMIT.saturating_sub(log.len())) {
             if let Some(sh) = wb.sheet(*si) {
@@ -459,7 +463,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         eprintln!("commit: + rows {:?}", since(t0));
     }
     d.wb = std::sync::Arc::new(wb);
-    d.selection = sel;
+    selection_plan.apply(&mut d.sheet_selections, &mut d.selection_memory, &mut d.selection);
     Ok(r)
 }
 

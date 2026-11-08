@@ -28,7 +28,6 @@ pub(super) fn insert_sheet(s: &mut Session, p: &Json) -> Result<Json> {
         cx.structural = true;
         Ok(at)
     })?;
-    d.sheet_selections.insert(idx.min(d.sheet_selections.len()), crate::Selection::default());
     Ok(json!({"index": idx, "name": name}))
 }
 
@@ -48,6 +47,9 @@ pub(super) fn delete_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     let name = d.wb.sheet(i).map(|s| s.name.clone()).unwrap_or_default();
     let order: Vec<String> = d.wb.sheets.iter().map(|s| s.name.clone()).collect();
     let d = s.doc_mut()?;
+    let active = d.wb.active_sheet();
+    let target = if active == i { if i + 1 < d.wb.sheets.len() { i + 1 } else { i.saturating_sub(1) } } else { active };
+    let incoming = d.prepare_selection(&d.wb, crate::selection_memory::Transition::Navigate(target))?.into_selection();
     edit_doc(d, |cx| {
         cx.wb.sheets.remove(i);
         for si in 0..cx.wb.sheets.len() {
@@ -81,16 +83,13 @@ pub(super) fn delete_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 }
             }
         }
-        if cx.wb.active_sheet() >= cx.wb.sheets.len() || cx.wb.active_sheet() > i {
-            cx.wb.set_active_sheet(cx.wb.active_sheet().saturating_sub(1).min(cx.wb.sheets.len().saturating_sub(1)));
+        cx.wb.set_active_sheet(if target > i { target - 1 } else { target }.min(cx.wb.sheets.len() - 1));
+        if let Some(incoming) = incoming {
+            *cx.sel = incoming;
         }
-        *cx.sel = crate::Selection::default();
         cx.structural = true;
         Ok(())
     })?;
-    if i < d.sheet_selections.len() {
-        d.sheet_selections.remove(i);
-    }
     ok()
 }
 
@@ -147,6 +146,12 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     let i = target_sheet(s, p)?;
     let copy = bool_param(p, "copy").unwrap_or(false);
     let to = p.get("to").and_then(Json::as_u64).map(|v| v as usize).ok_or_else(|| bad("sheet.move", "missing `to`"))?;
+    let incoming = if copy {
+        Some(crate::Selection::default())
+    } else {
+        let d = s.doc()?;
+        d.prepare_selection(&d.wb, crate::selection_memory::Transition::Navigate(i))?.into_selection()
+    };
     edit(s, |cx| {
         let n = cx.wb.sheets.len();
         let Some(src) = cx.wb.sheets.get(i).cloned() else { return Err(bad("sheet.move", "no such sheet")) };
@@ -225,6 +230,9 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 }
             }
         }
+        if let Some(incoming) = incoming {
+            *cx.sel = incoming;
+        }
         cx.structural = true;
         Ok(Json::Null)
     })
@@ -247,10 +255,20 @@ pub(super) fn hide_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     if s.doc()?.wb.sheets.iter().filter(|s| s.visibility == Visibility::Visible).count() <= 1 {
         return Err(EngineError::Other("A workbook must contain at least one visible worksheet.".into()));
     }
+    let d = s.doc()?;
+    let target = if d.wb.active_sheet() == i {
+        d.wb.sheets.iter().enumerate().find(|(j, sh)| *j != i && sh.visibility == Visibility::Visible).map(|(j, _)| j).unwrap_or(0)
+    } else {
+        d.wb.active_sheet()
+    };
+    let incoming = d.prepare_selection(&d.wb, crate::selection_memory::Transition::Navigate(target))?.into_selection();
     edit(s, |cx| {
         cx.sheet_mut(i)?.visibility = Visibility::Hidden;
         if cx.wb.active_sheet() == i {
             cx.wb.set_active_sheet(cx.wb.sheets.iter().position(|s| s.visibility == Visibility::Visible).unwrap_or(0));
+        }
+        if let Some(incoming) = incoming {
+            *cx.sel = incoming;
         }
         Ok(Json::Null)
     })
@@ -269,9 +287,14 @@ pub(super) fn unhide_sheet(s: &mut Session, p: &Json) -> Result<Json> {
         return ok();
     }
     let i = target_sheet(s, p)?;
+    let d = s.doc()?;
+    let incoming = d.prepare_selection(&d.wb, crate::selection_memory::Transition::Navigate(i))?.into_selection();
     edit(s, |cx| {
         cx.sheet_mut(i)?.visibility = Visibility::Visible;
         cx.wb.set_active_sheet(i);
+        if let Some(incoming) = incoming {
+            *cx.sel = incoming;
+        }
         Ok(Json::Null)
     })
 }
@@ -279,7 +302,7 @@ pub(super) fn unhide_sheet(s: &mut Session, p: &Json) -> Result<Json> {
 pub(super) fn activate(s: &mut Session, p: &Json) -> Result<Json> {
     let i = target_sheet(s, p)?;
     let d = s.doc_mut()?;
-    d.wb_switch_sheet(i);
+    d.try_wb_switch_sheet(i)?;
     Ok(json!({"sheet": i, "name": d.wb.active().map(|s| s.name.clone())}))
 }
 
@@ -289,7 +312,7 @@ pub(super) fn step_sheet(s: &mut Session, dir: isize) -> Result<Json> {
     while let Some(next) = i.checked_add_signed(dir) {
         let Some(sheet) = d.wb.sheet(next) else { break };
         if sheet.visibility == Visibility::Visible {
-            s.doc_mut()?.wb_switch_sheet(next);
+            s.doc_mut()?.try_wb_switch_sheet(next)?;
             return ok();
         }
         i = next;

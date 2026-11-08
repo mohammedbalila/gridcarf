@@ -15,7 +15,7 @@ use gridcraft_model::Workbook;
 use serde_json::{Value as Json, json};
 
 use super::run::{Machine, StepError, rolled_back};
-use crate::{EngineError, GroupToken, Result, Selection, Session};
+use crate::{EngineError, GroupToken, Result, Session};
 
 /// The most breakpoints one call sets.
 pub const MAX_BREAKPOINTS: usize = 10_000;
@@ -85,13 +85,7 @@ pub struct Debugger {
     view: Option<View>,
 }
 
-/// The active sheet and the selections of the debugged workbook where the run left them.
-#[derive(Clone)]
-struct View {
-    sheet: usize,
-    selection: Selection,
-    sheet_selections: Vec<Selection>,
-}
+type View = crate::windows::PairedView;
 
 impl Debugger {
     /// Whether edits of the workbook with this uid wait for the run to end.
@@ -127,10 +121,10 @@ fn note_touched(s: &mut Session, before: &[(u64, Arc<Workbook>)]) {
 /// Remembers where the run left its workbook: the active sheet and the selections.
 fn remember_view(s: &mut Session) {
     let Some(uid) = s.macro_debug.as_ref().map(|d| d.doc) else { return };
-    let view = s.docs.iter().find(|d| d.uid == uid).map(|d| View {
-        sheet: d.wb.active_sheet(),
-        selection: d.selection.clone(),
-        sheet_selections: d.sheet_selections.clone(),
+    let view = s.docs.iter_mut().find(|d| d.uid == uid).map(|d| {
+        // The step/start group is already published: retain its exact pair on failed refresh.
+        d.restore_selection_memory();
+        View::snapshot(d)
     });
     if let Some(dbg) = s.macro_debug.as_mut() {
         dbg.view = view;
@@ -139,15 +133,16 @@ fn remember_view(s: &mut Session) {
 
 /// Puts back the active sheet and the selections where the run left them, so the next step runs
 /// where `macro.run` would run it, however the person looked around meanwhile.
-fn put_back_view(s: &mut Session) {
-    let Some((uid, Some(view))) = s.macro_debug.as_ref().map(|d| (d.doc, d.view.clone())) else { return };
-    let Some(d) = s.docs.iter_mut().find(|d| d.uid == uid) else { return };
-    if view.sheet < d.wb.sheets.len() {
-        // The active sheet is view state: setting it doesn't make the workbook dirty.
-        d.wb.set_active_sheet(view.sheet);
+fn put_back_view(s: &mut Session) -> Result<()> {
+    let Some((uid, Some(view))) = s.macro_debug.as_ref().map(|d| (d.doc, d.view.clone())) else { return Ok(()) };
+    let Some(i) = s.document_index(uid) else { return Ok(()) };
+    // The persisted step limit terminates without activation; the per-action clock resets later.
+    if s.macro_debug.as_ref().and_then(|d| d.machine.as_ref()).is_some_and(|m| m.executed >= super::run::MAX_EXECUTED_STEPS) {
+        let plan = view.prepare(&s.docs[i])?;
+        view.apply(&mut s.docs[i], plan);
+        return Ok(());
     }
-    d.selection = view.selection;
-    d.sheet_selections = view.sheet_selections;
+    s.try_set_active_view(i, Some(view))
 }
 
 /// The message for edits refused while a macro is being debugged.
@@ -356,7 +351,7 @@ fn all_paths(steps: &[gridcraft_model::Step], prefix: &str) -> BTreeSet<String> 
 
 /// Runs one step (`Step`), or steps until a breakpoint, the target step or the end.
 fn advance(s: &mut Session, mode: Mode) -> Result<Json> {
-    put_back_view(s);
+    put_back_view(s)?;
     let d = s.macro_debug.as_mut().ok_or_else(not_debugging)?;
     let (name, base) = (d.name.clone(), d.base);
     let breakpoints = d.breakpoints.clone();
@@ -367,6 +362,8 @@ fn advance(s: &mut Session, mode: Mode) -> Result<Json> {
     let mut first = true;
     let mut hit = false;
     let mut outcome = Ok(());
+    let mut preparation_error = None;
+    let executed_before = machine.executed;
     while !machine.is_done() {
         if !first {
             let Some((path, st)) = machine.current() else { break };
@@ -383,12 +380,17 @@ fn advance(s: &mut Session, mode: Mode) -> Result<Json> {
                 break;
             }
         }
+        if let Err(e) = machine.prepare_activation(s) {
+            preparation_error = Some(e);
+            break;
+        }
         first = false;
         outcome = machine.step(s);
         if outcome.is_err() {
             break;
         }
     }
+    let published = machine.executed != executed_before;
     let done = machine.is_done();
     match s.macro_debug.as_mut() {
         Some(d) => d.machine = Some(machine),
@@ -399,6 +401,13 @@ fn advance(s: &mut Session, mode: Mode) -> Result<Json> {
                 Ok(()) => Err(not_debugging()),
             };
         }
+    }
+    if let Some(error) = preparation_error {
+        if published {
+            note_touched(s, &before);
+            remember_view(s);
+        }
+        return Err(error);
     }
     note_touched(s, &before);
     if let Err(e) = outcome {
@@ -690,5 +699,418 @@ mod tests {
         assert_eq!(saved["saved"], "S", "{saved}");
         let scripts = s.execute("automate.allScripts", json!({})).unwrap();
         assert_eq!(scripts[0]["name"], "S", "{scripts}");
+    }
+    #[test]
+    fn debug_restore_uses_captured_uid_after_external_rename_and_move() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("home.insertSheet", json!({"name":"B"})).unwrap();
+        let mac = crate::macros::parse_macro(&json!({"name":"Pair", "output":{"onConflict":"overwrite"}, "steps":[
+            {"command":"cell.set", "params":{"input":"first"}}, {"command":"cell.set", "params":{"cell":"D4", "input":"second"}}
+        ]}))
+        .unwrap();
+        let d = s.doc_mut().unwrap();
+        std::sync::Arc::make_mut(&mut d.wb).macros.push(mac);
+        d.selection = crate::Selection::at(gridcraft_core::CellRef::new(6, 1));
+        let b = d.wb.sheets[1].uid.get();
+        s.execute("macro.debug", json!({"name":"Pair"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        std::sync::Arc::make_mut(&mut wb.sheets[1]).name = "Moved".into();
+        wb.sheets.swap(0, 1);
+        wb.set_active_sheet(1);
+        s.execute("macro.debug", json!({"action":"step"})).unwrap();
+        let d = s.doc().unwrap();
+        assert_eq!(d.wb.active().unwrap().uid.get(), b);
+        assert_eq!(d.wb.sheets[0].value(gridcraft_core::CellRef::new(6, 1)), gridcraft_core::Value::text("first"));
+    }
+
+    #[test]
+    fn post_step_refresh_failure_keeps_published_step_and_retry_runs_once() {
+        crate::register_test_command("test.debugCaptureFailure", |s, _| {
+            s.execute("cell.set", json!({"cell":"B1", "input":"first"}))?;
+            let d = s.doc_mut()?;
+            d.wb.set_active_sheet(0);
+            d.selection = crate::Selection::at(gridcraft_core::CellRef::new(8, 2));
+            d.selection_preparation_budget = Some(0);
+            Ok(json!({"published":true}))
+        });
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("home.insertSheet", json!({"name":"B"})).unwrap();
+        let mac = crate::macros::parse_macro(&json!({"name":"Deferred", "output":{"onConflict":"overwrite"}, "steps":[
+            {"command":"test.debugCaptureFailure"}, {"command":"cell.set", "params":{"cell":"A2", "input":"second"}}
+        ]}))
+        .unwrap();
+        std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+        let undo_before = s.doc().unwrap().undo.len();
+        s.execute("macro.debug", json!({"name":"Deferred"})).unwrap();
+        let result = s.execute("macro.debug", json!({"action":"step"})).unwrap();
+        assert_eq!(result["executed"], 1);
+        assert_eq!(result["changedCells"], 1);
+        assert_eq!(s.doc().unwrap().undo.len(), undo_before);
+        assert!(s.macro_debug.as_ref().unwrap().touched.contains(&s.doc().unwrap().uid));
+        assert_eq!(
+            format!("{:?}", s.macro_debug.as_ref().unwrap().view.as_ref().unwrap()),
+            format!("{:?}", crate::windows::PairedView::snapshot(s.doc().unwrap()))
+        );
+        assert_eq!(s.doc().unwrap().wb.sheets[1].value(gridcraft_core::CellRef::new(0, 1)), gridcraft_core::Value::text("first"));
+        assert!(s.doc().unwrap().selection_refresh_deferred);
+        assert!(s.in_group(s.doc().unwrap().uid));
+        let before = (s.doc().unwrap().wb.clone(), s.doc().unwrap().selection.clone(), s.doc().unwrap().sheet_selections.clone());
+        assert!(super::advance(&mut s, super::Mode::Step).is_err());
+        assert_eq!(s.macro_debug.as_ref().unwrap().executed(), 1);
+        assert!(std::sync::Arc::ptr_eq(&before.0, &s.doc().unwrap().wb));
+        assert_eq!((&s.doc().unwrap().selection, &s.doc().unwrap().sheet_selections), (&before.1, &before.2));
+        s.doc_mut().unwrap().selection_preparation_budget = None;
+        let result = s.execute("macro.debug", json!({"action":"step"})).unwrap();
+        assert_eq!(result["executed"], 2);
+        assert_eq!(result["state"], "finished");
+        assert_eq!(result["changedCells"], 2);
+        assert_eq!(s.doc().unwrap().undo.len(), undo_before + 1);
+        assert_eq!(s.doc().unwrap().wb.sheets[0].value(gridcraft_core::CellRef::new(1, 0)), gridcraft_core::Value::text("second"));
+        assert!(s.macro_debug.is_none());
+    }
+    #[test]
+    fn start_snapshot_failure_keeps_open_run_and_exact_deferred_pair() {
+        let mut s = Session::new();
+        s.new_workbook();
+        let mac = crate::macros::parse_macro(
+            &json!({"name":"Start", "output":{"onConflict":"overwrite"}, "steps":[{"command":"cell.set", "params":{"cell":"A1", "input":"once"}}]}),
+        )
+        .unwrap();
+        std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+        s.execute("macro.debug", json!({"name":"Start"})).unwrap();
+        assert_eq!(s.macro_debug.as_ref().unwrap().executed(), 0);
+        s.doc_mut().unwrap().selection_preparation_budget = Some(0);
+        // Exercise the same mandatory capture used immediately after start opens its group.
+        super::remember_view(&mut s);
+        assert!(s.in_group(s.doc().unwrap().uid));
+        assert!(s.doc().unwrap().selection_refresh_deferred);
+        assert_eq!(
+            format!("{:?}", s.macro_debug.as_ref().unwrap().view.as_ref().unwrap()),
+            format!("{:?}", crate::windows::PairedView::snapshot(s.doc().unwrap()))
+        );
+        assert!(super::advance(&mut s, super::Mode::Continue).is_err());
+        assert_eq!(s.macro_debug.as_ref().unwrap().executed(), 0);
+        s.doc_mut().unwrap().selection_preparation_budget = None;
+        assert_eq!(s.execute("macro.debug", json!({"action":"continue"})).unwrap()["executed"], 1);
+    }
+
+    #[test]
+    fn debugger_keep_rollback_failure_and_external_end_keep_view_ownership() {
+        for mode in ["keep", "rollback", "failure", "external"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            s.execute("home.insertSheet", json!({"name":"B"})).unwrap();
+            let initial = crate::Selection::at(gridcraft_core::CellRef::new(6, 1));
+            s.doc_mut().unwrap().selection = initial.clone();
+            let mac = crate::macros::parse_macro(&json!({"name":"Modes", "output":{"onConflict":"overwrite"}, "steps":[
+                {"command":"selection.set", "params":{"range":"C9:D10,F12:G13", "active":"G13"}},
+                {"command":"cell.set", "params":{"cell":"?", "input":"bad"}}
+            ]}))
+            .unwrap();
+            std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+            s.execute("macro.debug", json!({"name":"Modes"})).unwrap();
+            s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+            s.execute("macro.debug", json!({"action":"step"})).unwrap();
+            let selected = s.doc().unwrap().selection.clone();
+            assert_eq!(selected.ranges.len(), 2);
+            s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+            match mode {
+                "keep" => {
+                    s.execute("macro.debug", json!({"action":"stop", "keep":true})).unwrap();
+                }
+                "rollback" => {
+                    s.execute("macro.debug", json!({"action":"stop"})).unwrap();
+                }
+                "failure" => {
+                    assert_eq!(s.execute("macro.debug", json!({"action":"continue"})).unwrap()["state"], "failed");
+                }
+                _ => {
+                    let token = s.macro_debug.as_mut().unwrap().token.take().unwrap();
+                    s.group_end(token).unwrap();
+                    assert!(s.execute("macro.debug", json!({"action":"state"})).is_err());
+                }
+            }
+            assert!(s.macro_debug.is_none());
+            if matches!(mode, "rollback" | "failure") {
+                assert_eq!(s.doc().unwrap().selection, initial);
+            } else {
+                s.execute("sheet.activate", json!({"sheet":1})).unwrap();
+                assert_eq!(s.doc().unwrap().selection, selected);
+            }
+        }
+    }
+    fn activation_views(s: &Session) -> String {
+        format!(
+            "{:?}|{:?}",
+            (s.active, s.active_window, s.activation, &s.windows, s.groups.len(), s.next_group, s.group_epoch, s.journal.len()),
+            s.docs.iter().map(|d| (super::View::snapshot(d), &d.edits, &d.touched, d.undo.len(), d.redo.len())).collect::<Vec<_>>()
+        )
+    }
+
+    #[test]
+    fn activation_failure_stages_parked_window_and_debug_pair_before_either_changes() {
+        for fail_window in [true, false] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let long = vec![crate::Selection::at(gridcraft_core::CellRef::new(70, 4)); 24];
+            if fail_window {
+                s.doc_mut().unwrap().sheet_selections = long.clone();
+            }
+            let parked = super::View::capture(s.doc().unwrap()).unwrap();
+            let a = s.active_window().unwrap();
+            let b = s.new_window().unwrap();
+            s.activate_window(a);
+            s.show_window(b);
+            s.doc_mut().unwrap().sheet_selections = if fail_window { Vec::new() } else { long };
+            let mac = crate::macros::parse_macro(&json!({"name":"Entry", "output":{"onConflict":"overwrite"}, "steps":[
+                {"command":"cell.set", "params":{"cell":"A1", "input":"once"}},
+                {"command":"cell.set", "params":{"cell":"A2", "input":"twice"}}
+            ]}))
+            .unwrap();
+            std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+            s.execute("macro.debug", json!({"name":"Entry"})).unwrap();
+            if !fail_window {
+                s.doc_mut().unwrap().sheet_selections.clear();
+                s.doc_mut().unwrap().refresh_selection_memory().unwrap();
+            }
+            s.new_workbook();
+            let view = s.macro_debug.as_ref().unwrap().view.clone().unwrap();
+            let d = &mut s.docs[0];
+            let budget = (0..128)
+                .find(|n| {
+                    d.selection_preparation_budget = Some(*n);
+                    d.prepare_selection(&d.wb, crate::selection_memory::Transition::Refresh).is_ok()
+                        && view.prepare(d).is_ok() == fail_window
+                        && parked.prepare(d).is_err() == fail_window
+                })
+                .unwrap();
+            d.selection_preparation_budget = Some(budget);
+            s.docs[1].sheet_selections = vec![crate::Selection::default(); 3];
+            s.docs[1].selection_refresh_deferred = true;
+            let before = activation_views(&s);
+            let machine = format!("{:?}", s.macro_debug.as_ref().unwrap().machine);
+            assert!(s.execute("macro.debug", json!({"action":"step"})).is_err(), "budget {budget}, fail_window={fail_window}");
+            assert_eq!(activation_views(&s), before);
+            assert_eq!(format!("{:?}", s.macro_debug.as_ref().unwrap().machine), machine);
+            assert!(s.docs.iter().all(|d| d.wb.sheets[0].cells.is_empty()));
+            s.docs[0].selection_preparation_budget = None;
+            assert_eq!(s.execute("macro.debug", json!({"action":"step"})).unwrap()["executed"], 1);
+            assert_eq!(s.execute("macro.debug", json!({"action":"continue"})).unwrap()["executed"], 2);
+            assert_eq!(s.docs[0].wb.sheets[0].value(gridcraft_core::CellRef::new(0, 0)), gridcraft_core::Value::text("once"));
+            assert!(s.docs[1].wb.sheets[0].cells.is_empty());
+        }
+    }
+
+    #[test]
+    fn activation_failure_during_continue_keeps_published_prefix_and_retry_position() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.doc_mut().unwrap().sheet_selections = vec![crate::Selection::default(); 24];
+        let parked = super::View::capture(s.doc().unwrap()).unwrap();
+        let a = s.active_window().unwrap();
+        let b = s.new_window().unwrap();
+        s.activate_window(a);
+        s.show_window(b);
+        s.doc_mut().unwrap().sheet_selections.clear();
+        s.new_workbook();
+        let other = s.active_window().unwrap();
+        s.show_window(b);
+        let mac = crate::macros::parse_macro(&json!({"name":"Prefix", "output":{"onConflict":"overwrite"}, "steps":[
+            {"command":"view.switchWindows", "params":{"window":other}},
+            {"command":"cell.set", "params":{"cell":"A2", "input":"retry"}}
+        ]}))
+        .unwrap();
+        std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+        s.execute("macro.debug", json!({"name":"Prefix"})).unwrap();
+        let view = s.macro_debug.as_ref().unwrap().view.clone().unwrap();
+        let d = &mut s.docs[0];
+        let budget = (0..128)
+            .find(|n| {
+                d.selection_preparation_budget = Some(*n);
+                view.prepare(d).is_ok()
+                    && d.prepare_selection(&d.wb, crate::selection_memory::Transition::Refresh).is_ok()
+                    && parked.prepare(d).is_err()
+            })
+            .unwrap();
+        assert_eq!(budget, 4);
+        d.selection_preparation_budget = Some(budget);
+        assert!(s.execute("macro.debug", json!({"action":"continue"})).is_err());
+        let dbg = s.macro_debug.as_ref().unwrap();
+        assert_eq!(dbg.executed(), 1);
+        assert_eq!(dbg.machine.as_ref().unwrap().current().unwrap().0, "2");
+        assert_eq!(s.active_window(), Some(other), "the first real step published in this continue call");
+        assert!(dbg.touched.contains(&s.docs[0].uid));
+        assert!(s.in_group(s.docs[0].uid));
+        assert_eq!(format!("{:?}", dbg.view.as_ref().unwrap()), format!("{:?}", super::View::snapshot(&s.docs[0])));
+        assert!(s.docs.iter().all(|d| d.wb.sheets[0].cells.is_empty()));
+        assert_eq!(super::state(&mut s).unwrap()["changedCells"], 0);
+        assert!(s.docs[1].edits.is_none() && s.docs[1].touched.is_none());
+        s.docs[0].selection_preparation_budget = None;
+        let result = s.execute("macro.debug", json!({"action":"continue"})).unwrap();
+        assert_eq!(result["state"], "finished");
+        assert_eq!(result["executed"], 2);
+        assert_eq!(result["changedCells"], 1);
+        assert_eq!(s.docs[0].wb.sheets[0].value(gridcraft_core::CellRef::new(1, 0)), gridcraft_core::Value::text("retry"));
+        assert!(s.docs[1].wb.sheets[0].cells.is_empty());
+    }
+
+    #[test]
+    fn exhausted_debugger_entry_keeps_terminal_rollback_before_window_preflight() {
+        let mut s = Session::new();
+        s.new_workbook();
+        let mac = crate::macros::parse_macro(&json!({"name":"Terminal", "output":{"onConflict":"overwrite"}, "steps":[
+            {"command":"cell.set", "params":{"cell":"A1", "input":"rollback"}},
+            {"command":"cell.set", "params":{"cell":"A2", "input":"never"}}
+        ]}))
+        .unwrap();
+        std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).macros.push(mac);
+        let original = s.doc().unwrap().wb.clone();
+        let selection = s.doc().unwrap().selection.clone();
+        let history = (s.doc().unwrap().undo.len(), s.doc().unwrap().redo.len());
+        s.execute("macro.debug", json!({"name":"Terminal"})).unwrap();
+        assert_eq!(s.execute("macro.debug", json!({"action":"step"})).unwrap()["executed"], 1);
+        assert_eq!(s.docs[0].wb.sheets[0].value(gridcraft_core::CellRef::new(0, 0)), gridcraft_core::Value::text("rollback"));
+        s.doc_mut().unwrap().sheet_selections.clear();
+        super::remember_view(&mut s);
+        s.doc_mut().unwrap().sheet_selections = vec![crate::Selection::default(); 24];
+        let parked = super::View::capture(s.doc().unwrap()).unwrap();
+        let a = s.active_window().unwrap();
+        let b = s.new_window().unwrap();
+        s.activate_window(a);
+        s.show_window(b);
+        s.doc_mut().unwrap().sheet_selections.clear();
+        s.new_workbook();
+        let view = s.macro_debug.as_ref().unwrap().view.clone().unwrap();
+        let d = &mut s.docs[0];
+        let budget = (0..128)
+            .find(|n| {
+                d.selection_preparation_budget = Some(*n);
+                view.prepare(d).is_ok()
+                    && d.prepare_selection(&d.wb, crate::selection_memory::Transition::Refresh).is_ok()
+                    && parked.prepare(d).is_err()
+            })
+            .unwrap();
+        d.selection_preparation_budget = Some(budget);
+        s.cleanup_selection_memories();
+        let dbg = s.macro_debug.as_mut().unwrap();
+        let base = dbg.base;
+        let machine = dbg.machine.as_mut().unwrap();
+        assert_eq!(machine.current().unwrap().0, "2");
+        machine.executed = crate::macros::run::MAX_EXECUTED_STEPS;
+        assert!(s.in_group(s.docs[0].uid));
+        let windows = format!("{:?}", (s.active, s.active_window, s.activation, &s.windows));
+        let other = format!("{:?}", (super::View::snapshot(&s.docs[1]), &s.docs[1].edits, &s.docs[1].touched));
+        let result = s.execute("macro.debug", json!({"action":"step"}));
+        assert!(result.is_ok(), "terminal step limit must survive parked-window refusal at budget {budget}: {result:?}");
+        let result = result.unwrap();
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["executed"], crate::macros::run::MAX_EXECUTED_STEPS + 1 - base);
+        assert_eq!(result["error"]["step"], "2");
+        assert!(result["message"].as_str().unwrap().contains("ran more than"));
+        assert!(s.macro_debug.is_none());
+        assert!(!s.in_group(s.docs[0].uid));
+        assert!(s.groups.is_empty());
+        assert!(std::sync::Arc::ptr_eq(&s.docs[0].wb, &original));
+        assert_eq!(s.docs[0].selection, selection);
+        assert_eq!((s.docs[0].undo.len(), s.docs[0].redo.len()), history);
+        assert!(s.docs.iter().all(|d| d.wb.sheets[0].cells.is_empty()));
+        assert_eq!(format!("{:?}", (s.active, s.active_window, s.activation, &s.windows)), windows);
+        assert_eq!(format!("{:?}", (super::View::snapshot(&s.docs[1]), &s.docs[1].edits, &s.docs[1].touched)), other);
+    }
+}
+
+#[cfg(test)]
+mod final_e2_tests {
+    use super::*;
+    use crate::Selection;
+    use gridcraft_core::{CellRef, RangeRef};
+
+    fn selected(row: u32) -> Selection {
+        Selection {
+            active: CellRef::new(row + 1, 5),
+            anchor: CellRef::new(row, 1),
+            ranges: vec![RangeRef::cell(CellRef::new(row, 1)), RangeRef::cell(CellRef::new(row + 1, 5))],
+        }
+    }
+    fn view_only(mode: &str) {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("home.insertSheet", json!({"name":"B"})).unwrap();
+        let mac = crate::macros::parse_macro(&json!({"name":"ViewOnly", "output":{"onConflict":"overwrite"}, "steps":[
+            {"command":"selection.set", "params":{"range":"C9:D10,F12:G13", "active":"G13"}},
+            {"command":"cell.set", "params":{"cell":"?", "input":"bad"}}
+        ]}))
+        .unwrap();
+        let d = s.doc_mut().unwrap();
+        Arc::make_mut(&mut d.wb).macros.push(mac);
+        d.selection = selected(6);
+        d.sheet_selections = vec![selected(2), selected(4), selected(90), Selection::default()];
+        d.refresh_selection_memory().unwrap();
+        // Settle history accounting after the fixture installs its macro directly.
+        s.execute("sheet.activate", json!({"sheet":1})).unwrap();
+        let d = s.doc().unwrap();
+        let (a, b) = (d.wb.sheets[0].uid.get(), d.wb.sheets[1].uid.get());
+        let wb = d.wb.clone();
+        let history = format!("{:?}", (&d.undo, &d.redo));
+        s.execute("macro.debug", json!({"name":"ViewOnly"})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), b);
+        assert_eq!(s.doc().unwrap().selection, selected(6));
+        s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), a);
+        assert_eq!(s.doc().unwrap().selection, selected(2));
+        s.execute("macro.debug", json!({"action":"step"})).unwrap();
+        let stepped = Selection {
+            active: CellRef::parse("G13").unwrap(),
+            anchor: CellRef::parse("F12").unwrap(),
+            ranges: vec![RangeRef::parse("C9:D10").unwrap(), RangeRef::parse("F12:G13").unwrap()],
+        };
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), b);
+        assert_eq!(s.doc().unwrap().selection, stepped);
+        s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+        assert!(Arc::ptr_eq(&wb, &s.doc().unwrap().wb), "view-only prefix must share the captured workbook");
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), a);
+        match mode {
+            "rollback" => {
+                s.execute("macro.debug", json!({"action":"stop"})).unwrap();
+            }
+            "failure" => {
+                assert_eq!(s.execute("macro.debug", json!({"action":"continue"})).unwrap()["state"], "failed");
+            }
+            "keep" => {
+                s.execute("macro.debug", json!({"action":"stop", "keep":true})).unwrap();
+            }
+            _ => {
+                let token = s.macro_debug.as_mut().unwrap().token.take().unwrap();
+                assert!(!s.group_end(token).unwrap());
+                assert!(s.execute("macro.debug", json!({"action":"state"})).is_err());
+            }
+        }
+        let rolled = matches!(mode, "rollback" | "failure");
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), if rolled { b } else { a }, "{mode}: selection owner UID");
+        assert_eq!(s.doc().unwrap().selection, if rolled { selected(6) } else { selected(2) });
+        assert!(s.macro_debug.is_none() && s.groups.is_empty());
+        assert!(Arc::ptr_eq(&wb, &s.doc().unwrap().wb));
+        assert_eq!(format!("{:?}", (&s.doc().unwrap().undo, &s.doc().unwrap().redo)), history);
+        assert!(s.doc().unwrap().wb.sheets.iter().all(|sh| sh.cells.is_empty()));
+        s.execute("sheet.activate", json!({"sheet":0})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), a);
+        assert_eq!(s.doc().unwrap().selection, selected(2));
+        s.execute("sheet.activate", json!({"sheet":1})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().uid.get(), b);
+        assert_eq!(s.doc().unwrap().selection, if rolled { selected(6) } else { stepped });
+        assert_eq!(&s.doc().unwrap().sheet_selections[2..], &[selected(90), Selection::default()]);
+    }
+    #[test]
+    fn e2_final_debugger_view_only_stop_restores_captured_uid_and_selection() {
+        view_only("rollback");
+    }
+    #[test]
+    fn e2_final_debugger_view_only_failure_keep_and_external_end() {
+        for mode in ["failure", "keep", "external"] {
+            view_only(mode);
+        }
     }
 }

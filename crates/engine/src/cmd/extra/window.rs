@@ -152,7 +152,7 @@ pub(super) fn arrange_all(s: &mut Session, p: &Json) -> Result<Json> {
 
 pub(super) fn hide_window(s: &mut Session, p: &Json) -> Result<Json> {
     let id = window_param(s, "view.hideWindow", p)?;
-    s.hide_window(id);
+    s.try_hide_window(id)?;
     ok()
 }
 
@@ -167,7 +167,7 @@ pub(super) fn unhide_window(s: &mut Session, p: &Json) -> Result<Json> {
         s.last_hidden_window()
     };
     if let Some(id) = id {
-        s.unhide_window(id);
+        s.try_unhide_window(id)?;
     }
     ok()
 }
@@ -175,7 +175,7 @@ pub(super) fn unhide_window(s: &mut Session, p: &Json) -> Result<Json> {
 pub(super) fn switch_windows(s: &mut Session, p: &Json) -> Result<Json> {
     if p.get("window").is_some_and(|v| !v.is_null()) || p.get("doc").is_some_and(|v| !v.is_null()) {
         let id = window_param(s, "view.switchWindows", p)?;
-        s.unhide_window(id);
+        s.try_unhide_window(id)?;
     }
     Ok(s.window_list())
 }

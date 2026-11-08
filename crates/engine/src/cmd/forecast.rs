@@ -308,7 +308,7 @@ fn forecast_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     let chart_col = if opts.statistics { stats_col + 3 } else { width + 1 };
 
     let at = s.doc()?.wb.active_sheet();
-    let index = edit(s, |cx| {
+    edit(s, |cx| {
         let at = at.min(cx.wb.sheets.len());
         let bold = cx.wb.styles.derive(StyleId::DEFAULT, |st| st.font.bold = true);
         let tstyle = cx.wb.styles.derive(StyleId::DEFAULT, |st| st.num_fmt = tfmt.clone());
@@ -448,9 +448,6 @@ fn forecast_sheet(s: &mut Session, p: &Json) -> Result<Json> {
         cx.structural = true;
         Ok(at)
     })?;
-    if let Ok(d) = s.doc_mut() {
-        d.sheet_selections.insert(index.min(d.sheet_selections.len()), crate::Selection::default());
-    }
     Ok(json!({"sheet": sheet_name, "table": table_name, "chart": chart_id, "history": n, "periods": periods, "fitted": fit}))
 }
 
