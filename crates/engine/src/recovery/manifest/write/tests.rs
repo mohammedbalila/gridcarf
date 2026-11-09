@@ -57,6 +57,7 @@ fn actual_workbook_writer_requires_real_upstream_observation() {
     use std::sync::Arc;
     let mut workbook = Workbook::new();
     let metadata = Metadata {
+        frozen_active_sheet: None,
         title: "x".into(),
         original_path_hint: None,
         file_kind: None,

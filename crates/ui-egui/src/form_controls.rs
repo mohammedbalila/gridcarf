@@ -221,11 +221,8 @@ impl SheetApp {
     fn control_set(&mut self, id: u32, value: f64) -> bool {
         match self.session.run("control.setValue", json!({"id": id, "value": value})) {
             Ok(_) => {
-                if let Some(start) = self.grid.control.as_ref().map(|g| g.undo_start)
-                    && let Some(d) = self.session.active_mut()
-                    && d.undo.len() > start + 1
-                {
-                    d.undo.truncate(start + 1);
+                if let Some(start) = self.grid.control.as_ref().map(|g| g.undo_start) {
+                    let _ = self.session.truncate_gesture_undo(start);
                 }
                 true
             }

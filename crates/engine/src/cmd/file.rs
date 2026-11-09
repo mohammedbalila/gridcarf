@@ -134,6 +134,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
         return super::print::export_pdf(s, &json!({"path": path}));
     }
     crate::save::check(s.doc()?, &path, p)?;
+    s.invalidate_recovery(s.doc()?.uid);
     let d = s.doc_mut()?;
     // The document's own file keeps the format its content had when opened; any other path
     // goes by its extension. Relative paths to linked workbooks are rewritten for the new folder.

@@ -32,6 +32,7 @@ struct Fixture {
 }
 fn metadata() -> Metadata {
     Metadata {
+        frozen_active_sheet: None,
         title: "measurement".into(),
         original_path_hint: None,
         file_kind: None,

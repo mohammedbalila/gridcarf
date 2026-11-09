@@ -397,7 +397,7 @@ impl Session {
         let refresh = d.prepare_selection(&d.wb, Transition::Refresh)?;
         let view = PairedView::capture(d)?;
         self.windows.try_reserve(1).map_err(|_| EngineError::Other("selection memory preparation failed".into()))?;
-        let d = self.doc_mut()?;
+        let d = self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)?;
         refresh.apply(&mut d.sheet_selections, &mut d.selection_memory, &mut d.selection);
         d.selection_refresh_deferred = false;
         // The new window takes over the live view (identical at this point); the old one keeps a copy.

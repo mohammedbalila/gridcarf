@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-09 · **Change:** minor (sealed recovery publication lifetime; earlier: typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -179,15 +179,18 @@ clipboard and painter transfers carry origin even for passive formats/values, an
 text/HTML/picture paste plus append imports join Unknown before commit. OS text equality grants
 no origin authority and can conservatively exclude a previously Plain document. Undo/rollback,
 macro previews and Save As retain taint. See [runtime origin](recovery-codec.md#sticky-runtime-origin).
-Sealed capture jobs, publication/lifecycle/raw-mutation invalidation, UI restore admission and safe-root
-native storage qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
+Sealed weak tickets, frozen borrowed jobs and lifecycle/raw-mutation gates now live in the engine;
+see [publication lifetime](recovery-codec.md#sealed-live-capture-and-publication-lifetime). The bounded
+runtime owns only scalar gate records, while each job owns its immutable workbook Arc and metadata.
+Untrusted Session restore adoption is available; UI restore admission and safe-root native storage
+qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
 remain untested; no activation, protection guarantee or readiness increase is claimed.
 
 The detached restore boundary now consumes a validated snapshot into an untrusted unsaved
 `DocState`, preserving caches and inert context without evaluation. Its Calc graph has shared
 node/depth/schedule/area/index/offer/work/name and requested-storage limits; any equation source
 of at most 4,096 UTF-8 bytes refuses the entire candidate before layout. See the
-[restore contract](recovery-codec.md#detached-restore-admission). Live Session adoption, UI
+[restore contract](recovery-codec.md#detached-restore-admission). Session adoption retains Unknown-or-worse origin and refuses concurrent live lineage collisions. UI
 projection, native storage/provider qualification and Windows runtime remain separate gates.
 
 The engine exposes [bounded recovery encoding/validation](recovery-codec.md), with inert recorded
@@ -281,6 +284,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Sealed recovery jobs and lifecycle gates; untrusted Session restore adoption; native/UI activation and external qualification remain separate |
 | 2026-11-08 | minor | Add typed sticky origin at audited entries/transfers and conservative external ingress; live capture/native qualification remain incomplete |
 | 2026-11-08 | minor | Add bounded detached restore with preserved caches, untrusted unsaved state and no equation layout; native activation/readiness remain unchanged |
 | 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |

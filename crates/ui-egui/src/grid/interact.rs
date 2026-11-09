@@ -500,9 +500,7 @@ fn handle_press(app: &mut SheetApp, input: &InteractionInput<'_>) {
     if mods.shift {
         note_selecting_press(app);
         let _ = app.session.run("selection.set", json!({"range": RangeRef::new(sel.anchor, c).a1(), "active": sel.active.a1()}));
-        if let Some(d) = app.session.active_mut() {
-            d.selection.anchor = sel.anchor;
-        }
+        let _ = app.session.set_selection_anchor(sel.anchor);
     } else if mods.command {
         // Ctrl+click (without Alt) on a hyperlink's text follows it instead of adding the cell to the selection.
         if let Some(h) = sh.hyperlinks.get(&c).cloned()
@@ -930,22 +928,13 @@ fn select_to_pointer(app: &mut SheetApp, geo: &Geo, sh: &Sheet, wb: &Workbook, p
         ranges.pop();
         ranges.push(RangeRef::new(anchor, cell).a1());
         let _ = app.session.run("selection.set", json!({"range": ranges.join(","), "active": active.a1()}));
-        if let Some(d) = app.session.active_mut() {
-            d.selection.anchor = anchor;
-        }
+        let _ = app.session.set_selection_anchor(anchor);
     }
 }
 
 fn coalesce_last_undo(app: &mut SheetApp) {
     // Merge consecutive drag steps into one undo entry.
-    if let Some(d) = app.session.active_mut()
-        && d.undo.len() >= 2
-    {
-        let n = d.undo.len();
-        if d.undo[n - 1].label == d.undo[n - 2].label {
-            d.undo.remove(n - 1);
-        }
-    }
+    let _ = app.session.coalesce_last_undo_if_same_label();
 }
 
 fn scroll_by(app: &mut SheetApp, d: egui::Vec2) {

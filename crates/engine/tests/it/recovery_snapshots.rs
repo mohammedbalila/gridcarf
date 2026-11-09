@@ -290,18 +290,22 @@ fn public_restore_retains_literal_content_and_inert_identity() {
         assert!(!doc.scripts_trusted);
     }
 }
-struct RestoreFiles(std::path::PathBuf);
+pub(super) struct RestoreFiles(pub(super) std::path::PathBuf);
 impl RestoreFiles {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!("rcv-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        std::fs::create_dir(&path).unwrap();
+        Self::create(path).unwrap()
+    }
+    fn create(path: std::path::PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        let files = Self(path);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&files.0, std::fs::Permissions::from_mode(0o700))?;
         }
-        Self(path)
+        Ok(files)
     }
 }
 impl Drop for RestoreFiles {
@@ -361,4 +365,198 @@ fn restore_never_adopts_original_hint_or_changes_original_bytes() {
     doc.store_view(&[(0, CellRef::new(5, 5))]);
     assert!(doc.is_dirty());
     assert_eq!(std::fs::read(original).unwrap(), b"inert original sentinel");
+}
+
+#[test]
+fn untitled_document_survives_restart() {
+    let mut s = gridcraft_engine::Session::new();
+    s.new_workbook();
+    s.execute("cell.set", serde_json::json!({"cell":"A1","input":"42"})).unwrap();
+    let uid = s.doc().unwrap().uid;
+    let ticket = s.recovery_ticket(uid).unwrap();
+    let job = s.capture_recovery(ticket, "fedcba9876543210fedcba9876543210".parse().unwrap(), 7).unwrap();
+    let capture = job.capture();
+    let prepared = capture.prepare().unwrap();
+    let mut bytes = Vec::new();
+    prepared.write_to(&mut bytes).unwrap();
+    drop(s);
+    let mut restored = gridcraft_engine::Session::new();
+    restored.add_recovery_copy(decode(&bytes).unwrap()).unwrap();
+    assert!(restored.doc().unwrap().path.is_none());
+    assert!(restored.doc().unwrap().is_dirty());
+    assert_eq!(restored.doc().unwrap().recovery_provenance(), RecoveryProvenance::Unknown);
+    assert_eq!(restored.doc().unwrap().wb.active().unwrap().value(gridcraft_engine::core::CellRef::default()).display(), "42");
+    assert!(restored.recovery_ticket(restored.doc().unwrap().uid).is_err());
+}
+
+#[test]
+fn live_capture_freezes_active_sheet_across_windows_and_prepare_phases() {
+    let mut s = gridcraft_engine::Session::new();
+    s.new_workbook();
+    s.execute("home.insertSheet", serde_json::json!({"name":"Other"})).unwrap();
+    s.execute("selection.set", serde_json::json!({"sheet":0,"range":"A1"})).unwrap();
+    let first = s.active_window().unwrap();
+    let second = s.new_window().unwrap();
+    let ticket = s.recovery_ticket(s.doc().unwrap().uid).unwrap();
+    let job = s.capture_recovery(ticket, "fedcba9876543210fedcba9876543210".parse().unwrap(), 1).unwrap();
+    s.execute("selection.set", serde_json::json!({"sheet":1,"range":"B2"})).unwrap();
+    s.show_window(first);
+    s.show_window(second);
+    assert_eq!(s.doc().unwrap().wb.active_sheet(), 1);
+    let capture = job.capture();
+    let prepared = capture.prepare().unwrap();
+    s.show_window(first);
+    let mut bytes = Vec::new();
+    prepared.write_to(&mut bytes).unwrap();
+    let doc = gridcraft_engine::recovery::restore(decode(&bytes).unwrap()).unwrap();
+    assert_eq!(doc.wb.active_sheet(), 0);
+}
+
+#[test]
+fn delayed_encode_progresses_across_one_hundred_pure_frames_and_ordinary_edits() {
+    use std::{io::Write, sync::mpsc, time::Duration};
+    struct Paused {
+        bytes: Vec<u8>,
+        started: Option<mpsc::Sender<()>>,
+        resume: mpsc::Receiver<()>,
+    }
+    impl Write for Paused {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+                self.resume.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut s = gridcraft_engine::Session::new();
+    s.new_workbook();
+    s.execute("cell.set", serde_json::json!({"cell":"A1","input":"11"})).unwrap();
+    let uid = s.doc().unwrap().uid;
+    let ticket = s.recovery_ticket(uid).unwrap();
+    let job = s.capture_recovery(ticket, "fedcba9876543210fedcba9876543210".parse().unwrap(), 1).unwrap();
+    let receipt = job.guard();
+    let (started, ready) = mpsc::channel();
+    let (resume, wait) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let capture = job.capture();
+        let prepared = capture.prepare().unwrap();
+        let mut sink = Paused { bytes: Vec::new(), started: Some(started), resume: wait };
+        prepared.write_to(&mut sink).unwrap();
+        job.with_storage(|| Ok::<_, ()>(sink.bytes)).unwrap()
+    });
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    let window = s.active_window().unwrap();
+    for _ in 0..100 {
+        assert!(!s.commands().is_empty());
+        assert_eq!(s.documents().len(), 1);
+        let _ = s.doc().unwrap().is_dirty();
+        s.show_window(window);
+        s.store_document_view(uid, &[]).unwrap();
+        s.set_selection_anchor(gridcraft_engine::core::CellRef::default()).unwrap();
+        s.coalesce_last_undo_if_same_label().unwrap();
+        s.truncate_gesture_undo(s.doc().unwrap().undo.len()).unwrap();
+    }
+    s.execute("cell.set", serde_json::json!({"cell":"A1","input":"22"})).unwrap();
+    s.execute("edit.undo", serde_json::json!({})).unwrap();
+    s.execute("edit.redo", serde_json::json!({})).unwrap();
+    let group = s.group_begin("later").unwrap();
+    assert!(s.recovery_ticket(uid).is_err());
+    s.group_rollback(group).unwrap();
+    assert!(s.doc().unwrap().revision > receipt.captured_revision());
+    resume.send(()).unwrap();
+    let bytes = worker.join().unwrap();
+    let restored = decode(&bytes).unwrap();
+    assert_eq!(restored.captured_revision(), receipt.captured_revision());
+    assert_eq!(
+        gridcraft_engine::recovery::restore(restored).unwrap().wb.active().unwrap().value(gridcraft_engine::core::CellRef::default()).display(),
+        "11"
+    );
+}
+
+#[test]
+fn capture_lineage_binding_survives_save_but_retires_on_close() {
+    let files = RestoreFiles::new();
+    let mut s = gridcraft_engine::Session::new();
+    s.new_workbook();
+    let uid = s.doc().unwrap().uid;
+    let ticket = s.recovery_ticket(uid).unwrap();
+    let job = s.capture_recovery(ticket, "fedcba9876543210fedcba9876543210".parse().unwrap(), 1).unwrap();
+    let capture = job.capture();
+    let mut bytes = Vec::new();
+    capture.prepare().unwrap().write_to(&mut bytes).unwrap();
+    assert!(s.add_recovery_copy(decode(&bytes).unwrap()).is_err());
+    let ticket = s.recovery_ticket(uid).unwrap();
+    assert!(s.capture_recovery(ticket, "0123456789abcdef0123456789abcdef".parse().unwrap(), 2).is_err());
+    s.new_workbook();
+    let other = s.doc().unwrap().uid;
+    let ticket = s.recovery_ticket(other).unwrap();
+    assert!(s.capture_recovery(ticket, "fedcba9876543210fedcba9876543210".parse().unwrap(), 2).is_err());
+    s.set_active(0);
+    let path = files.0.join(format!("recovery-bind-{uid}.xlsx"));
+    s.execute("file.save", serde_json::json!({"path":path})).unwrap();
+    assert!(s.add_recovery_copy(decode(&bytes).unwrap()).is_err());
+    s.close_document(0);
+    s.add_recovery_copy(decode(&bytes).unwrap()).unwrap();
+    assert!(s.add_recovery_copy(decode(&bytes).unwrap()).is_err());
+}
+
+#[test]
+fn captured_lineage_survives_partial_duplicate_uid_close() {
+    let mut s = gridcraft_engine::Session::new();
+    s.new_workbook();
+    let uid = s.doc().unwrap().uid;
+    let ticket = s.recovery_ticket(uid).unwrap();
+    let job = s.capture_recovery(ticket, "fedcba9876543210fedcba9876543210".parse().unwrap(), 1).unwrap();
+    let mut bytes = Vec::new();
+    job.capture().prepare().unwrap().write_to(&mut bytes).unwrap();
+    let duplicate = s.doc().unwrap().clone();
+    let added = s.add_document(duplicate);
+    s.close_document(added);
+    assert_eq!(s.documents().len(), 1);
+    assert_eq!(s.documents()[0].recovery_provenance(), RecoveryProvenance::Unknown);
+    assert!(s.recovery_ticket(uid).is_err());
+    let mut published = false;
+    assert!(
+        job.with_storage(|| {
+            published = true;
+            Ok::<_, ()>(())
+        })
+        .is_err()
+    );
+    assert!(!published);
+    assert!(s.add_recovery_copy(decode(&bytes).unwrap()).is_err(), "the remaining owner still owns this lineage");
+    s.close_document(0);
+    assert!(s.documents().is_empty());
+    s.add_recovery_copy(decode(&bytes).unwrap()).unwrap();
+    assert_eq!(s.doc().unwrap().recovery_provenance(), RecoveryProvenance::Unknown);
+    assert!(s.recovery_ticket(s.doc().unwrap().uid).is_err());
+}
+
+#[test]
+fn recovery_files_own_independent_directories_and_refuse_existing_paths() {
+    let first = RestoreFiles::new();
+    let second = RestoreFiles::new();
+    assert_ne!(first.0, second.0);
+    let sentinel = first.0.join("sentinel.xlsx");
+    let bytes = b"owned synthetic sentinel";
+    std::fs::write(&sentinel, bytes).unwrap();
+    for existing in [&first.0, &sentinel] {
+        assert!(matches!(RestoreFiles::create(existing.clone()), Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists));
+        assert_eq!(std::fs::read(&sentinel).unwrap(), bytes);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&first.0).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&second.0).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    let second_path = second.0.clone();
+    drop(second);
+    assert!(!second_path.exists());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), bytes);
 }

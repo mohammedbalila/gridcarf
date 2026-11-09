@@ -377,9 +377,7 @@ fn edit_with(app: &mut SheetApp, text: String) {
 /// Selects `anchor`..`to`, keeping the anchor and the active cell.
 fn extend(app: &mut SheetApp, anchor: CellRef, active: CellRef, to: CellRef) {
     let _ = app.session.run("selection.set", json!({"range": RangeRef::new(anchor, to).a1(), "active": active.a1()}));
-    if let Some(d) = app.session.active_mut() {
-        d.selection.anchor = anchor;
-    }
+    let _ = app.session.set_selection_anchor(anchor);
     app.grid.ensure_visible = true;
     app.grid.reveal_moving_end = true;
 }

@@ -8,6 +8,7 @@ mod goldens;
 
 pub(super) fn metadata() -> Metadata {
     Metadata {
+        frozen_active_sheet: None,
         title: "complete".into(),
         original_path_hint: Some(NativePath::Windows(vec![0xd800, 0])),
         file_kind: Some(RecoveryFileKind::Sylk),

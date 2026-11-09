@@ -3,14 +3,17 @@
 //! Decoding checks codec, model and preserved-graph consistency. It does not restore a
 //! session or establish trust, source provenance or storage authority. In particular,
 //! untrusted `Plain` metadata never grants runtime Plain provenance. Source paths in
-//! another platform's native representation are refused. Live capture construction
-//! remains reserved for the later policy-aware capture boundary.
+//! another platform's native representation are refused. Session owns live capture
+//! construction and weak lifecycle authority; native storage remains separate.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
 
 mod manifest;
 mod provenance;
+mod runtime;
 pub(crate) use provenance::OriginBinding;
+pub(crate) use runtime::RecoveryRuntime;
+pub use runtime::{CaptureGuard, RecoveryAttemptError, RecoveryJob, RecoveryTicket};
 
 const RECOVERY_MAGIC: &[u8; 8] = b"GCRCV001";
 const RECOVERY_VERSION: u32 = 1;
@@ -37,8 +40,7 @@ impl RecoveryProvenance {
     }
 }
 
-// Live capture policy must check eligibility before issuing any capture ticket.
-#[allow(dead_code, reason = "private eligibility precedes the later live capture seam")]
+// Live capture policy checks eligibility before issuing any capture ticket.
 fn eligible_origin(doc: &crate::DocState) -> Result<RecoveryProvenance, RecoveryError> {
     if doc.import_issues().iter().any(|issue| issue.effect == gridcraft_model::CompatibilityEffect::EncryptionRemoved) {
         return Err(RecoveryError::Ineligible(RecoveryProvenance::EncryptedOrigin));
@@ -58,6 +60,7 @@ pub enum RecoveryError {
     UnsupportedRepresentation(&'static str),
     Ineligible(RecoveryProvenance),
     Io(std::io::ErrorKind),
+    Unavailable(&'static str),
 }
 
 impl std::fmt::Display for RecoveryError {
@@ -68,6 +71,7 @@ impl std::fmt::Display for RecoveryError {
             Self::TooLarge(reason) => write!(formatter, "recovery limit exceeded ({reason})"),
             Self::UnsupportedRepresentation(reason) => write!(formatter, "unsupported recovery representation ({reason})"),
             Self::Ineligible(provenance) => write!(formatter, "ineligible recovery provenance ({provenance:?})"),
+            Self::Unavailable(reason) => write!(formatter, "recovery unavailable ({reason})"),
             Self::Io(kind) => write!(formatter, "recovery sink error ({kind:?})"),
         }
     }
@@ -209,7 +213,7 @@ enum NativePath {
     Windows(Vec<u16>),
 }
 
-/// Borrowed capture supplied only by the later policy-aware live capture boundary.
+/// Borrowed frozen view supplied only by a sealed Session recovery job.
 /// No general workbook constructor or provenance bypass is exposed.
 pub struct RecoveryCapture<'a> {
     workbook: &'a gridcraft_model::Workbook,

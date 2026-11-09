@@ -1,6 +1,6 @@
 # Compatibility baseline
 
-> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-09 · **Change:** minor (sealed recovery publication lifetime; earlier: typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
 
 This baseline pins source `6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214`, before
 stabilization repairs. It covers four small synthetic cases, not general Excel
@@ -181,10 +181,18 @@ The [platform matrix](compatibility-platform-matrix.md) records the other
 unverified targets. Local raw logs and generated binary workbooks stay outside
 version control. No result here upgrades the repository's parity/readiness claims.
 
+### Recovery publication lifetime (2026-11-09)
+
+The engine now exposes sealed weak tickets and frozen borrowed jobs, cancels publication before
+save/close/origin changes, and adopts validated recovery copies as untrusted unsaved documents.
+Raw mutable host access conservatively joins Unknown. See the [capture contract](recovery-codec.md#sealed-live-capture-and-publication-lifetime).
+Native/UI activation, Windows execution and Excel qualification remain separate; readiness is unchanged.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Sealed recovery jobs and lifecycle gates; untrusted Session restore adoption; native/UI activation and external qualification remain separate |
 | 2026-11-08 | minor | Add typed sticky origin at audited entries/transfers and conservative external ingress; live capture/native qualification remain incomplete |
 | 2026-11-08 | minor | Add bounded detached restore with preserved caches, untrusted unsaved state and no equation layout; native activation/readiness remain unchanged |
 | 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |

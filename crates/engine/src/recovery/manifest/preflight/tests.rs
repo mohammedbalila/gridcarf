@@ -328,6 +328,7 @@ fn actual_e1_borrowed_projection_has_matching_structural_counts() {
         .set(gridcraft_core::CellRef::default(), gridcraft_model::Cell { py: Some(Arc::new(python)), ..Default::default() });
     workbook.macros_unread = Arc::new(vec![serde_json::json!({"v":2,"data":"not base64","rows":{"01":"content"}})]);
     let metadata = Metadata {
+        frozen_active_sheet: None,
         title: "Synthetic".into(),
         original_path_hint: None,
         file_kind: None,

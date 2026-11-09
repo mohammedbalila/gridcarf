@@ -1,9 +1,11 @@
 //! The private v1 projection, not an acceptance or raw-input validation entry point.
 
+mod capture;
 pub(super) mod complete;
 mod context;
 mod executable;
 pub(super) mod frame;
+mod frozen;
 mod observe;
 mod preflight;
 mod rebuild;
@@ -21,6 +23,9 @@ use std::{
     path::Path,
 };
 
+#[cfg(test)]
+thread_local! { pub(in crate::recovery) static CAPTURE_WORK: std::cell::Cell<(usize,usize)> = const { std::cell::Cell::new((0,0)) }; }
+
 // deserialize_with makes a missing field an error even though explicit null is supported.
 fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
     Option::deserialize(deserializer)
@@ -29,6 +34,8 @@ fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Metadata {
+    #[serde(skip)]
+    frozen_active_sheet: Option<usize>,
     title: String,
     #[serde(deserialize_with = "required")]
     original_path_hint: Option<NativePath>,
@@ -137,7 +144,7 @@ struct KeptSheet<T> {
 
 #[derive(Serialize)]
 struct ManifestRef<'a> {
-    workbook: &'a Workbook,
+    workbook: frozen::FrozenWorkbook<'a>,
     metadata: &'a Metadata,
     sidecars: SidecarsRef<'a>,
 }
@@ -170,7 +177,11 @@ impl<'a> ManifestRef<'a> {
             }
         }
         let groups = picture_groups(workbook, limits)?;
-        Ok(Self { workbook, metadata, sidecars: SidecarsRef { workbook, groups } })
+        Ok(Self {
+            workbook: frozen::FrozenWorkbook { workbook, active_sheet: metadata.frozen_active_sheet.unwrap_or_else(|| workbook.active_sheet()) },
+            metadata,
+            sidecars: SidecarsRef { workbook, groups },
+        })
     }
 }
 

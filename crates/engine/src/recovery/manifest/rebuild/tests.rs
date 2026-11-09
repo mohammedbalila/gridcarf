@@ -5,6 +5,7 @@ use gridcraft_model::{Anchor, Cell, Color, Shape, ShapeFormat, ShapeKind, Style,
 
 fn metadata() -> Metadata {
     Metadata {
+        frozen_active_sheet: None,
         title: "kept".into(),
         original_path_hint: Some(crate::recovery::NativePath::Unix(vec![0xff, b'x'])),
         file_kind: Some(crate::recovery::RecoveryFileKind::Xlsx),

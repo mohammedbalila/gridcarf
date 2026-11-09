@@ -90,9 +90,20 @@ fn all_transfer_modes_taint_receiver() {
             s.execute("edit.copy", json!({"range":"A1:B2"})).unwrap();
             s.new_workbook();
             assert_eq!(origin(&s), Origin::Plain);
+            let ticket = s.recovery_ticket(s.doc().unwrap().uid).unwrap();
+            let job = s.capture_recovery(ticket, "0123456789abcdef0123456789abcdef".parse().unwrap(), 1).unwrap();
             mode["at"] = json!("C3");
             s.execute("edit.pasteSpecial", mode.clone()).unwrap();
             assert_eq!(origin(&s), want, "{mode}");
+            let mut published = false;
+            assert!(
+                job.with_storage(|| {
+                    published = true;
+                    Ok::<_, ()>(())
+                })
+                .is_err()
+            );
+            assert!(!published);
             if matches!(mode["what"].as_str(), Some("values" | "formats" | "comments" | "notes" | "columnWidths" | "valuesAndNumberFormats")) {
                 assert_eq!(s.doc().unwrap().trust, Trust::Local, "passive mode {mode} retains execution policy");
             }
@@ -364,4 +375,167 @@ fn command_panic_rollback_preserves_received_origin() {
     assert!(s.execute("test.recoveryTransferPanic", json!({})).is_err());
     assert!(Arc::ptr_eq(&s.doc().unwrap().wb, &before));
     assert_eq!(origin(&s), Origin::EncryptedOrigin);
+}
+
+#[test]
+fn encrypted_source_never_writes_plaintext_recovery() {
+    for mut s in [opened(true), {
+        let mut s = Session::new();
+        s.add_document(DocState::new(Workbook::new(), None, "unknown".into(), Trust::Local));
+        s
+    }] {
+        let uid = s.doc().unwrap().uid;
+        let mut storage_calls = 0;
+        if let Ok(ticket) = s.recovery_ticket(uid) {
+            ticket
+                .with_storage(|| {
+                    storage_calls += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            panic!("ineligible source issued authority");
+        }
+        assert_eq!(storage_calls, 0);
+    }
+}
+
+#[test]
+fn direct_engine_close_save_and_headless_transfer_cancel_job() {
+    use gridcraft_engine::recovery::RecoveryAttemptError;
+    let files = super::recovery_snapshots::RestoreFiles::new();
+    for route in 0..5 {
+        for action in ["save", "close", "transfer"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let uid = s.doc().unwrap().uid;
+            let path = files.0.join(format!("recovery-life-{uid}.xlsx"));
+            s.execute("file.save", json!({"path":path})).unwrap();
+            let ticket = s.recovery_ticket(uid).unwrap();
+            let job = s.capture_recovery(ticket, "0123456789abcdef0123456789abcdef".parse().unwrap(), 1).unwrap();
+            let (command, params) = match action {
+                "save" => ("file.save", json!({})),
+                "close" => ("file.close", json!({"discard":true})),
+                _ => ("edit.paste", json!({"text":"secret","at":"A1"})),
+            };
+            match route {
+                0 => {
+                    s.execute(command, params).unwrap();
+                }
+                1 => {
+                    s.run(command, params).unwrap();
+                }
+                2 => {
+                    s.execute_headless(command, params).unwrap();
+                }
+                3 => {
+                    s.execute_in(gridcraft_engine::Target::Window(s.active_window().unwrap()), command, params).unwrap();
+                }
+                _ => {
+                    if action == "save" {
+                        s.autosave_document(uid).unwrap();
+                    } else if action == "close" {
+                        s.close_document(0);
+                    } else {
+                        s.receive_unknown_recovery_origin(uid).unwrap();
+                    }
+                }
+            }
+            let mut calls = 0;
+            assert!(
+                matches!(
+                    job.with_storage(|| {
+                        calls += 1;
+                        Ok::<_, ()>(())
+                    }),
+                    Err(RecoveryAttemptError::Stale | RecoveryAttemptError::Unavailable)
+                ),
+                "{route} {action}"
+            );
+            assert_eq!(calls, 0);
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn authorized_publication_finishes_before_each_public_lifecycle_route() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::{Duration, Instant},
+    };
+    let files = super::recovery_snapshots::RestoreFiles::new();
+    let wait = Duration::from_secs(10);
+    for route in 0..5 {
+        for action in ["save", "close", "transfer"] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let uid = s.doc().unwrap().uid;
+            let path = files.0.join(format!("recovery-race-{uid}.xlsx"));
+            s.execute("file.save", json!({"path":path})).unwrap();
+            let ticket = s.recovery_ticket(uid).unwrap();
+            let job = s.capture_recovery(ticket, "0123456789abcdef0123456789abcdef".parse().unwrap(), 1).unwrap();
+            let committed = Arc::new(AtomicBool::new(false));
+            let committed_writer = committed.clone();
+            let (entered, entry) = mpsc::channel();
+            let (release, resume) = mpsc::channel();
+            let (attempt, attempted) = mpsc::channel();
+            let (done, finished) = mpsc::channel();
+            let publish = std::thread::spawn(move || {
+                job.with_storage(|| {
+                    entered.send(()).unwrap();
+                    resume.recv_timeout(wait).unwrap();
+                    committed_writer.store(true, Ordering::SeqCst);
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+            });
+            entry.recv_timeout(wait).unwrap();
+            let lifecycle = std::thread::spawn(move || {
+                attempt.send(()).unwrap();
+                #[allow(clippy::disallowed_methods, reason = "this gate-order measurement test is native-only")]
+                let started = Instant::now();
+                let (command, params) = match action {
+                    "save" => ("file.save", json!({})),
+                    "close" => ("file.close", json!({"discard":true})),
+                    _ => ("edit.paste", json!({"text":"secret","at":"A1"})),
+                };
+                match route {
+                    0 => {
+                        s.execute(command, params).unwrap();
+                    }
+                    1 => {
+                        s.run(command, params).unwrap();
+                    }
+                    2 => {
+                        s.execute_headless(command, params).unwrap();
+                    }
+                    3 => {
+                        s.execute_in(gridcraft_engine::Target::Window(s.active_window().unwrap()), command, params).unwrap();
+                    }
+                    _ => {
+                        if action == "save" {
+                            s.autosave_document(uid).unwrap();
+                        } else if action == "close" {
+                            s.close_document(0);
+                        } else {
+                            s.receive_unknown_recovery_origin(uid).unwrap();
+                        }
+                    }
+                }
+                assert!(committed.load(Ordering::SeqCst));
+                done.send(started.elapsed()).unwrap();
+            });
+            attempted.recv_timeout(wait).unwrap();
+            assert!(matches!(finished.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout)));
+            release.send(()).unwrap();
+            let elapsed = finished.recv_timeout(wait).unwrap();
+            publish.join().unwrap();
+            lifecycle.join().unwrap();
+            eprintln!("P5B_FAKE_GATE_ORDER route={route} action={action} lifecycle_elapsed_us={}", elapsed.as_micros());
+        }
+    }
 }

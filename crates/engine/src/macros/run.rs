@@ -1118,6 +1118,11 @@ impl Saved {
     }
 
     fn restore(self, s: &mut Session, doc: u64) {
+        for d in &s.docs {
+            if !self.docs.iter().any(|(uid, _)| *uid == d.uid) {
+                s.recovery.retire(d.uid);
+            }
+        }
         s.docs.retain(|d| self.docs.iter().any(|(uid, _)| *uid == d.uid));
         if let Some(d) = s.docs.iter_mut().find(|d| d.uid == doc) {
             if let Some(saved) = self.saved {
@@ -2033,5 +2038,33 @@ mod final_e2_tests {
                 assert_eq!(&s.doc().unwrap().sheet_selections[2..], &[selected(row + 90), Selection::default()]);
             }
         }
+    }
+    #[test]
+    fn preview_document_removal_retires_recovery_gate() {
+        let mut s = Session::new();
+        s.new_workbook();
+        let uid = s.doc().unwrap().uid;
+        let saved = Saved::take(&mut s, uid);
+        s.new_workbook();
+        let temporary = s.doc().unwrap().uid;
+        // A capture cannot start during preview; simulate a preexisting authorized job for
+        // the temporary owner to exercise Saved::restore's actual removal boundary.
+        s.journal_paused = 0;
+        s.selection_cleanup_depth = 0;
+        let ticket = s.recovery_ticket(temporary).unwrap();
+        let job = s.capture_recovery(ticket, "0123456789abcdef0123456789abcdef".parse().unwrap(), 1).unwrap();
+        s.journal_paused = 1;
+        s.selection_cleanup_depth = 1;
+        saved.restore(&mut s, uid);
+        assert!(s.document_index(temporary).is_none());
+        let mut called = false;
+        assert!(
+            job.with_storage(|| {
+                called = true;
+                Ok::<_, ()>(())
+            })
+            .is_err()
+        );
+        assert!(!called);
     }
 }

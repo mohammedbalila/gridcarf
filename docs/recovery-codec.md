@@ -1,6 +1,6 @@
 # Recovery codec
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; native recovery remains inactive)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-09 · **Change:** minor (sealed recovery publication lifetime; native recovery remains inactive)
 
 The engine's recovery codec encodes and validates a supported, lossless subset of modeled
 workbook state plus preserved XLSX graphs. It is an internal foundation, not an active recovery
@@ -20,11 +20,13 @@ Windows runtime is **NOT_TESTED** and no Excel oracle has run.
 | `ValidatedRecovery` | Private owned state; recorded `id()`, `sequence()`, `captured_revision()`, consumed by `restore` |
 | `restore(ValidatedRecovery)` | `Result<DocState, RecoveryError>`; detached untrusted unsaved copy, no Session installation |
 | `RecoveryId`, `RecoveryProvenance` | IDs parse/serialize as 32 lowercase hexadecimal digits; recorded origin labels confer no authority; runtime origin uses the same enum and monotone `receive` lattice |
-| `RecoveryError` | `UnsupportedVersion`, `Malformed`, `TooLarge`, `UnsupportedRepresentation`, `Ineligible`, `Io` |
+| `RecoveryError` | `UnsupportedVersion`, `Malformed`, `TooLarge`, `UnsupportedRepresentation`, `Ineligible`, `Unavailable`, `Io` |
+| `RecoveryTicket`, `RecoveryJob`, `CaptureGuard` | Sealed weak lifecycle authority, frozen borrowed capture and inert revision receipt, created only through Session |
+| `RecoveryAttemptError<E>` | `Stale`, `Unavailable`, or the concrete operation error |
 
 Validation does not restore a Session or admit Calc dependencies, dynamic ranges, equations or
-UI projections. Live policy-aware capture/CaptureGuard ownership, storage and trust remain
-separate gates; the runtime origin rules below do not issue capture authority. Untrusted bytes labelled `Plain` never grant runtime Plain
+UI projections. Session-owned live capture and publication gates are described below; storage
+qualification and execution trust remain separate. Untrusted bytes labelled `Plain` never grant runtime Plain
 provenance; recorded Unknown/EncryptedOrigin and persisted encryption-origin facts refuse.
 There is no public arbitrary capture constructor, limits override or workbook/part extraction
 getter on the validated type. The separate restore boundary admits a complete detached document.
@@ -268,14 +270,67 @@ external re-entry is not claimed traceable, and no new platform clipboard owners
 Origin stays with the live document across undo/redo, failed groups, panic rollback, macro dry
 runs, save and Save As. Trust restoration during a macro preview does not restore origin.
 The private eligibility check refuses non-Plain origin and retained EncryptionRemoved facts.
-These tests establish entry/transfer facts and private eligibility, not zero serialization or sink
-calls through a public capture API. Sealed jobs/tickets, publication cancellation, lifecycle and
-raw mutable-hook invalidation, UI restore admission and native safe-root storage remain unfinished.
+Public Session capture now checks these facts before issuing storage authority or owning metadata.
+The entry tests instrument metadata capture and recovery projection serialization; refused encrypted/
+unknown entries execute neither, and the public host-operation closure is not called. These are
+engine seams, not a native filesystem/provider qualification. UI restore admission and native
+safe-root storage remain unfinished.
 Native activation is blocked pending ancestry/locality/root/initial-parent-flush guarantees;
 Windows runtime/final user-bundle and Excel qualification remain untested. No readiness estimate changes.
+
+## Sealed live capture and publication lifetime
+
+`Session::recovery_ticket(uid)` requires exactly one eligible live document at a complete command,
+group and macro boundary. Its non-Clone ticket holds a weak gate reference and private UID/epoch;
+it owns no workbook, history or clipboard payload. Runtime records are limited to 64 registered
+live UIDs. `Session::capture_recovery(ticket, id, sequence)` rechecks identity and eligibility,
+consumes the ticket, and returns a non-Clone job owning one workbook Arc and bounded metadata.
+It derives the captured revision and epoch itself. `CaptureGuard` is an inert scalar receipt,
+not a permit, and an older captured revision does not protect later edits.
+
+`job.capture()` returns a borrowed `RecoveryCapture` by value. Metadata strings, native path
+units, typed issues and complete selection memory use existing codec limits and fallible owned
+reservations; cumulative requested metadata storage is bounded by the existing manifest ceiling.
+The full legacy selection tail remains exact. A captured active-sheet scalar overrides only that
+top-level field in a recovery-only adapter around ordinary Workbook serde. Both manifest observation
+and writing use the same scalar; no workbook schema duplication, deep clone, temporary atomic
+mutation or live scalar resampling is needed. Existing literal wire contracts remain unchanged.
+
+`ticket.with_storage` guards lazy root/reservation operations; `job.with_storage` guards stage
+creation and final publication separately. The gate stays locked until each concrete operation
+returns. Callbacks must not reenter Session or recursively call either storage gate. Encoding and
+payload streaming run outside the lock. Save (after policy approval but before I/O or metadata
+mutation), last-window/document close, macro-preview removal, duplicate-UID adoption and worsened
+origin invalidate before changing lifecycle/content state. Session drop retires all gates. A
+commit already holding the gate finishes first; otherwise stale work cannot call its publication
+closure. Poisoned or overflowing gates permanently refuse recovery while ordinary editing remains
+available. No native sync latency or durability guarantee follows from the synthetic gate races.
+
+Ordinary edits, undo/redo, recalc, selection/history housekeeping, group work and window/view/query
+operations preserve a previously captured immutable Plain job. The progress control pauses a
+real encoded stream over 100 view/query/history iterations and later ordinary edits, then publishes
+and decodes the older captured revision. An already open group cannot issue a ticket or capture.
+Generic depth-zero `active_mut`/`doc_mut` invalidates before returning mutable state and joins
+Unknown; exported low-level helpers using those accessors outside registered commands can therefore
+conservatively disable recovery. Narrow selection-anchor and gesture-history APIs avoid exposing
+workbook mutation. Exceptional UI autofilter mutation and web save acknowledgement remain generic.
+Arbitrary trusted Rust host reassignment of public document fields is not automatically traced.
+
+A successful capture binds its inert RecoveryId to the live UID until final close, including across
+save invalidations. A different ID for that owner or a concurrent live collision is refused.
+`Session::add_recovery_copy` consumes validated semantic data through detached restore and generic
+Unknown-or-worse adoption, rejects an already live lineage, and retains historical context only as
+inert data. A decoded Plain label never grants Plain runtime origin. Restored copies remain
+untrusted, unsaved and Save As only; this API does not activate a UI restore coordinator.
+
+Native storage/provider activation is still blocked on safe-root ancestry, locality and initial
+parent-flush qualification. Windows execution, interactive UI, Excel oracle, native sync latency
+and release/performance/full-fuzz campaigns remain separate and untested here. Readiness estimates
+do not change.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Sealed weak tickets, frozen borrowed jobs, lifecycle gates and untrusted Session restore adoption; native/UI activation remains blocked |
 | 2026-11-08 | minor | Add typed sticky runtime origin, audited entries, bound transfers and conservative external ingress; capture jobs, native activation and external qualification remain outstanding |

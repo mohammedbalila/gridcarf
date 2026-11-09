@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-09 · **Change:** minor (sealed recovery publication lifetime; earlier: typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
 
 Runtime source origin is now a private sticky lattice independent of execution Trust: encrypted
 origin dominates Unknown, which dominates Plain. Audited new/sample/decoded file entries establish
@@ -132,10 +132,18 @@ to check our files, and Windows machines with the reported GPU drivers.
   it a CI number (1–2 h).
 - No `cargo xtask scorecard` or `bench` yet.
 
+### Recovery publication lifetime (2026-11-09)
+
+The engine now exposes sealed weak tickets and frozen borrowed jobs, cancels publication before
+save/close/origin changes, and adopts validated recovery copies as untrusted unsaved documents.
+Raw mutable host access conservatively joins Unknown. See the [capture contract](recovery-codec.md#sealed-live-capture-and-publication-lifetime).
+Native/UI activation, Windows execution and Excel qualification remain separate; readiness is unchanged.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Sealed recovery jobs and lifecycle gates; untrusted Session restore adoption; native/UI activation and external qualification remain separate |
 | 2026-11-08 | minor | Typed sticky source origin covers audited entries/transfers; conservative external paste is excluded, with capture/native activation still pending |
 | 2026-11-08 | minor | Bound detached recovery restore and retain untrusted unsaved state; activation, platform qualification and readiness remain separate |
 | 2026-11-07 | minor | Complete retention accounting; track repeated band-root/current-inventory work before large-workbook parity |

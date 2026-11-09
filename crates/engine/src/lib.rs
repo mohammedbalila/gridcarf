@@ -558,6 +558,7 @@ pub type TextWidth = Arc<dyn Fn(&str, &model::Font, bool) -> f32 + Send + Sync>;
 
 #[derive(Default)]
 pub struct Session {
+    recovery: recovery::RecoveryRuntime,
     // Execute owns restoration snapshots even after its command nesting depth falls to zero.
     selection_cleanup_depth: u32,
     docs: Vec<DocState>,
@@ -659,7 +660,15 @@ impl Session {
     pub fn document_index(&self, uid: u64) -> Option<usize> {
         self.docs.iter().position(|d| d.uid == uid)
     }
+    /// Generic host mutation invalidates recovery and joins Unknown before exposing payloads.
+    /// Registered command handlers use their audited ingress and lifecycle boundaries.
     pub fn active_mut(&mut self) -> Option<&mut DocState> {
+        if self.depth == 0 {
+            let uid = self.docs.get(self.active)?.uid;
+            self.invalidate_recovery(uid);
+            let d = self.docs.get_mut(self.active)?;
+            d.recovery_provenance = d.recovery_provenance.receive(recovery::RecoveryProvenance::Unknown);
+        }
         self.docs.get_mut(self.active)
     }
     pub fn doc(&self) -> Result<&DocState> {
@@ -667,6 +676,35 @@ impl Session {
     }
     pub fn doc_mut(&mut self) -> Result<&mut DocState> {
         self.active_mut().ok_or(EngineError::NoDocument)
+    }
+    /// Adjust only the selection anchor, without granting arbitrary document mutation.
+    pub fn set_selection_anchor(&mut self, anchor: CellRef) -> Result<()> {
+        if anchor.row >= gridcraft_core::MAX_ROWS || anchor.col >= gridcraft_core::MAX_COLS {
+            return Err(EngineError::Other("Invalid selection anchor.".into()));
+        }
+        self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)?.selection.anchor = anchor;
+        Ok(())
+    }
+    /// Merge the final two equally labelled gesture undo entries, preserving the earlier snapshot.
+    pub fn coalesce_last_undo_if_same_label(&mut self) -> Result<()> {
+        let d = self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)?;
+        let n = d.undo.len();
+        if n >= 2 && d.undo[n - 1].label == d.undo[n - 2].label {
+            d.undo.pop();
+        }
+        Ok(())
+    }
+    /// Retain the gesture's first undo step and discard only its later steps.
+    pub fn truncate_gesture_undo(&mut self, start: usize) -> Result<()> {
+        let end = start.checked_add(1).ok_or_else(|| EngineError::Other("Invalid gesture history boundary.".into()))?;
+        let d = self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)?;
+        if start > d.undo.len() {
+            return Err(EngineError::Other("Invalid gesture history boundary.".into()));
+        }
+        if d.undo.len() > end {
+            d.undo.truncate(end);
+        }
+        Ok(())
     }
     /// Stores a document's live view without activating any of its windows.
     pub fn store_document_view(&mut self, uid: u64, tops: &[(usize, CellRef)]) -> Result<()> {
@@ -749,16 +787,30 @@ impl Session {
     }
     // Only audited fresh local creation and positively decoded files establish initial origin.
     fn add_known_document(&mut self, mut d: DocState, origin: recovery::RecoveryProvenance) -> usize {
-        d.recovery_provenance = origin;
         let uid = d.uid;
+        if self.docs.iter().any(|existing| existing.uid == uid) {
+            self.recovery.disable(uid);
+            for existing in self.docs.iter_mut().filter(|existing| existing.uid == uid) {
+                existing.recovery_provenance = existing.recovery_provenance.receive(recovery::RecoveryProvenance::Unknown);
+            }
+            d.recovery_provenance = origin.receive(recovery::RecoveryProvenance::Unknown);
+        } else {
+            d.recovery_provenance = origin;
+        }
         self.docs.push(d);
         let w = self.push_window(uid);
         self.activate_window(w);
         self.docs.len() - 1
     }
     pub(crate) fn receive_recovery_origin(&mut self, uid: u64, source: recovery::RecoveryProvenance) -> Result<()> {
-        let d = self.docs.iter_mut().find(|d| d.uid == uid).ok_or(EngineError::NoDocument)?;
-        d.recovery_provenance = d.recovery_provenance.receive(source);
+        let d = self.docs.iter().find(|d| d.uid == uid).ok_or(EngineError::NoDocument)?;
+        let origin = d.recovery_provenance.receive(source);
+        if origin != d.recovery_provenance {
+            self.invalidate_recovery(uid);
+        }
+        for d in self.docs.iter_mut().filter(|d| d.uid == uid) {
+            d.recovery_provenance = d.recovery_provenance.receive(source);
+        }
         Ok(())
     }
     /// Marks unassociated external ingress; it cannot establish Plain source authority.
@@ -769,6 +821,12 @@ impl Session {
     pub fn close_document(&mut self, i: usize) {
         if i < self.docs.len() {
             let uid = self.docs[i].uid;
+            // A duplicate owner still holds the captured lineage even though its gate is disabled.
+            if self.docs.iter().enumerate().any(|(other, d)| other != i && d.uid == uid) {
+                self.recovery.disable(uid);
+            } else {
+                self.recovery.retire(uid);
+            }
             self.prepare_document_close(uid);
             let d = self.docs.remove(i);
             self.groups.retain(|g| g.doc != d.uid);
@@ -1131,7 +1189,7 @@ impl Session {
     /// [`Session::group_rollback`], undoable commands on that document add no undo steps of their
     /// own, and Undo and Redo are unavailable there.
     pub fn group_begin(&mut self, label: &str) -> Result<GroupToken> {
-        self.doc_mut()?.refresh_selection_memory()?;
+        self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)?.refresh_selection_memory()?;
         self.cleanup_selection_memories();
         let d = self.doc()?;
         let g = OpenGroup {
