@@ -171,6 +171,9 @@ impl<'a> ManifestRef<'a> {
         }
         let mut frames = 0usize;
         for preserved in workbook.preserved.iter().chain(workbook.sheets.iter().filter_map(|s| s.preserved.as_ref())) {
+            if preserved.native_analysis.is_some() {
+                return Err(RecoveryError::UnsupportedRepresentation("native_analysis_graph"));
+            }
             frames = frames.checked_add(frame_count(preserved)).ok_or(RecoveryError::TooLarge("parts"))?;
             if frames > limits.parts || u32::try_from(frames).is_err() {
                 return Err(RecoveryError::TooLarge("parts"));

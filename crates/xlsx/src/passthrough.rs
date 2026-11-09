@@ -12,9 +12,11 @@
 //!
 //! On write, kept parts get fresh part names where needed and new relationship ids; the `r:id`s in
 //! kept XML are rewritten to match. Kept content is conservative:
-//! - Anything whose relationship graph reaches a part GridCraft reads and rewrites (worksheets,
-//!   drawings, charts, tables, PivotTables, comments, slicers…) is not kept: it would point at
+//! - Generic pass-through drops any graph that reaches a part GridCraft reads and rewrites (worksheets,
+//!   drawings, charts, tables, PivotTables, comments, slicers…). Those links would point at
 //!   content that no longer exists in the same form.
+//! - The separate native analysis path admits a bounded, closed PivotTable and control graph
+//!   and checks its source, report and anchor geometry before rewriting its owners.
 //! - External relationship targets (the path of a linked workbook) are kept as text and never
 //!   opened, followed or refreshed. A relative path to a linked workbook is rewritten when the
 //!   workbook is saved into another folder ([`rebase_links`]), so it still names the same file.
@@ -41,12 +43,16 @@ use crate::read::Ctx;
 use crate::write::{NS_REL, Out, Rels, XML_DECL};
 use crate::xml::{self, esc_attr};
 
+mod native_analysis;
+mod native_analysis_read;
+mod native_styles;
 mod read;
 mod rebase;
 pub(crate) mod recovery;
 mod references;
 mod write;
 
+pub(crate) use native_analysis::{NativeWrite, first_drawing_id, import as import_native_analysis};
 pub use read::KeptReader;
 pub use rebase::{SheetKept, rebase_links};
 pub use recovery::{RecoveryPreservedError, validate_recovery_preserved};

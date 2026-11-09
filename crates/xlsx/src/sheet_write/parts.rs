@@ -175,12 +175,12 @@ pub(super) fn autofilter_xml(range: RangeRef, criteria: &[(u32, FilterCriterion)
             }
             FilterCriterion::FillColor(c) => {
                 let st = Style { fill: gridcraft_model::Fill::solid(*c), ..Default::default() };
-                let _ = write!(s, "<colorFilter dxfId=\"{}\"/>", dxf_id(&mut out.dxfs, &st));
+                let _ = write!(s, "<colorFilter dxfId=\"{}\"/>", out.dxf_id(&st));
             }
             FilterCriterion::FontColor(c) => {
                 let mut st = Style::default();
                 st.font.color = *c;
-                let _ = write!(s, "<colorFilter dxfId=\"{}\" cellColor=\"0\"/>", dxf_id(&mut out.dxfs, &st));
+                let _ = write!(s, "<colorFilter dxfId=\"{}\" cellColor=\"0\"/>", out.dxf_id(&st));
             }
             FilterCriterion::Icon { set, id } => {
                 let _ = write!(s, "<iconFilter iconSet=\"{}\"", esc_attr(set));

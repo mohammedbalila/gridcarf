@@ -499,7 +499,7 @@ fn write_chart_frame(s: &mut String, id: usize, rid: &str, transform: &str) {
 }
 
 /// The drawing part for a sheet's objects (relationship ids already assigned).
-pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
+pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], first_id: usize, native_anchors: &[String]) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">",
     );
@@ -510,12 +510,12 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
     let (groups, grouped) = chart_group::groups_for_write(sheet, charts);
     for (i, o) in objs.iter().enumerate() {
         if let Some(group) = groups.get(&i) {
-            chart_group::write_group(&mut s, sheet, group, objs);
+            chart_group::write_group(&mut s, sheet, group, objs, first_id);
         }
         if grouped.contains(&i) {
             continue;
         }
-        let id = i + 2;
+        let id = i + first_id;
         let close_tag;
         match o {
             Obj::Image(img, rid) => {
@@ -639,6 +639,9 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         }
         s.push_str("<xdr:clientData/>");
         s.push_str(close_tag);
+    }
+    for anchor in native_anchors {
+        s.push_str(anchor);
     }
     s.push_str("</xdr:wsDr>");
     s

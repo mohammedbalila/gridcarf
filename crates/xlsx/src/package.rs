@@ -64,6 +64,11 @@ impl<'a> Package<'a> {
         self.names.contains_key(&normalize(part))
     }
 
+    /// Whether the archive's visible names map to distinct normalized OPC part names.
+    pub(crate) fn unique_parts(&self) -> bool {
+        self.names.len() == self.zip.len()
+    }
+
     /// Reads a part's bytes; `Ok(None)` when it doesn't exist.
     pub fn read(&mut self, part: &str) -> Result<Option<Vec<u8>>, IoError> {
         self.read_limited(part, MAX_PART)

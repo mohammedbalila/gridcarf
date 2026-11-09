@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-07 · **Change:** minor (complete bounded conditional-format statistics and repaint reuse; earlier: imported native what-if definitions and static caches preserved; earlier: complete retained-history accounting; earlier: revision-scoped loss-aware saves; earlier: bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-09 · **Change:** minor (preserve bounded native PivotTable, slicer and timeline graphs on unrelated XLSX edits; earlier: complete bounded conditional-format statistics and repaint reuse; earlier: imported native what-if definitions and static caches preserved; earlier: complete retained-history accounting; earlier: revision-scoped loss-aware saves; earlier: bounded note-history sharing; earlier: legacy XLSX scalar evaluation and save preservation; earlier: bounded compatibility baseline; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -44,13 +44,18 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 25–40 h. [target-app-parity.md](target-app-parity.md#performance), [hardware-parity.md](hardware-parity.md)
 
 ### 3. Some unmodelled XLSX content is dropped on save (FF)
-- **Missing:** slicers and their caches, timelines, the data model, query tables attached to
+- **Missing:** general slicer and timeline support, the data model, query tables attached to
   tables, unmodelled `extLst` entries, chart details. Pass-through (#330) keeps custom XML,
   external links, connections, sheet query tables, printer settings, form and ActiveX controls,
   OLE objects and sheet backgrounds; never checked in Excel (repair prompts unknown).
 - **Evidence:** `crates/xlsx/src/passthrough.rs` (what is kept, and why the rest isn't).
 - **Protection added (S02):** known import and destination losses now require a revision-scoped decision before save, including headless exports. Unsupported inventoried content is labelled unknown; preservation itself is still incomplete.
-- **Impact:** open-edit-save still simplifies workbooks with slicers, timelines or Power Pivot.
+- **Native analysis:** unrelated XLSX edits preserve a validated group with one shared local
+  table cache, PivotTable filters and indexed styles, and built-in slicer and timeline controls.
+  The group requires unchanged source cells, report layout and control geometry. Unsupported
+  relationships, styles or drawing overlaps stay in the save-loss report. Pivot refresh and
+  editing native controls remain gaps.
+- **Impact:** workbooks outside this subset can still lose slicers, timelines or Power Pivot.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
 ### 4. Charts lose options on round trip; shallow chart model (F, FF)
@@ -206,6 +211,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Preserve bounded native PivotTable, slicer and timeline graphs across unrelated XLSX saves. |
 | 2026-11-07 | minor | Preserve native XLSX what-if definitions/caches and guard invalidating direct edits; live recalculation and Excel verification remain outstanding |
 | 2026-11-07 | minor | Record bounded note-history sharing repair and its remaining limits |
 | 2026-11-07 | minor | Bounded legacy XLSX calculation/save fix; external Excel and full legacy parity remain unverified |

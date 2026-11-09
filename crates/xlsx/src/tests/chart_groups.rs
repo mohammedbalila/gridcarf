@@ -126,3 +126,23 @@ fn chart_group_xlsx_save_handles_out_of_range_line_metadata() {
     let (reopened, _) = read_xlsx(&bytes).unwrap();
     assert_eq!(reopened.sheet(0).unwrap().chart_groups.len(), 1);
 }
+
+#[test]
+fn chart_group_ids_do_not_collide_with_retained_drawing_ids() {
+    let (wb, _) = read_xlsx(&fixture("")).unwrap();
+    let sheet = wb.sheet(0).unwrap();
+    let objects = sheet.charts.iter().enumerate().map(|(i, chart)| crate::drawing::Obj::Chart(chart, format!("rId{}", i + 1))).collect::<Vec<_>>();
+    let anchors = [2, 4].map(|id| {
+        format!(
+            r#"<xdr:twoCellAnchor xmlns:xdr="{ANCHOR_NS}"><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{id}" name="Control {id}"/></xdr:nvSpPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>"#
+        )
+    });
+    let first_id = crate::passthrough::first_drawing_id(&anchors, objects.len() + sheet.chart_groups.len()).unwrap();
+    let drawing = crate::drawing::write_drawing(sheet, &wb.theme, &objects, first_id, &anchors);
+    let drawing = parse(drawing.as_bytes()).unwrap();
+    let group = drawing.child("twoCellAnchor").unwrap().child("grpSp").unwrap();
+    assert_eq!(group.path(&["nvGrpSpPr", "cNvPr"]).unwrap().attr("id"), Some("7"));
+    let member_ids =
+        group.kids("graphicFrame").map(|frame| frame.path(&["nvGraphicFramePr", "cNvPr"]).unwrap().attr("id").unwrap()).collect::<Vec<_>>();
+    assert_eq!(member_ids, ["5", "6"]);
+}

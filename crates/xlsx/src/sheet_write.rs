@@ -12,7 +12,7 @@ use gridcraft_model::{
 use crate::IoError;
 use crate::drawing::{Obj, image_content_type, image_ext};
 use crate::fmla::text_to_file;
-use crate::styles::{color_attrs, dxf_id};
+use crate::styles::color_attrs;
 use crate::tables::{paper_id, px_to_col_width, px_to_pt};
 use crate::write::{
     CT_CHART, CT_COMMENTS, CT_DRAWING, CT_TABLE, CT_THREADED_COMMENTS, NS_MAIN, NS_REL, NS_THREADED, Out, REL_THREADED_COMMENT, Rels, XML_DECL,
@@ -466,7 +466,7 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> R
     let prio = write_sheet_rules(&mut s, sheet, &mut rels, out);
     let kept = write_sheet_printing(&mut s, sheet, &mut rels, out);
 
-    write_sheet_drawing(&mut s, wb, si, sheet, &mut rels, out);
+    write_sheet_drawing(&mut s, wb, si, sheet, &mut rels, out)?;
     write_sheet_notes(&mut s, sheet, si, &kept, &mut rels, out)?;
     // Tables.
     if !tables.is_empty() {
@@ -484,7 +484,8 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> R
         }
         let _ = write!(s, "<tableParts count=\"{}\">{parts}</tableParts>", tables.len());
     }
-    write_sheet_extensions(&mut s, sheet, &prio);
+    let native_extensions = if let Some(native) = &out.native_analysis { native.sheet_extensions(sheet.file_id, &mut rels)? } else { String::new() };
+    write_sheet_extensions(&mut s, sheet, &prio, &native_extensions);
     s.push_str("</worksheet>");
     Ok((s, rels))
 }
@@ -499,7 +500,7 @@ struct CellWriteInput<'a> {
     what_if: Option<&'a gridcraft_model::WhatIfTable>,
 }
 
-fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
+fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32], native: &str) {
     // Excel 2010 extensions: solid data bars, then sparklines.
     let solid_bars: Vec<(&CondFormat, u32)> = sheet
         .cond_formats
@@ -508,7 +509,8 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
         .filter(|(_, cf)| !cf.ranges.is_empty() && matches!(cf.rule, CfRule::DataBar { gradient: false, .. }))
         .map(|(i, cf)| (cf, prio.get(i).copied().unwrap_or(1)))
         .collect();
-    if !solid_bars.is_empty() || !sheet.sparklines.is_empty() {
+    let has_extensions = !solid_bars.is_empty() || !sheet.sparklines.is_empty() || !native.is_empty();
+    if has_extensions {
         s.push_str("<extLst>");
     }
     if !solid_bars.is_empty() {
@@ -546,7 +548,8 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
         }
         s.push_str("</x14:sparklineGroups></ext>");
     }
-    if !solid_bars.is_empty() || !sheet.sparklines.is_empty() {
+    if has_extensions {
+        s.push_str(native);
         s.push_str("</extLst>");
     }
 }
@@ -607,9 +610,10 @@ fn write_sheet_notes(
     Ok(())
 }
 
-fn write_sheet_drawing(s: &mut String, wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut Rels, out: &mut Out) {
+fn write_sheet_drawing(s: &mut String, wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut Rels, out: &mut Out) -> Result<(), IoError> {
     // Drawing: pictures, charts, shapes.
-    if !sheet.images.is_empty() || !sheet.charts.is_empty() || !sheet.shapes.is_empty() {
+    let has_native = out.native_analysis.as_ref().is_some_and(|native| !native.anchors(sheet.file_id).is_empty());
+    if !sheet.images.is_empty() || !sheet.charts.is_empty() || !sheet.shapes.is_empty() || has_native {
         out.drawings += 1;
         let dn = out.drawings;
         let mut drels = Rels::default();
@@ -648,13 +652,18 @@ fn write_sheet_drawing(s: &mut String, wb: &Workbook, si: usize, sheet: &Sheet, 
         for sh in &sheet.shapes {
             objs.push(Obj::Shape(sh));
         }
-        out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), crate::drawing::write_drawing(sheet, &wb.theme, &objs).into_bytes());
+        let anchors = out.native_analysis.as_ref().map_or(&[][..], |native| native.anchors(sheet.file_id));
+        let generated_ids = objs.len().saturating_add(sheet.chart_groups.len());
+        let first_id = crate::passthrough::first_drawing_id(anchors, generated_ids)?;
+        let drawing = crate::drawing::write_drawing(sheet, &wb.theme, &objs, first_id, anchors);
+        out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), drawing.into_bytes());
         if !drels.is_empty() {
             out.part(&format!("xl/drawings/_rels/drawing{dn}.xml.rels"), None, drels.xml().into_bytes());
         }
         let rid = rels.add("drawing", &format!("../drawings/drawing{dn}.xml"));
         let _ = write!(s, "<drawing r:id=\"{rid}\"/>");
     }
+    Ok(())
 }
 
 fn write_sheet_printing<'a>(s: &mut String, sheet: &'a Sheet, rels: &mut Rels, out: &mut Out) -> crate::passthrough::SheetKept<'a> {

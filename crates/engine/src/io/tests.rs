@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+fn imported_native_control_owners_keep_their_source_row_height() {
+    use gridcraft_model::{Preserved, PreservedAnalysisSheet, PreservedNativeAnalysis, Sheet, StyleId};
+    use std::sync::Arc;
+
+    let mut wb = Workbook::new();
+    wb.sheets.push(Arc::new(Sheet::new("Ordinary")));
+    let style = wb.styles.derive(StyleId::DEFAULT, |style| style.font.size = 18.0);
+    for (index, sheet) in wb.sheets.iter_mut().enumerate() {
+        let sheet = Arc::make_mut(sheet);
+        sheet.file_id = index as u32 + 1;
+        let at = CellRef::new(0, 0);
+        sheet.set_value(at, gridcraft_core::Value::text("Caption"));
+        sheet.set_style(at, style);
+        sheet.rows.entry(0).or_default().size = Some(23.25);
+    }
+    let graph = PreservedNativeAnalysis {
+        sheets: vec![PreservedAnalysisSheet { sheet_id: 1, anchors: vec!["<xdr:twoCellAnchor/>".into()], ..Default::default() }],
+        ..Default::default()
+    };
+    wb.preserved = Some(Arc::new(Preserved { native_analysis: Some(Arc::new(graph)), ..Default::default() }));
+    fit_imported_rows(&mut wb);
+    assert_eq!(wb.sheet(0).unwrap().row_height(0), 23.25);
+    assert!(wb.sheet(1).unwrap().row_height(0) > 23.25);
+}
+
 fn book(rtl: bool, cells: &[(&str, gridcraft_core::Value, gridcraft_model::HAlign)]) -> Workbook {
     let mut wb = Workbook::new();
     let ids: Vec<_> = cells.iter().map(|(_, _, h)| wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |st| st.align.h = *h)).collect();

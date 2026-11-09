@@ -2,7 +2,7 @@ use super::*;
 
 /// A part's relationships with full type URIs. `Ok(vec![])` when it has none; an error when the
 /// rels part is damaged or too large (its part then can't be kept faithfully).
-fn raw_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Vec<PreservedRel>, String> {
+pub(super) fn raw_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Vec<PreservedRel>, String> {
     let name = rels_part_name(part);
     let bytes = match cx.pkg.read_limited(&name, MAX_META) {
         Ok(Some(b)) => b,
@@ -31,14 +31,39 @@ fn raw_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Vec<PreservedRel>, String> {
 /// Inventory owner relationships that neither the model reader nor pass-through handles.
 /// This is bounded evidence about these owners, not a claim to detect arbitrary unknown XML.
 fn inventory(cx: &mut Ctx<'_>, owner: &str, rels: &[PreservedRel], handled: &[&str]) {
+    use gridcraft_model::{CompatibilityEffect, CompatibilityIssue, Editability};
+
     for r in rels.iter().filter(|r| !is_kind(r, handled)) {
-        cx.report.issue(gridcraft_model::CompatibilityIssue::new(
-            kind(&r.rel_type),
-            Some(format!("{owner}: {}", r.target)),
-            gridcraft_model::CompatibilityEffect::Unknown,
-            gridcraft_model::Editability::Unknown,
-            "This workbook relationship cannot be preserved reliably by this version of GridCraft.",
-        ));
+        // Require the full URI and an existing internal target before reporting a known loss.
+        let native_feature = match r.rel_type.as_str() {
+            "http://schemas.microsoft.com/office/2007/relationships/slicer" => Some("native slicer"),
+            "http://schemas.microsoft.com/office/2007/relationships/slicerCache" => Some("native slicer cache"),
+            "http://schemas.microsoft.com/office/2011/relationships/timeline" => Some("native timeline"),
+            "http://schemas.microsoft.com/office/2011/relationships/timelineCache" => Some("native timeline cache"),
+            _ => None,
+        };
+        let location = Some(format!("{owner}: {}", r.target));
+        let issue = if let Some(feature) = native_feature
+            && !r.external
+            && cx.pkg.has(&r.target)
+        {
+            CompatibilityIssue::new(
+                feature,
+                location,
+                CompatibilityEffect::Omitted,
+                Editability::Unavailable,
+                format!("The {feature} is omitted on save by this version of GridCraft."),
+            )
+        } else {
+            CompatibilityIssue::new(
+                kind(&r.rel_type),
+                location,
+                CompatibilityEffect::Unknown,
+                Editability::Unknown,
+                "This workbook relationship cannot be preserved reliably by this version of GridCraft.",
+            )
+        };
+        cx.report.issue(issue);
     }
 }
 
@@ -103,7 +128,11 @@ impl KeptReader {
         k
     }
 
-    fn content_type(&self, part: &str) -> Option<String> {
+    pub(super) fn remaining_budget(&self) -> usize {
+        if self.on { self.budget } else { 0 }
+    }
+
+    pub(super) fn content_type(&self, part: &str) -> Option<String> {
         let key = normalize(part);
         if let Some(t) = self.overrides.get(&key) {
             return Some(t.clone());
@@ -636,7 +665,7 @@ fn push_fragment(out: &mut SheetScan, frag: &str, local: &[u8], decls: &[(String
 }
 
 /// Adds the root's namespace declarations a fragment doesn't declare itself.
-fn with_decls(frag: &str, decls: &[(String, String)]) -> String {
+pub(super) fn with_decls(frag: &str, decls: &[(String, String)]) -> String {
     let Some(name_end) = frag.char_indices().skip(1).find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '>').map(|(i, _)| i) else {
         return frag.to_string();
     };

@@ -77,7 +77,7 @@ fields!(PreservedRel; C[]; I[]; D[id, rel_type, target, external]);
 fields!(PreservedPart; C[]; I[]; D[name, content_type, data, rels]);
 fields!(PreservedXml; C[]; I[]; D[slot, xml]);
 fields!(PreservedSheet; C[]; I[]; D[name, visibility, rel_id, before, sheet_id]);
-fields!(Preserved; C[]; I[]; D[package_rels, rels, parts, elements, vml, sheets]);
+fields!(Preserved; C[]; I[]; D[package_rels, rels, parts, elements, vml, sheets, native_analysis]);
 fields!(Array; C[rows, cols, data]; I[]; D[]);
 fields!(CellRef; C[row, col]; I[]; D[]);
 fields!(RangeRef; C[start, end]; I[]; D[]);

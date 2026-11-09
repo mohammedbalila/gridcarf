@@ -230,11 +230,17 @@ pub struct Out {
     pub cell_pictures: crate::richdata::PicturesOut,
     /// Kept (pass-through) parts written so far.
     pub kept: crate::passthrough::KeptOut,
+    pub(crate) native_analysis: Option<crate::passthrough::NativeWrite>,
     /// The code of the Python cells written so far, in order: script `i` of the Python part.
     pub python_scripts: Vec<String>,
 }
 
 impl Out {
+    pub(crate) fn dxf_id(&mut self, style: &Style) -> u32 {
+        let offset = self.native_analysis.as_ref().map_or(0, |native| native.styles.dxf_count());
+        offset + crate::styles::dxf_id(&mut self.dxfs, style)
+    }
+
     pub fn part(&mut self, name: &str, content_type: Option<&str>, data: Vec<u8>) {
         if let Some(ct) = content_type {
             self.overrides.push((format!("/{name}"), ct.to_string()));
@@ -369,6 +375,7 @@ pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>) 
         needs_calc: false,
         cell_pictures: Default::default(),
         kept: Default::default(),
+        native_analysis: crate::passthrough::NativeWrite::prepare(wb)?,
         python_scripts: vec![],
     };
     out.kept.reserve_vml_blocks(wb);
@@ -444,17 +451,11 @@ pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>) 
         w.push_str(" fullCalcOnLoad=\"1\"");
     }
     w.push_str("/>");
-    w.push_str(&pivots.workbook_xml(&mut wb_rels));
-    let exts = crate::passthrough::workbook_elements(wb, "ext");
-    if !exts.is_empty() {
-        let _ = write!(w, "<extLst>{exts}</extLst>");
-    }
+    write_workbook_pivot_mount(&mut w, wb, &mut wb_rels, &pivots, out.native_analysis.as_ref())?;
     w.push_str("</workbook>");
 
     // Workbook-level parts.
-    let (styles, fmt_ids) = crate::styles::write_styles(wb, &out.dxfs, &pivots.number_formats(wb));
-    pivots.finish(wb, &mut out, &|code: &str| crate::tables::builtin_id(code).or_else(|| fmt_ids.get(code).copied()));
-    out.part("xl/styles.xml", Some("application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"), styles.into_bytes());
+    write_workbook_styles(wb, &mut out, pivots)?;
     wb_rels.add("styles", "styles.xml");
     if !out.python_scripts.is_empty() {
         use crate::python_part as py;
@@ -576,6 +577,45 @@ pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>) 
     zip.finish()
 }
 
+fn write_workbook_pivot_mount(
+    xml: &mut String,
+    wb: &Workbook,
+    rels: &mut Rels,
+    pivots: &crate::pivot::PivotWriter,
+    native: Option<&crate::passthrough::NativeWrite>,
+) -> Result<(), IoError> {
+    let mut exts = crate::passthrough::workbook_elements(wb, "ext");
+    if let Some(native) = native {
+        let (caches, extensions) = native.workbook_mount(rels)?;
+        xml.push_str(&caches);
+        exts.push_str(&extensions);
+    } else {
+        xml.push_str(&pivots.workbook_xml(rels));
+    }
+    if !exts.is_empty() {
+        let _ = write!(xml, "<extLst>{exts}</extLst>");
+    }
+    Ok(())
+}
+
+fn write_workbook_styles(wb: &Workbook, out: &mut Out, pivots: crate::pivot::PivotWriter) -> Result<(), IoError> {
+    let mut formats = pivots.number_formats(wb);
+    let native = out.native_analysis.take();
+    if let Some(native) = &native {
+        formats.extend(native.styles.format_codes());
+    }
+    let (mut styles, fmt_ids) = crate::styles::write_styles(wb, &out.dxfs, &formats);
+    let format_id = |code: &str| crate::tables::builtin_id(code).or_else(|| fmt_ids.get(code).copied());
+    if let Some(native) = native {
+        styles = native.styles.merge(styles)?;
+        native.emit(out, &format_id)?;
+    } else {
+        pivots.finish(wb, out, &format_id);
+    }
+    out.part("xl/styles.xml", Some("application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"), styles.into_bytes());
+    Ok(())
+}
+
 fn write_sheets(
     wb: &Workbook,
     out: &mut Out,
@@ -583,6 +623,9 @@ fn write_sheets(
     wb_rels: &mut Rels,
 ) -> Result<(String, crate::passthrough::WorkbookKept, crate::pivot::PivotWriter), IoError> {
     // Kept content first: the chart sheets among the worksheets need their relationship ids.
+    if let Some(native) = &out.native_analysis {
+        native.reserve(&mut out.kept)?;
+    }
     let kept = crate::passthrough::write_workbook(wb, wb_rels, out);
     let mut pivots = crate::pivot::PivotWriter::default();
     let mut sheets_xml = String::new();
@@ -591,7 +634,9 @@ fn write_sheets(
     for (i, sheet) in wb.sheets.iter().enumerate() {
         sheets_xml.push_str(&kept.sheet_entries(i, false, &mut ids));
         let (xml, mut rels) = crate::sheet_write::write_sheet(wb, i, i == active, out)?;
-        pivots.add_sheet(wb, i, out, &mut rels);
+        if out.native_analysis.is_none() {
+            pivots.add_sheet(wb, i, out, &mut rels);
+        }
         let name = format!("xl/worksheets/sheet{}.xml", i + 1);
         out.part(&name, Some(CT_WORKSHEET), xml.into_bytes());
         if !rels.is_empty() {

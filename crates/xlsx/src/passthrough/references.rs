@@ -140,6 +140,19 @@ pub fn prepare_preserved_edit(
         return Ok(None);
     }
     let address_change = !edits.is_empty() || metadata_changed(before, candidate);
+    if let Some(native) = before.preserved.as_deref().and_then(|owner| owner.native_analysis.as_ref()) {
+        let same_graph =
+            candidate.preserved.as_deref().and_then(|owner| owner.native_analysis.as_ref()).is_some_and(|kept| Arc::ptr_eq(native, kept));
+        let control_geometry_changed = before.sheets.iter().zip(&candidate.sheets).any(|(prior, after)| {
+            !Arc::ptr_eq(prior, after)
+                && native.sheets.iter().any(|owner| owner.sheet_id == prior.file_id && !owner.anchors.is_empty())
+                && metrics_changed(prior, after)
+        });
+        if !same_graph || address_change || control_geometry_changed {
+            return Err("Preserved native PivotTables, slicers or timelines cannot safely follow this structural or geometry edit.".into());
+        }
+        super::native_analysis::check_cell_edit(before, candidate, pending_auto_height)?;
+    }
     let changes = Changes {
         before,
         candidate,

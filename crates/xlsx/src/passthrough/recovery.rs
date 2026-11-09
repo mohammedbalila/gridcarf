@@ -427,6 +427,9 @@ pub(crate) mod xml;
 /// This checks the supported bounded XML representation and writer-sensitive references,
 /// slots, VML and chartsheets; it does not claim full OOXML/XSD or modeled-feature validation.
 pub fn validate_recovery_preserved(wb: &Workbook) -> Result<(), RecoveryPreservedError> {
+    if wb.preserved.iter().chain(wb.sheets.iter().filter_map(|sheet| sheet.preserved.as_ref())).any(|owner| owner.native_analysis.is_some()) {
+        return Err(Error::UnsupportedNative);
+    }
     preflight(wb, LIMITS)?;
     chart_entries(wb)?;
     if let Some(p) = wb.preserved.as_deref() {

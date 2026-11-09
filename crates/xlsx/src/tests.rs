@@ -20,6 +20,7 @@ mod literal_category_roundtrip;
 mod locale_numfmt;
 mod malformed;
 mod multilevel_category_roundtrip;
+mod native_analysis;
 mod note_box;
 mod ods_tests;
 mod page_order;

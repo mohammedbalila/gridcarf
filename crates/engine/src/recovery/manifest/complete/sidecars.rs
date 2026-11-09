@@ -43,7 +43,7 @@ fn preserved(value: Option<PreservedData>, plan: &frame::FramePlan<'_>, stats: &
         });
     }
     let vml = value.vml.map(|p| part(p, plan, stats)).transpose()?;
-    Ok(Some(Arc::new(Preserved { package_rels, rels, parts, elements, vml, sheets })))
+    Ok(Some(Arc::new(Preserved { package_rels, rels, parts, elements, vml, sheets, native_analysis: None })))
 }
 pub(super) fn check(workbook: &Workbook, sidecars: &Sidecars, limits: &RecoveryLimits) -> Result<(), RecoveryError> {
     if sidecars.sheets.len() != workbook.sheets.len() || sidecars.sheets.iter().enumerate().any(|(i, s)| s.ordinal as usize != i) {

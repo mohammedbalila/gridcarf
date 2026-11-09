@@ -60,6 +60,49 @@ pub struct PreservedSheet {
     pub sheet_id: u32,
 }
 
+/// Mount points in a regenerated workbook or worksheet for a retained native analysis graph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreservedAnalysisOwner {
+    pub rels: Vec<PreservedRel>,
+    pub elements: Vec<PreservedXml>,
+}
+
+/// The original worksheet identity and drawing anchors of its analysis controls.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreservedAnalysisSheet {
+    pub sheet_id: u32,
+    pub owner: PreservedAnalysisOwner,
+    pub anchors: Vec<String>,
+}
+
+/// A closed group of native PivotTables, their caches and connected controls. The XLSX codec
+/// admits and writes the graph together because its IDs and indexed fields are interdependent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreservedNativeAnalysis {
+    /// Guard for model state that can invalidate source references, report layout or geometry.
+    pub signature: [u8; 32],
+    /// Source style definitions for validating and remapping references.
+    pub styles: Arc<[u8]>,
+    pub parts: Vec<PreservedPart>,
+    pub workbook: PreservedAnalysisOwner,
+    pub sheets: Vec<PreservedAnalysisSheet>,
+}
+
+impl PreservedNativeAnalysis {
+    pub fn byte_len(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|part| part.data.len())
+            .chain(self.workbook.elements.iter().map(|element| element.xml.len()))
+            .chain(
+                self.sheets
+                    .iter()
+                    .flat_map(|sheet| sheet.anchors.iter().map(String::len).chain(sheet.owner.elements.iter().map(|element| element.xml.len()))),
+            )
+            .fold(self.styles.len(), usize::saturating_add)
+    }
+}
+
 /// Unmodelled content kept for one owner (the workbook, which also holds package-root content,
 /// or one sheet).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -77,6 +120,8 @@ pub struct Preserved {
     pub vml: Option<PreservedPart>,
     /// Chart sheets, in file order (workbook owner only).
     pub sheets: Vec<PreservedSheet>,
+    /// One validated native analysis graph (workbook owner only).
+    pub native_analysis: Option<Arc<PreservedNativeAnalysis>>,
 }
 
 impl Preserved {
@@ -87,9 +132,11 @@ impl Preserved {
             && self.elements.is_empty()
             && self.vml.is_none()
             && self.sheets.is_empty()
+            && self.native_analysis.is_none()
     }
     /// Total bytes held.
     pub fn byte_len(&self) -> usize {
-        self.parts.iter().chain(self.vml.iter()).fold(0usize, |n, p| n.saturating_add(p.data.len()))
+        let native = self.native_analysis.as_deref().map_or(0, PreservedNativeAnalysis::byte_len);
+        self.parts.iter().chain(self.vml.iter()).fold(native, |n, p| n.saturating_add(p.data.len()))
     }
 }

@@ -109,6 +109,16 @@ pub fn open_bytes_with_report(name: &str, bytes: &[u8], password: Option<&str>, 
 fn fit_imported_rows(wb: &mut Workbook) {
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheet(si) else { continue };
+        // Native drawing anchors are kept in their source cell geometry. The local
+        // font-metrics estimate can move them even when the user makes no edits.
+        if wb
+            .preserved
+            .as_deref()
+            .and_then(|owner| owner.native_analysis.as_ref())
+            .is_some_and(|graph| graph.sheets.iter().any(|sheet| sheet.sheet_id == sh.file_id && !sheet.anchors.is_empty()))
+        {
+            continue;
+        }
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
         rows.sort_unstable();
         rows.dedup();

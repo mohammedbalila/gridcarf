@@ -226,11 +226,11 @@ pub(super) fn groups_for_write<'a>(
     (groups, grouped)
 }
 
-pub(super) fn write_group(s: &mut String, sheet: &Sheet, group: &GroupOut<'_>, objs: &[Obj<'_>]) {
+pub(super) fn write_group(s: &mut String, sheet: &Sheet, group: &GroupOut<'_>, objs: &[Obj<'_>], first_id: usize) {
     let (open, close) = anchor_open(sheet, &group.anchor);
     s.push_str(&open);
     let emu = |v: f64| (v * EMU_PER_PX).round() as i64;
-    let id = objs.len() + group.ordinal + 2;
+    let id = objs.len() + group.ordinal + first_id;
     let x = emu(group.rect.x);
     let y = emu(group.rect.y);
     let w = emu(group.rect.w).max(1);
@@ -250,7 +250,7 @@ pub(super) fn write_group(s: &mut String, sheet: &Sheet, group: &GroupOut<'_>, o
             emu(w).max(1),
             emu(h).max(1),
         );
-        write_chart_frame(s, member.index + 2, rid, &transform);
+        write_chart_frame(s, member.index + first_id, rid, &transform);
     }
     s.push_str("</xdr:grpSp><xdr:clientData/>");
     s.push_str(close);

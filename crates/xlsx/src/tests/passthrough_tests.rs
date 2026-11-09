@@ -222,6 +222,85 @@ fn unmodelled_parts_survive_a_round_trip() {
     assert_round_trip_kept_content(&wb, &out);
 }
 
+#[test]
+fn native_slicer_and_timeline_relationships_report_known_omissions() {
+    use gridcraft_core::{CellRef, Value};
+    use gridcraft_model::{CompatibilityEffect, Editability};
+
+    let workbook = format!(
+        r#"<workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets><extLst><ext uri="urn:example:extension"/></extLst></workbook>"#
+    );
+    let sheet = format!(r#"<worksheet xmlns="{NS_MAIN}"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#);
+    let workbook_rels = rels(&[
+        ("rId1", "worksheet", "worksheets/sheet1.xml"),
+        ("rId2", "http://schemas.microsoft.com/office/2007/relationships/slicerCache", "slicerCaches/slicerCache1.xml"),
+        ("rId3", "http://schemas.microsoft.com/office/2011/relationships/timelineCache", "timelineCaches/timelineCache1.xml"),
+    ]);
+    let sheet_rels = rels(&[
+        ("rId1", "http://schemas.microsoft.com/office/2007/relationships/slicer", "../slicers/slicer1.xml"),
+        ("rId2", "http://schemas.microsoft.com/office/2011/relationships/timeline", "../timelines/timeline1.xml"),
+        ("rId3", "https://example.org/relationships/slicer", "../lookalike.xml"),
+        ("rId4", "http://schemas.microsoft.com/office/2011/relationships/timeline", "https://example.org/timeline.xml"),
+        ("rId5", "http://schemas.microsoft.com/office/2007/relationships/slicer", "../slicers/missing.xml"),
+    ]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", super::CT.as_bytes()),
+        ("_rels/.rels", super::ROOT_RELS.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/slicers/slicer1.xml", br#"<slicers xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"/>"#),
+        ("xl/slicerCaches/slicerCache1.xml", br#"<slicerCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"/>"#),
+        ("xl/timelines/timeline1.xml", br#"<timelines xmlns="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"/>"#),
+        (
+            "xl/timelineCaches/timelineCache1.xml",
+            br#"<timelineCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"/>"#,
+        ),
+        ("xl/lookalike.xml", br#"<slicers xmlns="urn:example:vendor"/>"#),
+    ]);
+    let (wb, report) = read_xlsx(&bytes).unwrap();
+    let value = |wb: &gridcraft_model::Workbook| wb.sheet(0).unwrap().value(CellRef::new(0, 0));
+    assert_eq!(value(&wb), Value::Number(42.0));
+    let omitted = [
+        ("native slicer cache", "xl/workbook.xml", "xl/slicerCaches/slicerCache1.xml"),
+        ("native timeline cache", "xl/workbook.xml", "xl/timelineCaches/timelineCache1.xml"),
+        ("native slicer", "xl/worksheets/sheet1.xml", "xl/slicers/slicer1.xml"),
+        ("native timeline", "xl/worksheets/sheet1.xml", "xl/timelines/timeline1.xml"),
+    ];
+    for (feature, owner, target) in omitted {
+        let location = format!("{owner}: {target}");
+        let issue = report.issues.iter().find(|i| i.location.as_deref() == Some(location.as_str())).unwrap();
+        assert_eq!(issue.code, "feature.omitted", "{issue:?}");
+        assert_eq!(issue.feature, feature);
+        assert_eq!(issue.effect, CompatibilityEffect::Omitted);
+        assert_eq!(issue.editability, Editability::Unavailable);
+        assert!(issue.description.contains(feature) && issue.description.contains("omitted on save"), "{issue:?}");
+    }
+    for (owner, target) in [
+        ("xl/worksheets/sheet1.xml", "xl/lookalike.xml"),
+        ("xl/worksheets/sheet1.xml", "https://example.org/timeline.xml"),
+        ("xl/worksheets/sheet1.xml", "xl/slicers/missing.xml"),
+        ("xl/workbook.xml", "urn:example:extension"),
+    ] {
+        let location = format!("{owner}: {target}");
+        let issue = report.issues.iter().find(|i| i.location.as_deref() == Some(location.as_str())).unwrap();
+        assert_eq!(issue.code, "package.unknown", "{issue:?}");
+        assert_eq!(issue.effect, CompatibilityEffect::Unknown);
+        assert_eq!(issue.editability, Editability::Unknown);
+    }
+
+    let saved = write_xlsx(&wb).unwrap();
+    let package = Unpacked::new(&saved);
+    package.assert_valid();
+    for (_, _, target) in omitted {
+        assert!(!package.parts.contains_key(target), "{target} unexpectedly survived save");
+    }
+    let (reopened, report) = read_xlsx(&saved).unwrap();
+    assert_eq!(value(&reopened), Value::Number(42.0));
+    assert!(!report.issues.iter().any(|i| i.effect == CompatibilityEffect::Omitted), "{:?}", report.issues);
+}
+
 fn assert_kept_workbook_parts(u: &Unpacked) {
     // Every kept part is in the output byte for byte.
     for d in [

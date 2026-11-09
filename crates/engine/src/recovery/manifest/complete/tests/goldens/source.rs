@@ -688,6 +688,7 @@ pub(super) fn owners() -> Workbook {
         }],
         vml: None,
         sheets: vec![PreservedSheet { name: "Chart".into(), visibility: Visibility::Hidden, rel_id: "chart".into(), before: 1, sheet_id: 2 }],
+        native_analysis: None,
     }));
     let s = w.sheet_mut(0).unwrap();
     s.file_id = 1;

@@ -26,6 +26,16 @@ const EMPTY_WORKBOOK_SIDECAR: &str = r#"{"source_dir":null,"source_path":null,"m
 const EMPTY_SHEET_SIDECAR: &str = r#"{"ordinal":0,"file_id":0,"spill":{},"spill_ranges":{},"preserved":null}"#;
 
 #[test]
+fn projection_refuses_native_analysis_instead_of_dropping_it() {
+    let mut workbook = Workbook::new();
+    workbook.preserved = Some(Arc::new(Preserved { native_analysis: Some(Arc::default()), ..Default::default() }));
+    assert!(matches!(
+        ManifestRef::new(&workbook, &metadata(), &RecoveryLimits::default()),
+        Err(RecoveryError::UnsupportedRepresentation("native_analysis_graph"))
+    ));
+}
+
+#[test]
 fn projection_fences_binary_before_allocating_groups_or_serializing() {
     let mut workbook = Workbook::new();
     workbook.vba_project = Some(Arc::new(vec![1; 4]));

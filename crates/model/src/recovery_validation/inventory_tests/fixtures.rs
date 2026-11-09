@@ -130,6 +130,7 @@ pub(super) fn inventory_workbook() -> Workbook {
             before: 99,
             sheet_id: u32::MAX,
         }],
+        native_analysis: None,
     }));
     wb.source_dir = Some("synthetic/context".into());
     wb.source_path = Some("synthetic/book".into());

@@ -465,8 +465,9 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], known_function: Option<&'a dyn Fn(&str) ->
     }
     // Calls of LAMBDA names are spelled like the names (the parser upper-cases them).
     wb.apply_name_call_case();
-    wb.styles = cx.styles;
-    wb.phonetics = cx.phonetics;
+    wb.styles = std::mem::take(&mut cx.styles);
+    wb.phonetics = std::mem::take(&mut cx.phonetics);
+    crate::passthrough::import_native_analysis(&mut cx, &kept, &wb_part, &wb_xml, &file_to_model, &mut wb);
     Ok((wb, cx.report))
 }
 
