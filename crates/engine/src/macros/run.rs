@@ -1075,6 +1075,7 @@ struct Saved {
     recording: Option<usize>,
     ui_requests: usize,
     format_painter: Option<(Arc<Workbook>, usize, RangeRef, bool)>,
+    format_painter_origin: Option<crate::recovery::OriginBinding>,
     last_find: Option<Json>,
     hide_ruler: bool,
     windows: (Vec<crate::WindowState>, Option<u64>, u64, u64),
@@ -1103,6 +1104,7 @@ impl Saved {
             recording: s.recording,
             ui_requests: s.ui_requests.len(),
             format_painter: s.format_painter.clone(),
+            format_painter_origin: s.format_painter_origin.clone(),
             last_find: s.last_find.clone(),
             hide_ruler: s.hide_ruler,
             windows: (s.windows.clone(), s.active_window, s.next_window, s.activation),
@@ -1142,6 +1144,7 @@ impl Saved {
         s.journal_paused = s.journal_paused.saturating_sub(1);
         s.ui_requests.truncate(self.ui_requests);
         s.format_painter = self.format_painter;
+        s.format_painter_origin = self.format_painter_origin;
         s.last_find = self.last_find;
         s.hide_ruler = self.hide_ruler;
         (s.windows, s.active_window, s.next_window, s.activation) = self.windows;

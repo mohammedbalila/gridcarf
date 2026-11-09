@@ -37,7 +37,8 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
     // The HTML rendering is for the host clipboard (UI); it can reach 4 MB, so agents and
     // scripts get it only when they ask for it.
     let html = if p.get("html").and_then(Json::as_bool) == Some(true) { crate::io::range_html(&wb, sheet, range, &text) } else { None };
-    let clip = Clipboard { wb, sheet, range, cut, doc_uid: d.uid, text: text.clone(), areas, selected, trust: d.trust };
+    let recovery_origin = crate::recovery::OriginBinding::new(&wb, d.uid, d.recovery_provenance());
+    let clip = Clipboard { wb, sheet, range, cut, doc_uid: d.uid, text: text.clone(), areas, selected, trust: d.trust, recovery_origin };
     s.clipboard = Some(clip);
     let mut result = json!({"range": range.a1(), "text": text});
     if let Some(html) = html {
@@ -155,6 +156,10 @@ pub(super) enum What {
 }
 
 pub(super) fn paste(s: &mut Session, p: &Json) -> Result<Json> {
+    if str_param(p, "text").is_some() {
+        // Equal OS text can retain the existing rich-paste behavior, but proves no source origin.
+        s.receive_unknown_recovery_origin(s.doc()?.uid)?;
+    }
     // External text (from the system clipboard) when it differs from ours.
     if let Some(text) = str_param(p, "text")
         && s.clipboard.as_ref().is_none_or(|c| c.text.trim_end_matches(['\r', '\n']) != text.trim_end_matches(['\r', '\n']))

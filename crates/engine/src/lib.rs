@@ -153,6 +153,13 @@ pub struct Clipboard {
     pub areas: Vec<RangeRef>,
     /// Trust of the source document: pasting content from a file someone else made carries it.
     pub trust: Trust,
+    recovery_origin: recovery::OriginBinding,
+}
+
+impl Clipboard {
+    fn recovery_provenance(&self) -> recovery::RecoveryProvenance {
+        self.recovery_origin.origin(&self.wb, self.doc_uid)
+    }
 }
 
 /// Whether a document's active content (macros) may run without asking the person first. There
@@ -203,6 +210,7 @@ pub struct DocState {
     pub revision: u64,
     recovery_context: Option<Arc<recovery::RestoreContext>>,
     recovery_needs_save: bool,
+    recovery_provenance: recovery::RecoveryProvenance,
     import_issues: Vec<gridcraft_model::CompatibilityIssue>,
     /// Identifies this open workbook for the rest of the session: it never changes while the
     /// workbook is open (saving, renaming, reordering) and is never reused for another one.
@@ -343,7 +351,7 @@ fn retention_index(history: &[HistoryEntry], step_limit: usize, byte_budget: usi
 impl DocState {
     /// A document for `wb`, which came from where `trust` says: [`Trust::FromFile`] for anything
     /// read from bytes (a file, a download, a recovery copy), [`Trust::Local`] only for a workbook
-    /// made in this session.
+    /// made in this session. Recovery origin starts Unknown regardless of execution trust.
     pub fn new(mut wb: Workbook, path: Option<String>, title: String, trust: Trust) -> DocState {
         let mut calc = Calc::new();
         calc.recalc_all(&mut wb);
@@ -377,6 +385,7 @@ impl DocState {
             revision: 1,
             recovery_context: None,
             recovery_needs_save: false,
+            recovery_provenance: recovery::RecoveryProvenance::Unknown,
             import_issues: vec![],
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title,
@@ -393,6 +402,10 @@ impl DocState {
             edits: None,
             go_to_recent: vec![],
         }
+    }
+    /// Sticky source origin, independent of execution trust and recorded snapshot metadata.
+    pub fn recovery_provenance(&self) -> recovery::RecoveryProvenance {
+        self.recovery_provenance
     }
     pub fn import_issues(&self) -> &[gridcraft_model::CompatibilityIssue] {
         &self.import_issues
@@ -571,6 +584,7 @@ pub struct Session {
     pub ui_requests: Vec<UiRequest>,
     /// Format painter source style (sticky when double-clicked).
     pub format_painter: Option<(Arc<Workbook>, usize, RangeRef, bool)>,
+    format_painter_origin: Option<recovery::OriginBinding>,
     /// Find state (last search).
     pub last_find: Option<Json>,
     /// View › Show › Ruler is off (rulers in Page Layout view; an application option).
@@ -728,13 +742,28 @@ impl Session {
         }
         cmd::locked_cell_error(sh, at, &d.unlocked_ranges)
     }
-    /// Opens a workbook in a new window, which becomes the active one.
+    /// Adopts an unassociated document without trusting its recorded or cloned source label.
     pub fn add_document(&mut self, d: DocState) -> usize {
+        let origin = d.recovery_provenance.receive(recovery::RecoveryProvenance::Unknown);
+        self.add_known_document(d, origin)
+    }
+    // Only audited fresh local creation and positively decoded files establish initial origin.
+    fn add_known_document(&mut self, mut d: DocState, origin: recovery::RecoveryProvenance) -> usize {
+        d.recovery_provenance = origin;
         let uid = d.uid;
         self.docs.push(d);
         let w = self.push_window(uid);
         self.activate_window(w);
         self.docs.len() - 1
+    }
+    pub(crate) fn receive_recovery_origin(&mut self, uid: u64, source: recovery::RecoveryProvenance) -> Result<()> {
+        let d = self.docs.iter_mut().find(|d| d.uid == uid).ok_or(EngineError::NoDocument)?;
+        d.recovery_provenance = d.recovery_provenance.receive(source);
+        Ok(())
+    }
+    /// Marks unassociated external ingress; it cannot establish Plain source authority.
+    pub fn receive_unknown_recovery_origin(&mut self, uid: u64) -> Result<()> {
+        self.receive_recovery_origin(uid, recovery::RecoveryProvenance::Unknown)
     }
     /// Closes a workbook and its windows; the most recently active remaining window comes forward.
     pub fn close_document(&mut self, i: usize) {
@@ -762,7 +791,7 @@ impl Session {
             let name = wb.next_sheet_name();
             wb.sheets.push(Arc::new(gridcraft_model::Sheet::new(name)));
         }
-        self.add_document(DocState::new(wb, None, format!("Book{n}"), Trust::Local))
+        self.add_known_document(DocState::new(wb, None, format!("Book{n}"), Trust::Local), recovery::RecoveryProvenance::Plain)
     }
 
     /// Journals a command, then trims the oldest entries past either cap. A recording in progress

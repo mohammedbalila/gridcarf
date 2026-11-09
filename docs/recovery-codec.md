@@ -1,6 +1,6 @@
 # Recovery codec
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached restore; native recovery remains inactive)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; native recovery remains inactive)
 
 The engine's recovery codec encodes and validates a supported, lossless subset of modeled
 workbook state plus preserved XLSX graphs. It is an internal foundation, not an active recovery
@@ -19,12 +19,12 @@ Windows runtime is **NOT_TESTED** and no Excel oracle has run.
 | `PreparedRecovery<'a>` | Private frozen manifest and payload-reference plan; `len()`, `is_empty()`, `write_to(&mut dyn Write)` |
 | `ValidatedRecovery` | Private owned state; recorded `id()`, `sequence()`, `captured_revision()`, consumed by `restore` |
 | `restore(ValidatedRecovery)` | `Result<DocState, RecoveryError>`; detached untrusted unsaved copy, no Session installation |
-| `RecoveryId`, `RecoveryProvenance` | Inert recorded data; IDs parse/serialize as 32 lowercase hexadecimal digits |
+| `RecoveryId`, `RecoveryProvenance` | IDs parse/serialize as 32 lowercase hexadecimal digits; recorded origin labels confer no authority; runtime origin uses the same enum and monotone `receive` lattice |
 | `RecoveryError` | `UnsupportedVersion`, `Malformed`, `TooLarge`, `UnsupportedRepresentation`, `Ineligible`, `Io` |
 
 Validation does not restore a Session or admit Calc dependencies, dynamic ranges, equations or
-UI projections. Live policy-aware capture/CaptureGuard ownership, runtime provenance, storage
-and trust remain separate gates. Untrusted bytes labelled `Plain` never grant runtime Plain
+UI projections. Live policy-aware capture/CaptureGuard ownership, storage and trust remain
+separate gates; the runtime origin rules below do not issue capture authority. Untrusted bytes labelled `Plain` never grant runtime Plain
 provenance; recorded Unknown/EncryptedOrigin and persisted encryption-origin facts refuse.
 There is no public arbitrary capture constructor, limits override or workbook/part extraction
 getter on the validated type. The separate restore boundary admits a complete detached document.
@@ -233,3 +233,49 @@ Verification uses synthetic public decode/restore and real Save commands, bounde
 graph tests, and paired model layout-call-site instrumentation with engine equation admission.
 Windows native execution and Excel oracle verification remain **NOT_TESTED**; no new release/RSS
 campaign or native storage activation is claimed.
+
+
+## Sticky runtime origin
+
+`DocState::recovery_provenance()` reports a private source-origin field, independent of execution
+`Trust` and script consent. `RecoveryProvenance::receive` joins all source facts monotonically:
+`EncryptedOrigin` wins over `Unknown`, which wins over `Plain`. Only audited private local/new/
+sample creation and positively decoded file entry establish initial origin. Encrypted `file.open`
+is identified by content sniffing and retained `EncryptionRemoved` import facts, never by extension
+or the presence of a path. Public document constructors and detached restore start Unknown;
+generic `Session::add_document` joins Unknown with the incoming state, retaining EncryptedOrigin
+even when a clone's public workbook payload was reassigned. Decoded Plain metadata is inert.
+
+Internal copy/cut/multi-area snapshots carry origin through every paste-special mode, including
+values, formats, comments, column widths, links and transpose. Insert Copied Cells uses the same
+checked paste path. The private clipboard origin is Weak-bound to its original workbook payload
+and source identity; replacement or expiry yields Unknown. Public payload fields remain mutable,
+but a clipboard literal can no longer omit the private binding. No public positive-origin
+constructor or setter is available. Format painter keeps its public tuple shape and a private
+Weak payload/source-identity/origin sidecar. Sticky reuse and source close retain that origin;
+a replaced payload with no matching binding yields Unknown. Equal style tables grant no authority.
+
+OS text/HTML/picture paste and paste events consumed by editors join Unknown before content
+commit. Equal retained OS text can still select existing rich/cut content behavior, but never
+proves source origin; a matching validated encrypted internal clipboard also carries its retained
+encrypted origin. CSV/JSON append imports and picture insertion are unassociated ingress, including
+sheet backgrounds delegated to picture insertion. The private From Table/Range path uses only
+text freshly serialized from its owning document and preserves that document's origin. Ordinary
+explicit cell editing remains local. This conservative OS clipboard policy can make an otherwise
+Plain document ineligible, even when the pasted text equals a retained internal copy. Arbitrary
+external re-entry is not claimed traceable, and no new platform clipboard ownership tracking exists.
+
+Origin stays with the live document across undo/redo, failed groups, panic rollback, macro dry
+runs, save and Save As. Trust restoration during a macro preview does not restore origin.
+The private eligibility check refuses non-Plain origin and retained EncryptionRemoved facts.
+These tests establish entry/transfer facts and private eligibility, not zero serialization or sink
+calls through a public capture API. Sealed jobs/tickets, publication cancellation, lifecycle and
+raw mutable-hook invalidation, UI restore admission and native safe-root storage remain unfinished.
+Native activation is blocked pending ancestry/locality/root/initial-parent-flush guarantees;
+Windows runtime/final user-bundle and Excel qualification remain untested. No readiness estimate changes.
+
+## Revision history
+
+| Date | Change | Summary |
+|---|---|---|
+| 2026-11-08 | minor | Add typed sticky runtime origin, audited entries, bound transfers and conservative external ingress; capture jobs, native activation and external qualification remain outstanding |

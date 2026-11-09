@@ -196,6 +196,7 @@ impl SheetApp {
             ctx.request_repaint();
             return;
         }
+        self.receive_external_paste_events(&ctx);
         let t0 = now_ms();
         // A script may have switched windows since the last frame.
         self.follow_active_window();

@@ -559,3 +559,75 @@ fn ribbon_paste_prefers_clipboard_text_over_a_picture() {
     assert_eq!(value_at(&h, "D2"), Some(Value::from("words")));
     assert!(pictures(&h).is_empty());
 }
+
+fn recovery_origin(app: &SheetApp) -> gridcraft_engine::recovery::RecoveryProvenance {
+    app.session.doc().unwrap().recovery_provenance()
+}
+#[test]
+fn external_text_html_and_retained_text_equality_are_unknown() {
+    use gridcraft_engine::recovery::RecoveryProvenance as Origin;
+    for html in [false, true] {
+        let services = Services {
+            paste_html: html.then(|| Box::new(|| Some("<table><tr><td>42</td></tr></table>".into())) as Box<dyn FnMut() -> Option<String>>),
+            ..Default::default()
+        };
+        let mut h = harness(services);
+        assert_eq!(recovery_origin(h.state()), Origin::Plain);
+        h.state_mut().paste_external("42".into());
+        assert_eq!(recovery_origin(h.state()), Origin::Unknown);
+    }
+    let mut h = harness(Services { paste_text: Some(Box::new(|| Some("old external text".into()))), ..Default::default() });
+    h.state_mut().run("edit.copy", json!({"range":"A1"})).unwrap();
+    h.state_mut().session.new_workbook();
+    h.state_mut().paste_from_clipboard();
+    assert_eq!(recovery_origin(h.state()), Origin::Unknown, "retained OS text equality is not ownership proof");
+}
+#[test]
+fn paste_events_taint_cell_editor_and_picture_before_commit() {
+    use gridcraft_engine::recovery::RecoveryProvenance as Origin;
+    let mut h = harness(Services::default());
+    h.input_mut().events.push(Event::Text("local".into()));
+    h.step();
+    assert_eq!(recovery_origin(h.state()), Origin::Plain, "ordinary typing remains a local edit");
+    assert!(h.state().editor.is_some());
+    h.input_mut().events.push(Event::Paste("external".into()));
+    h.step();
+    assert_eq!(recovery_origin(h.state()), Origin::Unknown, "TextEdit consumes paste without calling the engine clipboard command");
+    for event in [Event::Paste("42".into()), Event::PasteImage(std::sync::Arc::new(egui::ColorImage::new([1, 1], vec![egui::Color32::RED])))] {
+        let mut h = harness(Services::default());
+        h.input_mut().events.push(event);
+        h.step();
+        assert_eq!(recovery_origin(h.state()), Origin::Unknown);
+    }
+    let mut h = harness(Services::default());
+    h.state_mut().paste_picture(image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])));
+    assert_eq!(recovery_origin(h.state()), Origin::Unknown);
+    assert_eq!(h.state().session.doc().unwrap().wb.active().unwrap().images.len(), 1);
+}
+#[test]
+fn validated_internal_clipboard_survives_os_delivery_without_origin_downgrade() {
+    use gridcraft_engine::recovery::RecoveryProvenance as Origin;
+    for encrypted in [false, true] {
+        let mut h = harness(Services::default());
+        if encrypted {
+            let bytes = gridcraft_engine::io::save_bytes(&h.state().session.doc().unwrap().wb, "source.xlsx").unwrap();
+            let bytes = gridcraft_xlsx::testing::encrypt_workbook(&bytes, "synthetic");
+            h.state_mut()
+                .session
+                .execute_headless(
+                    "file.open",
+                    json!({"name":"source.dat","base64":gridcraft_engine::io::base64_encode(&bytes),"password":"synthetic"}),
+                )
+                .unwrap();
+        }
+        let copy = h.state_mut().session.execute("edit.copy", json!({"range":"A1"})).unwrap();
+        h.state_mut().session.new_workbook();
+        h.state_mut().paste_external(copy["text"].as_str().unwrap().into());
+        assert_eq!(recovery_origin(h.state()), if encrypted { Origin::EncryptedOrigin } else { Origin::Unknown });
+    }
+    let mut h = harness(Services::default());
+    h.state_mut().run("edit.copy", json!({"range":"A1"})).unwrap();
+    h.state_mut().session.new_workbook();
+    h.state_mut().paste_from_clipboard();
+    assert_eq!(recovery_origin(h.state()), Origin::Plain, "no OS payload: retained engine transfer is associated");
+}

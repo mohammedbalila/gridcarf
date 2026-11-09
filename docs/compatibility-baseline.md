@@ -1,6 +1,6 @@
 # Compatibility baseline
 
-> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: F01 conditional-format statistics; M01 bounded note-history repair; C01 legacy formula repair; V01 baseline retained)
 
 This baseline pins source `6a8eb4ff42cfa88b5bdd3eec13c6db3874d95214`, before
 stabilization repairs. It covers four small synthetic cases, not general Excel
@@ -148,6 +148,17 @@ table above remains unchanged. No broader cell-store or metadata sharing claim i
 
 ## Recovery codec foundation
 
+Runtime source origin is now a private sticky lattice independent of execution Trust: encrypted
+origin dominates Unknown, which dominates Plain. Audited new/sample/decoded file entries establish
+origin; generic construction/adoption and detached restore remain Unknown-or-worse. Payload-bound
+clipboard and painter transfers carry origin even for passive formats/values, and external OS
+text/HTML/picture paste plus append imports join Unknown before commit. OS text equality grants
+no origin authority and can conservatively exclude a previously Plain document. Undo/rollback,
+macro previews and Save As retain taint. See [runtime origin](recovery-codec.md#sticky-runtime-origin).
+Sealed capture jobs, publication/lifecycle/raw-mutation invalidation, UI restore admission and safe-root
+native storage qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
+remain untested; no activation, protection guarantee or readiness increase is claimed.
+
 The detached restore boundary now consumes a validated snapshot into an untrusted unsaved
 `DocState`, preserving caches and inert context without evaluation. Its Calc graph has shared
 node/depth/schedule/area/index/offer/work/name and requested-storage limits; any equation source
@@ -174,6 +185,7 @@ version control. No result here upgrades the repository's parity/readiness claim
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Add typed sticky origin at audited entries/transfers and conservative external ingress; live capture/native qualification remain incomplete |
 | 2026-11-08 | minor | Add bounded detached restore with preserved caches, untrusted unsaved state and no equation layout; native activation/readiness remain unchanged |
 | 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |
 | 2026-11-07 | minor | Record M01 note-map sharing, undo/redo regressions and fresh release RSS separately from the baseline |

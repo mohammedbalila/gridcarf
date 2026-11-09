@@ -381,6 +381,9 @@ fn clear(s: &mut Session, p: &Json, what: &str) -> Result<Json> {
 fn format_painter(s: &mut Session, p: &Json) -> Result<Json> {
     if let Some(dest) = str_param(p, "apply").and_then(RangeRef::parse) {
         let Some((wb, sheet, src, sticky)) = s.format_painter.clone() else { return Err(EngineError::Other("Pick up a format first.".into())) };
+        let origin =
+            s.format_painter_origin.as_ref().map_or(crate::recovery::RecoveryProvenance::Unknown, |binding| binding.origin(&wb, binding.source_uid));
+        s.receive_recovery_origin(s.doc()?.uid, origin)?;
         let dest_sheet = s.doc()?.wb.active_sheet();
         let same = std::sync::Arc::ptr_eq(&wb, &s.doc()?.wb) || s.doc()?.wb.styles == wb.styles;
         edit(s, |cx| {
@@ -461,7 +464,9 @@ fn format_painter(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let sticky = bool_param(p, "sticky").unwrap_or(false);
     let d = s.doc()?;
+    let binding = crate::recovery::OriginBinding::new(&d.wb, d.uid, d.recovery_provenance());
     s.format_painter = Some((d.wb.clone(), d.wb.active_sheet(), d.selection.current(), sticky));
+    s.format_painter_origin = Some(binding);
     ok()
 }
 

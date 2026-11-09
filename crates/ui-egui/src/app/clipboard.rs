@@ -1,6 +1,37 @@
 use super::{Json, SheetApp, json};
 
 impl SheetApp {
+    fn receive_external_clipboard(&mut self) -> bool {
+        let Some(uid) = self.session.active().map(|doc| doc.uid) else { return false };
+        match self.session.receive_unknown_recovery_origin(uid) {
+            Ok(()) => true,
+            Err(error) => {
+                self.alert(error.to_string());
+                false
+            }
+        }
+    }
+
+    /// Observe paste before an editor consumes the event instead of the grid clipboard path.
+    pub(super) fn receive_external_paste_events(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_) | egui::Event::PasteImage(_)))) {
+            return;
+        }
+        let owners = [
+            self.session.active().map(|doc| doc.uid),
+            self.editor.as_ref().map(|editor| editor.doc),
+            self.text_box_editor.as_ref().map(|editor| editor.document()),
+            self.macros.editor.as_ref().map(|editor| editor.doc),
+        ];
+        for uid in owners.into_iter().flatten() {
+            if self.session.document_index(uid).is_some()
+                && let Err(error) = self.session.receive_unknown_recovery_origin(uid)
+            {
+                self.alert(error.to_string());
+            }
+        }
+    }
+
     /// Copy or cut the selected cells to the system clipboard. Engine-only commands keep
     /// their existing internal clipboard behavior and do not write to the host clipboard.
     pub fn copy_to_clipboard(&mut self, ctx: &egui::Context, command: &str) {
@@ -32,6 +63,9 @@ impl SheetApp {
     /// clipboard is pasted instead, which reports "Nothing to paste.". Other text means the
     /// clipboard has moved on, so the cut's text is forgotten and pastes normally later.
     pub fn paste_external(&mut self, text: String) {
+        if !self.receive_external_clipboard() {
+            return;
+        }
         if Self::same_clipboard_text(Some(&text), self.cut_text.as_deref()) {
             if self.session.clipboard.is_none() {
                 return self.run_or_alert("edit.paste", json!({}));
@@ -54,7 +88,11 @@ impl SheetApp {
     pub fn paste_from_clipboard(&mut self) {
         match self.system_clipboard_text() {
             Some(text) if self.session.clipboard.is_none() || self.clipboard_text_at_copy.as_ref() != Some(&text) => self.paste_external(text),
-            Some(_) => self.run_or_alert("edit.paste", json!({})),
+            Some(_) => {
+                if self.receive_external_clipboard() {
+                    self.run_or_alert("edit.paste", json!({}));
+                }
+            }
             None => match self.services.paste_image.as_mut().and_then(|read| read()) {
                 Some(image) => self.paste_picture(image),
                 None => self.run_or_alert("edit.paste", json!({})),
@@ -65,6 +103,9 @@ impl SheetApp {
     /// Paste a picture from the system clipboard (a screenshot, an image copied in a browser) as
     /// a floating picture whose top-left corner is the active cell, as Excel does.
     pub fn paste_picture(&mut self, image: image::RgbaImage) {
+        if !self.receive_external_clipboard() {
+            return;
+        }
         match encode_png(&image) {
             Ok(png) => self.run_or_alert("insert.picture", json!({"base64": gridcraft_engine::io::base64_encode(&png), "mime": "image/png"})),
             Err(e) => self.alert(e),
@@ -92,7 +133,7 @@ impl SheetApp {
         self.services.paste_text.as_mut().and_then(|read| read()).filter(|t| !t.is_empty()).map(|t| t.replace("\r\n", "\n"))
     }
 
-    /// Whether two clipboard texts are the same copy: trailing line breaks don't count, as in the
+    /// Whether clipboard texts match for cut-content behavior only (never origin authority): trailing line breaks don't count, as in the
     /// engine's `edit.paste`, and CRLF matches LF (egui's `Event::Paste` text may keep the host's).
     fn same_clipboard_text(a: Option<&str>, b: Option<&str>) -> bool {
         fn chars(t: &str) -> impl Iterator<Item = char> + '_ {

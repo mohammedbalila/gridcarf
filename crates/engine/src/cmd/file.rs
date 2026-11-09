@@ -37,7 +37,7 @@ fn new_workbook(s: &mut Session, p: &Json) -> Result<Json> {
         Some(name) => {
             let wb = crate::sample::build(name).ok_or_else(|| bad("file.new", format!("unknown sample `{name}`")))?;
             let title = crate::sample::title(name);
-            s.add_document(DocState::new(wb, None, title, crate::Trust::Local))
+            s.add_known_document(DocState::new(wb, None, title, crate::Trust::Local), crate::recovery::RecoveryProvenance::Plain)
         }
         None => s.new_workbook(),
     };
@@ -93,7 +93,12 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
     if crate::io::FileKind::from_path(&name).is_none() && gridcraft_xlsx::sniff(&bytes) == gridcraft_xlsx::Format::Xlsx {
         doc.content_kind = Some(crate::io::FileKind::Xlsx);
     }
-    let i = s.add_document(doc);
+    let origin = if encrypted || doc.import_issues().iter().any(|issue| issue.effect == gridcraft_model::CompatibilityEffect::EncryptionRemoved) {
+        crate::recovery::RecoveryProvenance::EncryptedOrigin
+    } else {
+        crate::recovery::RecoveryProvenance::Plain
+    };
+    let i = s.add_known_document(doc, origin);
     // The decrypted-workbook notice is for the info bar, not a message box.
     let shown: Vec<&str> = warnings.iter().map(String::as_str).filter(|w| *w != crate::io::DECRYPTED_NOTICE).collect();
     if !shown.is_empty() {

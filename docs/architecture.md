@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: bounded inert recovery codec foundation; earlier: per-document AutoSave scheduling and persistent failure notices; earlier: Python mode in the formula bar; earlier: Python cells as data; earlier: equations: the `math` crate and the layout cache; earlier: recently used functions kept in the preferences; Function Library module; accent icons; earlier: the hidden names that hold macros) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -172,6 +172,17 @@ AutoSave, without a recovery store, asynchronous serializer or additional durabi
 
 ## Recovery codec foundation
 
+Runtime source origin is now a private sticky lattice independent of execution Trust: encrypted
+origin dominates Unknown, which dominates Plain. Audited new/sample/decoded file entries establish
+origin; generic construction/adoption and detached restore remain Unknown-or-worse. Payload-bound
+clipboard and painter transfers carry origin even for passive formats/values, and external OS
+text/HTML/picture paste plus append imports join Unknown before commit. OS text equality grants
+no origin authority and can conservatively exclude a previously Plain document. Undo/rollback,
+macro previews and Save As retain taint. See [runtime origin](recovery-codec.md#sticky-runtime-origin).
+Sealed capture jobs, publication/lifecycle/raw-mutation invalidation, UI restore admission and safe-root
+native storage qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
+remain untested; no activation, protection guarantee or readiness increase is claimed.
+
 The detached restore boundary now consumes a validated snapshot into an untrusted unsaved
 `DocState`, preserving caches and inert context without evaluation. Its Calc graph has shared
 node/depth/schedule/area/index/offer/work/name and requested-storage limits; any equation source
@@ -270,6 +281,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Add typed sticky origin at audited entries/transfers and conservative external ingress; live capture/native qualification remain incomplete |
 | 2026-11-08 | minor | Add bounded detached restore with preserved caches, untrusted unsaved state and no equation layout; native activation/readiness remain unchanged |
 | 2026-11-08 | minor | Document the bounded inert recovery codec and synthetic evidence; live capture, native restore/storage and external qualification remain separate, with no readiness increase |
 | 2026-11-07 | minor | AutoSave considers every dirty named XLSX-class document, preserves live window views and drafts, and keeps per-document failure notices; untitled recovery remains unavailable |

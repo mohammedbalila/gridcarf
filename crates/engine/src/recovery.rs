@@ -9,6 +9,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
 
 mod manifest;
+mod provenance;
+pub(crate) use provenance::OriginBinding;
 
 const RECOVERY_MAGIC: &[u8; 8] = b"GCRCV001";
 const RECOVERY_VERSION: u32 = 1;
@@ -16,11 +18,35 @@ const RECOVERY_HEADER: usize = 28;
 const RECOVERY_FRAMES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-/// Inert recorded provenance; decoded values confer no runtime authority.
+/// Source origin lattice. Decoded labels alone confer no runtime authority.
 pub enum RecoveryProvenance {
     Plain,
     EncryptedOrigin,
     Unknown,
+}
+
+impl RecoveryProvenance {
+    /// Receive source content without ever lowering retained origin restrictions.
+    pub fn receive(self, source: Self) -> Self {
+        use RecoveryProvenance::*;
+        match (self, source) {
+            (EncryptedOrigin, _) | (_, EncryptedOrigin) => EncryptedOrigin,
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Plain, Plain) => Plain,
+        }
+    }
+}
+
+// Live capture policy must check eligibility before issuing any capture ticket.
+#[allow(dead_code, reason = "private eligibility precedes the later live capture seam")]
+fn eligible_origin(doc: &crate::DocState) -> Result<RecoveryProvenance, RecoveryError> {
+    if doc.import_issues().iter().any(|issue| issue.effect == gridcraft_model::CompatibilityEffect::EncryptionRemoved) {
+        return Err(RecoveryError::Ineligible(RecoveryProvenance::EncryptedOrigin));
+    }
+    match doc.recovery_provenance() {
+        RecoveryProvenance::Plain => Ok(RecoveryProvenance::Plain),
+        origin => Err(RecoveryError::Ineligible(origin)),
+    }
 }
 
 #[derive(Debug)]
@@ -265,5 +291,55 @@ impl RestoreContext {
     }
     pub(crate) fn captured_revision(&self) -> u64 {
         self.captured_revision
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    #[test]
+    fn lattice_all_pairs() {
+        use RecoveryProvenance::*;
+        for (a, b, want) in [
+            (Plain, Plain, Plain),
+            (Plain, Unknown, Unknown),
+            (Plain, EncryptedOrigin, EncryptedOrigin),
+            (Unknown, Plain, Unknown),
+            (Unknown, Unknown, Unknown),
+            (Unknown, EncryptedOrigin, EncryptedOrigin),
+            (EncryptedOrigin, Plain, EncryptedOrigin),
+            (EncryptedOrigin, Unknown, EncryptedOrigin),
+            (EncryptedOrigin, EncryptedOrigin, EncryptedOrigin),
+        ] {
+            assert_eq!(a.receive(b), want);
+        }
+    }
+    #[test]
+    fn unknown_entry_cannot_capture() {
+        let doc = crate::DocState::new(gridcraft_model::Workbook::new(), None, "unknown".into(), crate::Trust::Local);
+        assert!(matches!(eligible_origin(&doc), Err(RecoveryError::Ineligible(RecoveryProvenance::Unknown))));
+    }
+    #[test]
+    fn encrypted_source_never_writes_plaintext_recovery() {
+        let mut s = crate::Session::new();
+        let bytes =
+            gridcraft_xlsx::testing::encrypt_workbook(&crate::io::save_bytes(&gridcraft_model::Workbook::new(), "source.xlsx").unwrap(), "synthetic");
+        s.execute("file.open", serde_json::json!({"name":"source.dat","base64":crate::io::base64_encode(&bytes),"password":"synthetic"})).unwrap();
+        assert_eq!(s.doc().unwrap().recovery_provenance(), RecoveryProvenance::EncryptedOrigin);
+        assert!(matches!(eligible_origin(s.doc().unwrap()), Err(RecoveryError::Ineligible(RecoveryProvenance::EncryptedOrigin))));
+    }
+    #[test]
+    fn retained_encryption_removed_fact_refuses_plain_origin() {
+        let mut s = crate::Session::new();
+        s.new_workbook();
+        assert_eq!(eligible_origin(s.doc().unwrap()).unwrap(), RecoveryProvenance::Plain);
+        s.doc_mut().unwrap().retain_import_issues(vec![gridcraft_model::CompatibilityIssue::new(
+            "encryption",
+            None,
+            gridcraft_model::CompatibilityEffect::EncryptionRemoved,
+            gridcraft_model::Editability::Editable,
+            "synthetic",
+        )]);
+        assert!(matches!(eligible_origin(s.doc().unwrap()), Err(RecoveryError::Ineligible(RecoveryProvenance::EncryptedOrigin))));
     }
 }

@@ -654,7 +654,10 @@ fn insert_copied_steps(s: &mut Session, clip: &crate::Clipboard, sheet: usize, a
             clip.range = RangeRef::new(clip.range.start.offset_clamped(dr, dc), clip.range.end.offset_clamped(dr, dc));
             clip.selected = RangeRef::new(sel.start.offset_clamped(dr, dc), sel.end.offset_clamped(dr, dc));
         }
+        // Only this same-document cut path replaces the payload under an audited owning edit.
+        let origin = clip.recovery_provenance().receive(s.doc()?.recovery_provenance());
         clip.wb = s.doc()?.wb.clone();
+        clip.recovery_origin = crate::recovery::OriginBinding::new(&clip.wb, clip.doc_uid, origin);
     }
     let source_lines = clip.selected;
     s.clipboard = Some(clip.clone());

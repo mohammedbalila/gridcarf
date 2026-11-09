@@ -43,6 +43,10 @@ pub(super) fn table_resize(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 pub(super) fn from_csv(s: &mut Session, p: &Json) -> Result<Json> {
+    from_csv_with_origin(s, p, crate::recovery::RecoveryProvenance::Unknown)
+}
+
+fn from_csv_with_origin(s: &mut Session, p: &Json, origin: crate::recovery::RecoveryProvenance) -> Result<Json> {
     let bytes = if let Some(t) = str_param(p, "text") {
         t.as_bytes().to_vec()
     } else if let Some(path) = str_param(p, "path") {
@@ -98,6 +102,7 @@ pub(super) fn from_csv(s: &mut Session, p: &Json) -> Result<Json> {
     let name = str_param(p, "sheet").map(str::to_string).or_else(|| {
         str_param(p, "path").and_then(|x| std::path::Path::new(x).file_stem().and_then(std::ffi::OsStr::to_str).map(|f| f.chars().take(31).collect()))
     });
+    s.receive_recovery_origin(s.doc()?.uid, origin)?;
     let r = s.execute("home.insertSheet", json!({"name": name})).or_else(|_| s.execute("home.insertSheet", json!({})))?;
     let w = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
     s.execute("range.setValues", json!({"range": "A1", "values": rows}))?;
@@ -113,7 +118,9 @@ pub(super) fn from_table_range(s: &mut Session, p: &Json) -> Result<Json> {
     let sh = d.wb.active().ok_or(EngineError::NoDocument)?;
     let r = if r.is_single() { crate::selection::current_region(sh, r.start) } else { r };
     let text = crate::display::range_text(&d.wb, d.wb.active_sheet(), r);
-    from_csv(s, &json!({"text": text, "delimiter": "\t", "sheet": format!("{} (2)", sh.name).chars().take(31).collect::<String>()}))
+    let origin = d.recovery_provenance();
+    let params = json!({"text": text, "delimiter": "\t", "sheet": format!("{} (2)", sh.name).chars().take(31).collect::<String>()});
+    from_csv_with_origin(s, &params, origin)
 }
 
 pub(super) fn queries(s: &mut Session, _: &Json) -> Result<Json> {

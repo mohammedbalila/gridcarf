@@ -31,6 +31,7 @@ mod preserved_references;
 mod range_fill_formats;
 mod recalc_invariants;
 mod recently_used;
+mod recovery_provenance;
 mod recovery_snapshots;
 mod row_autofit;
 mod selection_memory;

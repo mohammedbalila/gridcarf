@@ -7,6 +7,8 @@ use super::{
 #[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
 pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
     let Some(clip) = s.clipboard.clone() else { return Err(EngineError::Other("Nothing to paste.".into())) };
+    // Even passive transfers carry confidential content. Keep taint when a later edit fails.
+    s.receive_recovery_origin(s.doc()?.uid, clip.recovery_provenance())?;
     let what = match str_param(p, "what").unwrap_or("all") {
         "all" => What::All,
         "formulas" => What::Formulas,

@@ -1138,6 +1138,7 @@ fn insert_picture(s: &mut Session, p: &Json) -> Result<Json> {
         s.ui_requests.push(crate::UiRequest::Dialog("insertPicture".into(), json!({"placement": placement})));
         return ok();
     };
+    s.receive_unknown_recovery_origin(s.doc()?.uid)?;
     if placement == "cell" {
         let mime = validate_cell_picture(&data)?;
         let d = s.doc()?;

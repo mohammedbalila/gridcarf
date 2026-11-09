@@ -1,6 +1,17 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-08 · **Change:** minor (bounded detached recovery restore; earlier: retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-08 · **Change:** minor (typed sticky runtime origin; earlier: bounded detached recovery restore; earlier: retained-history accounting performance follow-up) · **Target:** Microsoft Excel (Microsoft 365)
+
+Runtime source origin is now a private sticky lattice independent of execution Trust: encrypted
+origin dominates Unknown, which dominates Plain. Audited new/sample/decoded file entries establish
+origin; generic construction/adoption and detached restore remain Unknown-or-worse. Payload-bound
+clipboard and painter transfers carry origin even for passive formats/values, and external OS
+text/HTML/picture paste plus append imports join Unknown before commit. OS text equality grants
+no origin authority and can conservatively exclude a previously Plain document. Undo/rollback,
+macro previews and Save As retain taint. See [runtime origin](recovery-codec.md#sticky-runtime-origin).
+Sealed capture jobs, publication/lifecycle/raw-mutation invalidation, UI restore admission and safe-root
+native storage qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
+remain untested; no activation, protection guarantee or readiness increase is claimed.
 
 Detached recovery restore is an internal bounded foundation; UI projection, Session adoption,
 qualified native storage and scheduling are still required before activation. See the
@@ -125,6 +136,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Typed sticky source origin covers audited entries/transfers; conservative external paste is excluded, with capture/native activation still pending |
 | 2026-11-08 | minor | Bound detached recovery restore and retain untrusted unsaved state; activation, platform qualification and readiness remain separate |
 | 2026-11-07 | minor | Complete retention accounting; track repeated band-root/current-inventory work before large-workbook parity |
 | 2026-10-23 | minor | Measuring: tests run through `cargo xtask test` |
