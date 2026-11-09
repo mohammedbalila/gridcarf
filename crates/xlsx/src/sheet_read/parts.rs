@@ -3,6 +3,7 @@ use super::{
     MAX_HYPERLINK_TARGET, MAX_ROWS, MAX_TOOLTIP_CHARS, NoteBox, NoteCorner, RangeRef, Rel, Sheet, Table, TableColumn, TotalsFn, XmlColumnPr,
     from_file, truncate_chars, xml,
 };
+use gridcraft_model::{CompatibilityEffect, CompatibilityIssue, Editability};
 
 /// `budget` counts the cells and bytes this sheet's hyperlinks have copied so far, across
 /// `<hyperlinks>` blocks.
@@ -105,6 +106,30 @@ pub fn read_autofilter(cx: &mut Ctx<'_>, e: &El) -> Option<AutoFilter> {
 pub fn read_table(cx: &mut Ctx<'_>, x: &El) -> Option<Table> {
     let range = x.attr("ref").and_then(RangeRef::parse)?;
     let name = x.attr("displayName").or_else(|| x.attr("name")).unwrap_or("Table").to_string();
+    let has_format_override = |el: &El| {
+        [
+            "headerRowDxfId",
+            "dataDxfId",
+            "totalsRowDxfId",
+            "headerRowBorderDxfId",
+            "tableBorderDxfId",
+            "totalsRowBorderDxfId",
+            "headerRowCellStyle",
+            "dataCellStyle",
+            "totalsRowCellStyle",
+        ]
+        .iter()
+        .any(|attr| el.attr(attr).is_some())
+    };
+    if has_format_override(x) || x.child("tableColumns").is_some_and(|cols| cols.kids("tableColumn").any(has_format_override)) {
+        cx.report.issue(CompatibilityIssue::new(
+            "table format overrides",
+            Some(format!("{} ({})", truncate_chars(&name, 128), range.a1())),
+            CompatibilityEffect::Omitted,
+            Editability::Unavailable,
+            "Explicit table or column formatting overrides are not preserved on save.",
+        ));
+    }
     let header_row = x.attr_u32("headerRowCount").unwrap_or(1) > 0;
     let totals_row = x.attr_u32("totalsRowCount").unwrap_or(0) > 0;
     let columns = x

@@ -989,7 +989,8 @@ fn write_data_fields(s: &mut String, c: &Cache, layout: &PivotTableLayout<'_>, f
     let _ = write!(s, "<dataFields count=\"{}\">", layout.values.len());
     let mut used: Vec<String> = Vec::new();
     for (i, value) in &layout.values {
-        let base = if value.name.trim().is_empty() {
+        // A space can be an explicit caption. Only an empty name requests the default.
+        let base = if value.name.is_empty() {
             format!("{} of {}", func_caption(value.func), c.fields.get(*i).map(|f| f.name.as_str()).unwrap_or(""))
         } else {
             value.name.clone()

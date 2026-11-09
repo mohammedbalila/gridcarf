@@ -287,6 +287,64 @@ fn strict_namespace_and_shared_strings() {
 }
 
 #[test]
+fn unnamed_table_style_roundtrips_without_inventing_a_name() {
+    let sheet = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>City</t></is></c></row>
+      <row r="2"><c r="A2" t="inlineStr"><is><t>Dubai</t></is></c></row></sheetData>
+      <tableParts count="1"><tablePart r:id="rId1"/></tableParts>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+      </Relationships>"#;
+    let table = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Places" displayName="Places" ref="A1:A2">
+      <tableColumns count="1"><tableColumn id="1" name="City"/></tableColumns>
+      <tableStyleInfo showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>"#;
+    let bytes = minimal(sheet, &[("xl/worksheets/_rels/sheet1.xml.rels", rels), ("xl/tables/table1.xml", table)], "", "");
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let before = &wb.sheet(0).unwrap().tables[0];
+    assert!(before.style.is_empty() && before.banded_rows);
+
+    let (reopened, _) = read_xlsx(&crate::write_xlsx(&wb).unwrap()).unwrap();
+    let after = &reopened.sheet(0).unwrap().tables[0];
+    assert_eq!(after.style, before.style);
+    assert!(after.banded_rows);
+}
+
+#[test]
+fn unsupported_table_formats_and_drawing_links_are_reported() {
+    let sheet = r#"<sheetData/><drawing r:id="rId2"/><tableParts count="1"><tablePart r:id="rId1"/></tableParts>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+      </Relationships>"#;
+    let table = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Places" displayName="Places" ref="A1:A2">
+      <tableColumns count="1"><tableColumn id="1" name="City" dataCellStyle="Currency"/></tableColumns></table>"#;
+    let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="95250" cy="95250"/>
+      <xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="Jump"><a:hlinkClick r:id="rId1"/></xdr:cNvPr><xdr:cNvSpPr/></xdr:nvSpPr>
+      <xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"#;
+    let drawing_rels = r##"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="#Data!A2" TargetMode="External"/>
+      </Relationships>"##;
+    let bytes = minimal(
+        sheet,
+        &[
+            ("xl/worksheets/_rels/sheet1.xml.rels", rels),
+            ("xl/tables/table1.xml", table),
+            ("xl/drawings/drawing1.xml", drawing),
+            ("xl/drawings/_rels/drawing1.xml.rels", drawing_rels),
+        ],
+        "",
+        "",
+    );
+    let (wb, report) = read_xlsx(&bytes).unwrap();
+    let sheet = wb.sheet(0).unwrap();
+    assert_eq!(sheet.tables.len(), 1);
+    assert_eq!(sheet.shapes.len(), 1);
+    for feature in ["table format overrides", "drawing hyperlinks"] {
+        assert!(report.issues.iter().any(|i| i.feature == feature && i.code == "feature.omitted"), "{report:?}");
+    }
+}
+
+#[test]
 fn hyperlinks_comments_tables_validation_filters() {
     let body = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>H</t></is></c></row></sheetData>
       <autoFilter ref="E1:F9"><filterColumn colId="0"><filters blank="1"><filter val="x"/><filter val="y"/></filters></filterColumn><filterColumn colId="1"><customFilters and="1"><customFilter operator="greaterThan" val="5"/><customFilter operator="lessThan" val="9"/></customFilters></filterColumn></autoFilter>

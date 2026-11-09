@@ -271,15 +271,15 @@ pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, out: &m
         s.push_str("</tableColumn>");
     }
     s.push_str("</tableColumns>");
-    let style = if t.style.is_empty() { "TableStyleMedium2" } else { &t.style };
+    s.push_str("<tableStyleInfo");
+    // An imported table may omit the style name while retaining its display flags.
+    if !t.style.is_empty() {
+        let _ = write!(s, " name=\"{}\"", esc_attr(&t.style));
+    }
     let _ = write!(
         s,
-        "<tableStyleInfo name=\"{}\" showFirstColumn=\"{}\" showLastColumn=\"{}\" showRowStripes=\"{}\" showColumnStripes=\"{}\"/></table>",
-        esc_attr(style),
-        t.first_col as u8,
-        t.last_col as u8,
-        t.banded_rows as u8,
-        t.banded_cols as u8
+        " showFirstColumn=\"{}\" showLastColumn=\"{}\" showRowStripes=\"{}\" showColumnStripes=\"{}\"/></table>",
+        t.first_col as u8, t.last_col as u8, t.banded_rows as u8, t.banded_cols as u8
     );
     s
 }

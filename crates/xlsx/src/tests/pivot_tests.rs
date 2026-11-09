@@ -662,6 +662,29 @@ fn values_ahead_of_column_fields_read_last() {
     assert_eq!(pt.values_position, None);
 }
 
+#[test]
+fn pivot_data_field_caption_preserves_explicit_space() {
+    for (caption, expected) in [("", "Sum of V"), (" ", " ")] {
+        let table = format!(
+            r#"<pivotTableDefinition name="Caption" cacheId="1"><location ref="C1:D4"/><pivotFields><pivotField axis="axisRow"/><pivotField dataField="1"/></pivotFields><rowFields><field x="0"/></rowFields><dataFields><dataField name="{caption}" fld="1"/></dataFields></pivotTableDefinition>"#
+        );
+        let (mut wb, _) = read_xlsx(&with_pivot(&table, Some(GOOD_CACHE))).unwrap();
+        let sheet = wb.sheet_mut(0).unwrap();
+        assert_eq!(sheet.pivots[0].values[0].name, caption);
+        sheet.cells.set(at("A1"), Cell::value(Value::text("K")));
+        sheet.cells.set(at("B1"), Cell::value(Value::text("V")));
+
+        let saved = write_xlsx(&wb).unwrap();
+        let parts = unzip(&saved);
+        let table = xml::parse(parts.get("xl/pivotTables/pivotTable1.xml").unwrap()).unwrap();
+        let field = table.child("dataFields").unwrap().child("dataField").unwrap();
+        assert_eq!(field.attr("name"), Some(expected), "saved caption for {caption:?}");
+
+        let (reopened, _) = read_xlsx(&saved).unwrap();
+        assert_eq!(reopened.sheet(0).unwrap().pivots[0].values[0].name, expected);
+    }
+}
+
 // As Excel saves them: `rowGrandTotals="0"` drops the Grand Total row under the report (leaving
 // Excel's "On for Rows Only"), `colGrandTotals="0"` the Grand Total column at its right ("On for
 // Columns Only"). LibreOffice's Pivot2_Row_Subtotals.xlsx (`rowGrandTotals="0"`) shows no Grand

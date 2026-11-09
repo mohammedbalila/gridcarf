@@ -155,6 +155,81 @@ fn unsupported_package_relationships_and_extensions_are_unknown() {
     assert!(issues.iter().any(|i| i["code"] == "package.unknown" && i["feature"] == "unknownFeature"), "{a}");
     assert!(issues.iter().any(|i| i["code"] == "package.unknown" && i["feature"] == "workbook extension"), "{a}");
 }
+
+const CALC_CHAIN_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain";
+const CALC_CHAIN_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml";
+
+fn with_calculation_chain(rel_type: &str, target: &str, target_mode: &str, content_type: &str, include_part: bool) -> Vec<u8> {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("cell.set", json!({"cell":"A1", "input":"2"})).unwrap();
+    s.execute("cell.set", json!({"cell":"B1", "input":"=A1*3"})).unwrap();
+    let bytes = io::save_bytes(&s.doc().unwrap().wb, "input.xlsx").unwrap();
+    let mut src = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut dst = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    for i in 0..src.len() {
+        let mut f = src.by_index(i).unwrap();
+        dst.start_file(f.name(), options).unwrap();
+        let (close, element) = match f.name() {
+            "xl/_rels/workbook.xml.rels" => {
+                ("</Relationships>", format!(r#"<Relationship Id="rId999" Type="{rel_type}" Target="{target}"{target_mode}/>"#))
+            }
+            "[Content_Types].xml" => ("</Types>", format!(r#"<Override PartName="/xl/calcChain.xml" ContentType="{content_type}"/>"#)),
+            _ => {
+                std::io::copy(&mut f, &mut dst).unwrap();
+                continue;
+            }
+        };
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut f, &mut text).unwrap();
+        dst.write_all(text.replace(close, &format!("{element}{close}")).as_bytes()).unwrap();
+    }
+    if include_part {
+        dst.start_file("xl/calcChain.xml", options).unwrap();
+        dst.write_all(br#"<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="B1" i="1"/></calcChain>"#).unwrap();
+    }
+    dst.finish().unwrap().into_inner()
+}
+
+#[test]
+fn calculation_chain_does_not_block_an_ordinary_xlsx_save() {
+    let mut s = Session::new();
+    let bytes = with_calculation_chain(CALC_CHAIN_REL, "calcChain.xml", "", CALC_CHAIN_CONTENT_TYPE, true);
+    s.execute_headless("file.open", json!({"name":"chain.xlsx", "base64":io::base64_encode(&bytes)})).unwrap();
+    s.execute("cell.set", json!({"cell":"A1", "input":"4"})).unwrap();
+
+    let saved = s.execute_headless("file.saveBytes", json!({"format":"xlsx"})).unwrap();
+    let mut package = zip::ZipArchive::new(Cursor::new(io::base64_decode(saved["base64"].as_str().unwrap()).unwrap())).unwrap();
+    assert!(package.by_name("xl/calcChain.xml").is_err());
+    let mut relationships = String::new();
+    std::io::Read::read_to_string(&mut package.by_name("xl/_rels/workbook.xml.rels").unwrap(), &mut relationships).unwrap();
+    assert!(!relationships.contains(CALC_CHAIN_REL));
+
+    let mut reopened = Session::new();
+    reopened.execute_headless("file.open", saved).unwrap();
+    let result = reopened.execute("cell.get", json!({"cell":"B1"})).unwrap();
+    assert_eq!(result["formula"], "=A1*3");
+    assert_eq!(result["value"], 12.0);
+}
+
+#[test]
+fn nonstandard_calculation_chain_relationships_still_require_confirmation() {
+    for (rel_type, target, mode, content_type, include_part) in [
+        ("urn:foreign/calcChain", "calcChain.xml", "", CALC_CHAIN_CONTENT_TYPE, true),
+        (CALC_CHAIN_REL, "https://example.invalid/calcChain.xml", r#" TargetMode="External""#, CALC_CHAIN_CONTENT_TYPE, true),
+        (CALC_CHAIN_REL, "calcChain.xml", "", "application/xml", true),
+        (CALC_CHAIN_REL, "calcChain.xml", "", CALC_CHAIN_CONTENT_TYPE, false),
+    ] {
+        let mut s = Session::new();
+        let bytes = with_calculation_chain(rel_type, target, mode, content_type, include_part);
+        s.execute_headless("file.open", json!({"name":"chain.xlsx", "base64":io::base64_encode(&bytes)})).unwrap();
+        let a = analyze(&mut s, "copy.xlsx");
+        assert!(a["issues"].as_array().unwrap().iter().any(|i| i["code"] == "package.unknown" && i["feature"] == "calcChain"), "{a}");
+        assert!(s.execute_headless("file.saveBytes", json!({"format":"xlsx"})).is_err());
+    }
+}
+
 #[test]
 fn exports_require_acknowledgement_and_vba_is_format_specific() {
     let mut s = slicer();

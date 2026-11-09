@@ -9,7 +9,10 @@
 use std::fmt::Write as _;
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
-use gridcraft_model::{Anchor, AnchorMode, Color, Image, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme};
+use gridcraft_model::{
+    Anchor, AnchorMode, Color, CompatibilityEffect, CompatibilityIssue, Editability, Image, Shape, ShapeFormat, ShapeKind, ShapeTextAlign,
+    ShapeTextAnchor, Sheet, Theme,
+};
 
 use crate::IoError;
 use crate::read::Ctx;
@@ -129,6 +132,7 @@ fn mime_for(name: &str) -> &'static str {
 pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(), IoError> {
     let Some(x) = cx.optional_xml(part)? else { return Ok(()) };
     let rels = cx.pkg.rels(part)?;
+    let mut has_drawing_hyperlink = false;
     for (n, a) in x.children.iter().enumerate() {
         let Some(anchor) = read_anchor(a, sheet) else { continue };
         let n = n + 1;
@@ -154,6 +158,11 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
             })
             .collect();
         for obj in objs {
+            has_drawing_hyperlink |= obj
+                .children
+                .iter()
+                .filter_map(|properties| properties.child("cNvPr"))
+                .any(|properties| properties.child("hlinkClick").is_some() || properties.child("hlinkHover").is_some());
             match obj.name.as_str() {
                 "pic" => {
                     let Some(rid) = obj.path(&["blipFill", "blip"]).and_then(|b| b.attr("embed")) else { continue };
@@ -208,6 +217,15 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
                 _ => {}
             }
         }
+    }
+    if has_drawing_hyperlink {
+        cx.report.issue(CompatibilityIssue::new(
+            "drawing hyperlinks",
+            Some(part.to_string()),
+            CompatibilityEffect::Omitted,
+            Editability::Unavailable,
+            "Hyperlinks attached to drawing objects are not preserved on save.",
+        ));
     }
     Ok(())
 }

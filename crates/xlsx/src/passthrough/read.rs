@@ -226,7 +226,15 @@ impl KeptReader {
                 }
             }
         }
-        let wb_rels = raw_rels(cx, wb_part).unwrap_or_default();
+        let mut wb_rels = raw_rels(cx, wb_part).unwrap_or_default();
+        // Excel can rebuild its calculation order from the saved formulas. The old chain is
+        // neither workbook content to preserve nor a compatibility loss when it is discarded.
+        wb_rels.retain(|r| {
+            r.external
+                || r.rel_type.strip_prefix(NS_REL) != Some("/calcChain")
+                || self.content_type(&r.target).as_deref() != Some("application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml")
+                || !cx.pkg.has(&r.target)
+        });
         inventory(
             cx,
             wb_part,
