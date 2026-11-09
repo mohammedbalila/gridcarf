@@ -155,16 +155,17 @@ clipboard and painter transfers carry origin even for passive formats/values, an
 text/HTML/picture paste plus append imports join Unknown before commit. OS text equality grants
 no origin authority and can conservatively exclude a previously Plain document. Undo/rollback,
 macro previews and Save As retain taint. See [runtime origin](recovery-codec.md#sticky-runtime-origin).
-Sealed capture jobs, publication/lifecycle/raw-mutation invalidation, UI restore admission and safe-root
-native storage qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
-remain untested; no activation, protection guarantee or readiness increase is claimed.
+The engine now captures bounded, sealed recovery jobs and gates publication against lifecycle
+changes and raw mutation. Native protection guarantees remain unverified. Windows runtime,
+Windows final user-bundle and Excel checks remain untested.
 
 The detached restore boundary now consumes a validated snapshot into an untrusted unsaved
 `DocState`, preserving caches and inert context without evaluation. Its Calc graph has shared
 node/depth/schedule/area/index/offer/work/name and requested-storage limits; any equation source
 of at most 4,096 UTF-8 bytes refuses the entire candidate before layout. See the
-[restore contract](recovery-codec.md#detached-restore-admission). Live Session adoption, UI
-projection, native storage/provider qualification and Windows runtime remain separate gates.
+[restore contract](recovery-codec.md#detached-restore-admission). Session can adopt the validated
+copy as untrusted and unsaved. Activation still requires a UI restore coordinator and projection,
+scheduling, and qualified native safe-root storage.
 
 The [codec contract](recovery-codec.md) records 125 focused tests, nine public tests (overlapping
 the ordinary suites), 2,061 ordinary engine/model/XLSX passes and 22 independently reviewed literal

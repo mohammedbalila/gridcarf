@@ -421,12 +421,25 @@ fn scratch(name: &str) -> std::path::PathBuf {
 /// the file opens.
 fn ask_export(h: &mut Harness, button: u32, path: &std::path::Path) {
     h.state_mut().run("control.assign", json!({"id": button, "command": "file.exportPdf", "params": {"path": path}})).unwrap();
+    press_export(h, button, path);
+}
+
+fn press_export(h: &mut Harness, button: u32, path: &std::path::Path) {
     h.state_mut().press_button(button);
     h.run_steps(4);
-    let d = h.state().dialog.clone().expect("a prompt");
+    let d = h.state().dialog.as_ref().expect("a prompt");
     assert_eq!(d.name(), "controlQuestion");
-    let text = d.values["text"].as_str().unwrap_or("").to_string();
-    assert!(text.contains(&path.display().to_string()), "{text}");
+    let text = d.values["text"].as_str().unwrap();
+    let path = path.to_str().unwrap();
+    let chars: Vec<_> = path.chars().collect();
+    let shown = if chars.len() > 200 {
+        let head: String = chars[..100].iter().collect();
+        let tail: String = chars[chars.len() - 99..].iter().collect();
+        format!("{head}…{tail}")
+    } else {
+        path.to_owned()
+    };
+    assert!(text.ends_with(&format!(" ({shown}).")), "{text}");
 }
 
 /// Clicks `label` in the open prompt.
@@ -434,6 +447,24 @@ fn answer(h: &mut Harness, label: &str) {
     use egui_kittest::kittest::Queryable as _;
     h.get_by_label(label).click();
     h.run_steps(2);
+}
+
+#[test]
+fn an_elided_export_path_still_binds_the_full_action() {
+    let (mut h, ids) = fixture();
+    let prefix = "é".repeat(100);
+    let suffix = format!("{}.pdf", "z".repeat(95));
+    // The oversized middle component also prevents a write if the stale-answer guard fails.
+    let middle = "x".repeat(256);
+    let original = std::path::PathBuf::from(format!("{prefix}/first{middle}/{suffix}"));
+    let changed = std::path::PathBuf::from(format!("{prefix}/other{middle}/{suffix}"));
+    ask_export(&mut h, ids.button, &original);
+    let dialog = h.state().dialog.as_ref().unwrap();
+    assert!(dialog.values["text"].as_str().unwrap().ends_with(&format!(" ({prefix}…{suffix}).")));
+    h.state_mut().session.execute("control.assign", json!({"id": ids.button, "command": "file.exportPdf", "params": {"path": changed}})).unwrap();
+    answer(&mut h, " Run ");
+    let msg = h.state().message.as_ref().map(|m| m.1.as_str()).unwrap_or_default();
+    assert!(msg.contains("changed while the question was open"), "{msg}");
 }
 
 /// An agent reassigns the button while its question is open: the answer was about the old file,
@@ -451,10 +482,7 @@ fn an_answer_does_not_run_an_action_reassigned_while_the_question_was_open() {
     assert!(msg.contains("changed while the question was open"), "{msg}");
     // The approval was not cached for the new file either: pressing again asks about it.
     h.state_mut().message = None;
-    h.state_mut().press_button(ids.button);
-    h.run_steps(4);
-    let text = h.state().dialog.clone().map(|d| d.values["text"].as_str().unwrap_or("").to_string()).unwrap_or_default();
-    assert!(text.contains(&b.display().to_string()), "{text}");
+    press_export(&mut h, ids.button, &b);
     answer(&mut h, " Run ");
     assert!(b.exists() && !a.exists(), "the new question's answer runs the new action");
     assert!(std::fs::read(&b).unwrap().starts_with(b"%PDF-"));

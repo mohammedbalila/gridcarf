@@ -9,13 +9,14 @@ clipboard and painter transfers carry origin even for passive formats/values, an
 text/HTML/picture paste plus append imports join Unknown before commit. OS text equality grants
 no origin authority and can conservatively exclude a previously Plain document. Undo/rollback,
 macro previews and Save As retain taint. See [runtime origin](recovery-codec.md#sticky-runtime-origin).
-Sealed capture jobs, publication/lifecycle/raw-mutation invalidation, UI restore admission and safe-root
-native storage qualification remain unfinished. Windows runtime/final user-bundle and Excel checks
-remain untested; no activation, protection guarantee or readiness increase is claimed.
+The engine now captures bounded, sealed recovery jobs and gates publication against lifecycle
+changes and raw mutation. Native protection guarantees remain unverified. Windows runtime,
+Windows final user-bundle and Excel checks remain untested.
 
-Detached recovery restore is an internal bounded foundation; UI projection, Session adoption,
-qualified native storage and scheduling are still required before activation. See the
-[restore contract](recovery-codec.md#detached-restore-admission). No readiness estimate changes.
+Session can adopt a validated detached restore as an untrusted, unsaved copy. Activation still
+requires a UI restore coordinator and projection, scheduling, and qualified native safe-root
+storage. See the [restore contract](recovery-codec.md#detached-restore-admission). Readiness
+estimates stay the same.
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
 list is [`gaps.md`](gaps.md); numbers and method are in

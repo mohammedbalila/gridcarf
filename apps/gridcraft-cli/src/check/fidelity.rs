@@ -1,5 +1,5 @@
 use super::calc::formula_text;
-use super::package::{REBUILT_KINDS, relationship_kinds, validate_package};
+use super::package::{REBUILT_KINDS, relationship_kinds, source_relationship_kinds, validate_package};
 use super::{BTreeMap, SourcePackage};
 use super::{BTreeSet, Category, Cell, CellError, CellRef, Diffs, Options, RoundTrip, Sheet, Value, Workbook, number_text, quote_sheet};
 use gridcraft_engine::model::{Formula, FormulaEvalMode, Style, StyleId, WhatIfTable};
@@ -18,25 +18,27 @@ pub fn round_trip(wb: &Workbook, source: &[u8], opts: &Options) -> RoundTrip {
         Ok(issues) => issues.into_iter().for_each(|i| package.push(|| i)),
         Err(e) => package.push(|| e),
     }
-    // Non-OPC inputs (JSON/CSV/BIFF) have no relationship graph to compare. Never infer
+    // Non-OPC inputs (ODS/JSON/CSV/BIFF) have no relationship graph to compare. Never infer
     // source-package preservation from equality of the already imported model.
-    let source_package = if source.starts_with(b"PK") {
-        match relationship_kinds(source).and_then(|before| relationship_kinds(&bytes).map(|after| (before, after))) {
-            Ok((before, after)) => {
-                for (key, kind) in &before {
-                    if !after.contains_key(key) && !REBUILT_KINDS.contains(&key.as_str()) {
-                        package.push(|| format!("lost relationship {kind}"));
-                    }
+    let comparison = source_relationship_kinds(source).and_then(|before| {
+        let Some(before) = before else { return Ok(None) };
+        let after = relationship_kinds(&bytes)?;
+        Ok(Some((before, after)))
+    });
+    let source_package = match comparison {
+        Ok(Some((before, after))) => {
+            for (key, kind) in &before {
+                if !after.contains_key(key) && !REBUILT_KINDS.contains(&key.as_str()) {
+                    package.push(|| format!("lost relationship {kind}"));
                 }
-                SourcePackage::Compared { relationship_kinds: before.len() }
             }
-            Err(error) => {
-                package.push(|| format!("source relationship coverage unavailable: {error}"));
-                SourcePackage::Unavailable { error }
-            }
+            SourcePackage::Compared { relationship_kinds: before.len() }
         }
-    } else {
-        SourcePackage::NotApplicable
+        Ok(None) => SourcePackage::NotApplicable,
+        Err(error) => {
+            package.push(|| format!("source relationship coverage unavailable: {error}"));
+            SourcePackage::Unavailable { error }
+        }
     };
     let back = match gridcraft_engine::io::open_bytes("roundtrip.xlsx", &bytes) {
         Ok((b, _)) => b,

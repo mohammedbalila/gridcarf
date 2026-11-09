@@ -255,19 +255,50 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
     Ok(issues)
 }
 
+/// Source relationship kinds, or `None` for a supported input without an OPC package.
+pub(super) fn source_relationship_kinds(bytes: &[u8]) -> Result<Option<BTreeMap<String, String>>, String> {
+    if !bytes.starts_with(b"PK") {
+        return Ok(None);
+    }
+    let mut zip = Zip::new(Cursor::new(bytes)).map_err(|e| format!("not a zip package: {e}"))?;
+    if has_ods_mimetype(&mut zip)? {
+        return Ok(None);
+    }
+    relationship_kinds_within(&mut zip, RELATIONSHIP_BUDGET).map(Some)
+}
+
+/// ODS uses ZIP without OPC. Its small root mimetype part identifies it independently of the filename.
+fn has_ods_mimetype(zip: &mut Zip<'_>) -> Result<bool, String> {
+    const MIME: &[u8] = b"application/vnd.oasis.opendocument.spreadsheet";
+    if zip.len() > MAX_ENTRIES {
+        return Ok(false);
+    }
+    let file = match zip.by_name("mimetype") {
+        Ok(file) => file,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(false),
+        Err(error) => return Err(format!("mimetype: {error}")),
+    };
+    if file.size() != MIME.len() as u64 {
+        return Ok(false);
+    }
+    let mut value = Vec::new();
+    file.take(MIME.len() as u64 + 1).read_to_end(&mut value).map_err(|e| format!("mimetype: {e}"))?;
+    Ok(value == MIME)
+}
+
 /// Every relationship kind (last segment of the type, the same in the transitional and strict
 /// namespaces) in the package's relationship parts, keyed in lower case. Relationships that carry
 /// nothing are left out, as a save may rightly drop them: a link to a place in the workbook
 /// (`#Sheet1!A1`, written as a cell's `location`) and a target part with nothing in it.
 pub(super) fn relationship_kinds(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
-    relationship_kinds_within(bytes, RELATIONSHIP_BUDGET)
+    let mut zip = Zip::new(Cursor::new(bytes)).map_err(|e| format!("not a zip package: {e}"))?;
+    relationship_kinds_within(&mut zip, RELATIONSHIP_BUDGET)
 }
 
 /// [`relationship_kinds`] reading at most `budget` decompressed bytes. `Err` once the relationship
 /// parts alone need more: their kinds can't be listed completely.
-fn relationship_kinds_within(bytes: &[u8], mut budget: u64) -> Result<BTreeMap<String, String>, String> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a zip package: {e}"))?;
-    let names = zip_names(&mut zip);
+fn relationship_kinds_within(zip: &mut Zip<'_>, mut budget: u64) -> Result<BTreeMap<String, String>, String> {
+    let names = zip_names(zip);
     let by_key: HashMap<String, &String> = names.iter().map(|n| (part_key(n), n)).collect();
     // Several relationships name the same part; each fresh check decompressed it again, so
     // repeated references to one highly compressible part multiplied the work. The verdict is
@@ -278,7 +309,7 @@ fn relationship_kinds_within(bytes: &[u8], mut budget: u64) -> Result<BTreeMap<S
     let mut kinds = BTreeMap::new();
     for n in names.iter().filter(|n| part_key(n).ends_with(".rels")) {
         let Some(src_dir) = rels_source_dir(&part_key(n)) else { continue };
-        let xml = match read_zip_part_within(&mut zip, n, &mut budget) {
+        let xml = match read_zip_part_within(zip, n, &mut budget) {
             Ok(xml) => xml,
             Err(PartError::OverBudget) => return Err(format!("{n}: relationship check stopped at its decompression limit")),
             Err(PartError::Unreadable) => return Err(format!("{n}: relationship part could not be read")),
@@ -293,7 +324,7 @@ fn relationship_kinds_within(bytes: &[u8], mut budget: u64) -> Result<BTreeMap<S
             let external = attr(attrs, "TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("External"));
             if !external
                 && let Some(part) = by_key.get(&resolve_target(&src_dir, target).to_ascii_lowercase())
-                && !holds_something(&mut zip, part, kind, &mut verdicts, &mut budget)
+                && !holds_something(zip, part, kind, &mut verdicts, &mut budget)
             {
                 continue;
             }
@@ -396,8 +427,9 @@ mod tests {
     fn relationship_parts_count_against_the_decompression_budget() {
         // Each part fits the per-part allowance, but together they need more than the budget.
         let bytes = many_rels(8, 64 * 1024);
-        assert!(relationship_kinds_within(&bytes, 256 * 1024).is_err());
-        let kinds = relationship_kinds_within(&bytes, 1024 * 1024).unwrap();
+        let mut zip = Zip::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert!(relationship_kinds_within(&mut zip, 256 * 1024).is_err());
+        let kinds = relationship_kinds_within(&mut zip, 1024 * 1024).unwrap();
         assert_eq!(kinds.get("custom").map(String::as_str), Some("custom"));
     }
 }

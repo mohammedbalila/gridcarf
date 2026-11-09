@@ -699,8 +699,37 @@ fn check_reports_source_package_coverage_separately() {
     assert!(j["files"][0]["roundTrip"]["sourcePackage"]["relationshipKinds"].as_u64().unwrap() > 0);
     let malformed = zip_of(&[(WB_RELS, "<Relationships><broken></Relationships>")]);
     let rt = round_trip(&wb, &malformed, &opts);
+    assert!(matches!(rt.source_package, SourcePackage::Unavailable { .. }));
     assert!(!rt.is_clean(), "unreadable source coverage must not silently pass");
     assert!(rt.categories.iter().any(|c| c.name == "package" && c.diffs > 0));
+}
+
+#[test]
+fn ods_round_trip_does_not_claim_opc_relationship_coverage() {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, body) in [
+        ("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
+        (
+            "META-INF/manifest.xml",
+            r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>"#,
+        ),
+        (
+            "content.xml",
+            r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" office:version="1.3"><office:body><office:spreadsheet><table:table table:name="Data"><table:table-row><table:table-cell office:value-type="float" office:value="42"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#,
+        ),
+    ] {
+        zip.start_file(name, stored).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    let source = zip.finish().unwrap().into_inner();
+    let opts = Options::default();
+    let report = check_bytes("misleading.xlsx", &source, &opts);
+    assert_eq!(report.error, None);
+    assert!(report.round_trip.is_clean(), "{report:?}");
+    assert!(report.round_trip.categories.iter().any(|c| c.name == "values"));
+    let json = report_json(&[report], &opts);
+    assert_eq!(json["files"][0]["roundTrip"]["sourcePackage"]["status"], "notApplicable");
 }
 
 #[test]
