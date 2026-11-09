@@ -10,15 +10,17 @@ use std::fmt::Write as _;
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Anchor, AnchorMode, Color, CompatibilityEffect, CompatibilityIssue, Editability, Image, Shape, ShapeFormat, ShapeKind, ShapeTextAlign,
+    Anchor, AnchorMode, Chart, Color, CompatibilityEffect, CompatibilityIssue, Editability, Image, Shape, ShapeFormat, ShapeKind, ShapeTextAlign,
     ShapeTextAnchor, Sheet, Theme,
 };
 
 use crate::IoError;
+use crate::package::Rel;
 use crate::read::Ctx;
 use crate::tables::EMU_PER_PX;
 use crate::xml::{El, esc, esc_attr};
 
+pub(crate) mod chart_group;
 mod ink;
 
 // ---------------------------------------------------------------- reading
@@ -132,7 +134,9 @@ fn mime_for(name: &str) -> &'static str {
 pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(), IoError> {
     let Some(x) = cx.optional_xml(part)? else { return Ok(()) };
     let rels = cx.pkg.rels(part)?;
+    let source = DrawingSource { part, rels: &rels };
     let mut has_drawing_hyperlink = false;
+    let mut group_grid = None;
     for (n, a) in x.children.iter().enumerate() {
         let Some(anchor) = read_anchor(a, sheet) else { continue };
         let n = n + 1;
@@ -158,11 +162,7 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
             })
             .collect();
         for obj in objs {
-            has_drawing_hyperlink |= obj
-                .children
-                .iter()
-                .filter_map(|properties| properties.child("cNvPr"))
-                .any(|properties| properties.child("hlinkClick").is_some() || properties.child("hlinkHover").is_some());
+            has_drawing_hyperlink |= has_drawing_links(obj);
             match obj.name.as_str() {
                 "pic" => {
                     let Some(rid) = obj.path(&["blipFill", "blip"]).and_then(|b| b.attr("embed")) else { continue };
@@ -180,35 +180,8 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
                     sheet.images.push(Image { id, anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
                 }
                 "graphicFrame" => {
-                    let Some(gd) = obj.path(&["graphic", "graphicData"]) else { continue };
-                    let uri = gd.attr("uri").unwrap_or("");
-                    if let Some(rid) = gd.child("chart").and_then(|c| c.attr("id")) {
-                        let Some(rel) = rels.iter().find(|r| r.id == rid) else {
-                            cx.warn(format!("a chart without its chart part was skipped ({part}, object {n})"));
-                            continue;
-                        };
-                        let target = rel.target.clone();
-                        if let Some(cx_xml) = cx.optional_xml(&target)? {
-                            let chart = if uri.contains("chartex") {
-                                crate::chartex::read_chartex(&cx_xml)
-                            } else {
-                                crate::chart::read_chart_with_caches(&cx_xml, cx.next_id, &mut cx.pivot_chart_caches)
-                            };
-                            match chart {
-                                Some(mut ch) => {
-                                    ch.id = cx.next_object_id();
-                                    ch.anchor = anchor;
-                                    sheet.charts.push(ch);
-                                }
-                                None => cx.warn(format!("chart {target} has no supported plot and was skipped")),
-                            }
-                        } else {
-                            cx.warn(format!("chart {target} is missing from the package and was skipped ({part}, object {n})"));
-                        }
-                    } else if uri.contains("chartex") || uri.contains("chartEx") {
-                        cx.warn(format!("a histogram, waterfall, treemap… chart without its chart part was skipped ({part}, object {n})"));
-                    } else {
-                        cx.warn(format!("an embedded object (SmartArt, OLE…) was skipped ({part}, object {n})"));
+                    if let Some(chart) = read_chart_frame(cx, &source, n, obj, anchor)? {
+                        sheet.charts.push(chart);
                     }
                 }
                 "sp" | "cxnSp" => {
@@ -217,7 +190,7 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
                         sheet.shapes.push(Shape { id, ..s });
                     }
                 }
-                "grpSp" => cx.warn(format!("grouped shapes are not supported and were skipped ({part}, object {n})")),
+                "grpSp" => has_drawing_hyperlink |= chart_group::read_group(cx, &source, n, obj, anchor, sheet, &mut group_grid)?,
                 _ => {}
             }
         }
@@ -232,6 +205,50 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn has_drawing_links(obj: &El) -> bool {
+    obj.children.iter().filter_map(|p| p.child("cNvPr")).any(|p| p.child("hlinkClick").is_some() || p.child("hlinkHover").is_some())
+}
+
+struct DrawingSource<'a> {
+    part: &'a str,
+    rels: &'a [Rel],
+}
+
+fn read_chart_frame(cx: &mut Ctx<'_>, source: &DrawingSource<'_>, n: usize, obj: &El, anchor: Anchor) -> Result<Option<Chart>, IoError> {
+    let part = source.part;
+    let Some(gd) = obj.path(&["graphic", "graphicData"]) else { return Ok(None) };
+    let uri = gd.attr("uri").unwrap_or("");
+    let Some(rid) = gd.child("chart").and_then(|c| c.attr("id")) else {
+        if uri.contains("chartex") || uri.contains("chartEx") {
+            cx.warn(format!("a histogram, waterfall, treemap… chart without its chart part was skipped ({part}, object {n})"));
+        } else {
+            cx.warn(format!("an embedded object (SmartArt, OLE…) was skipped ({part}, object {n})"));
+        }
+        return Ok(None);
+    };
+    let Some(rel) = source.rels.iter().find(|r| r.id == rid && !r.external) else {
+        cx.warn(format!("a chart without its chart part was skipped ({part}, object {n})"));
+        return Ok(None);
+    };
+    let target = &rel.target;
+    let Some(xml) = cx.optional_xml(target)? else {
+        cx.warn(format!("chart {target} is missing from the package and was skipped ({part}, object {n})"));
+        return Ok(None);
+    };
+    let chart = if uri.contains("chartex") {
+        crate::chartex::read_chartex(&xml)
+    } else {
+        crate::chart::read_chart_with_caches(&xml, cx.next_id, &mut cx.pivot_chart_caches)
+    };
+    let Some(mut chart) = chart else {
+        cx.warn(format!("chart {target} has no supported plot and was skipped"));
+        return Ok(None);
+    };
+    chart.id = cx.next_object_id();
+    chart.anchor = anchor;
+    Ok(Some(chart))
 }
 
 fn read_shape(obj: &El, anchor: Anchor) -> Option<Shape> {
@@ -473,12 +490,31 @@ pub enum Obj<'a> {
     Shape(&'a Shape),
 }
 
+fn write_chart_frame(s: &mut String, id: usize, rid: &str, transform: &str) {
+    let _ = write!(
+        s,
+        "<xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"Chart {}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{transform}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame>",
+        id - 1
+    );
+}
+
 /// The drawing part for a sheet's objects (relationship ids already assigned).
 pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">",
     );
+    let charts = objs.iter().enumerate().filter_map(|(index, obj)| match obj {
+        Obj::Chart(chart, _) => Some((index, *chart)),
+        _ => None,
+    });
+    let (groups, grouped) = chart_group::groups_for_write(sheet, charts);
     for (i, o) in objs.iter().enumerate() {
+        if let Some(group) = groups.get(&i) {
+            chart_group::write_group(&mut s, sheet, group, objs);
+        }
+        if grouped.contains(&i) {
+            continue;
+        }
         let id = i + 2;
         let close_tag;
         match o {
@@ -512,12 +548,7 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
                 let (open, close) = anchor_open(sheet, &ch.anchor);
                 close_tag = close;
                 s.push_str(&open);
-                let _ = write!(
-                    s,
-                    "<xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"Chart {}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame>",
-                    id - 1,
-                    xfrm(&ch.anchor, "xdr:xfrm")
-                );
+                write_chart_frame(&mut s, id, rid, &xfrm(&ch.anchor, "xdr:xfrm"));
             }
             Obj::Shape(sh) if sh.kind == ShapeKind::Equation => {
                 let (open, close) = anchor_open(sheet, &sh.anchor);

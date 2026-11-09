@@ -1102,7 +1102,9 @@ fn series_block(series: &[Series]) -> Option<(String, bool)> {
 fn chart_delete(s: &mut Session, p: &Json) -> Result<Json> {
     let (si, ci) = find_chart(s, p)?;
     edit(s, |cx| {
-        cx.sheet_mut(si)?.charts.remove(ci);
+        let sheet = cx.sheet_mut(si)?;
+        let chart = sheet.charts.remove(ci);
+        sheet.detach_chart_from_group(chart.id);
         Ok(Json::Null)
     })
 }

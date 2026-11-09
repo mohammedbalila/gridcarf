@@ -67,6 +67,11 @@ pub fn xlsx_phonetic_loss(wb: &Workbook) -> Result<bool, IoError> {
     write::phonetic_loss_with_budget(wb, &mut sheet_write::TextPlanningBudget::default())
 }
 
+/// Whether the current member types, geometry or anchor modes prevent writing every native chart group.
+pub fn xlsx_chart_group_loss(sheet: &gridcraft_model::Sheet) -> bool {
+    drawing::chart_group::has_write_loss(sheet)
+}
+
 pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
 pub use ods::read_ods;

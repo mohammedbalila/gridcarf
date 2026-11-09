@@ -607,3 +607,20 @@ fn recovery_objects_every_optional_note_dimension_and_cell_map_key_is_checked() 
     Arc::make_mut(&mut wb.sheet_mut(0).unwrap().comments).get_mut(&CellRef::new(5, 7)).unwrap().note_box = None;
     assert_eq!(validate_workbook_objects(&wb), Ok(()));
 }
+
+#[test]
+fn chart_group_recovery_requires_distinct_local_members() {
+    let mut wb = Workbook::new();
+    let sheet = wb.sheet_mut(0).unwrap();
+    sheet.charts = vec![chart(1), chart(2), chart(3)];
+    sheet.chart_groups = vec![ChartGroup { name: "Revenue".into(), chart_ids: vec![2, 1] }];
+    assert_eq!(validate_workbook_objects(&wb), Ok(()));
+    for invalid in [vec![1, 1], vec![2, 99], vec![2], vec![1, 2, 3, 1]] {
+        wb.sheet_mut(0).unwrap().chart_groups[0].chart_ids = invalid;
+        assert_eq!(validate_workbook_objects(&wb), Err(RecoveryModelError::UnsupportedRepresentation(RecoveryRepresentation::AmbiguousIdentity)),);
+    }
+    let sheet = wb.sheet_mut(0).unwrap();
+    sheet.chart_groups[0].chart_ids = vec![1, 2];
+    sheet.chart_groups.push(ChartGroup { name: "Overlap".into(), chart_ids: vec![1, 3] });
+    assert!(validate_workbook_objects(&wb).is_err());
+}

@@ -98,6 +98,15 @@ pub(crate) fn analyze_sheet(doc: &DocState, path: &str, sheet: usize) -> Result<
     }
     for sh in &doc.wb.sheets {
         if kind == FileKind::Xlsx {
+            if gridcraft_xlsx::xlsx_chart_group_loss(sh) {
+                add(
+                    "chart group",
+                    Some(sh.name.clone()),
+                    Effect::Omitted,
+                    Editability::Editable,
+                    "This worksheet contains a chart group that cannot be saved with its current chart types or placement. The affected charts will be saved individually.",
+                );
+            }
             for slicer in &sh.slicers {
                 add(
                     "slicer",

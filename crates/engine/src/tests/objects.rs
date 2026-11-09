@@ -499,3 +499,67 @@ fn align_refuses_ids_that_are_not_an_array() {
     s.execute("arrange.group", json!({"kind": "shape"})).unwrap();
     assert_eq!((anchor_of(&s, shape), anchor_of(&s, equation)), before, "nothing moved");
 }
+
+#[test]
+fn chart_group_members_follow_sheet_copy_move_delete_and_undo() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1", "values": [[1], [2], [3]]})).unwrap();
+    let ids: Vec<_> = ["D2", "D14", "D26"]
+        .into_iter()
+        .map(|at| id_of(&s.execute("insert.chart", json!({"range":"A1:A3", "type":"column", "at":at})).unwrap(), "chart"))
+        .collect();
+    // This is the same model state that reading a native chart group produces.
+    std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb)
+        .sheet_mut(0)
+        .unwrap()
+        .chart_groups
+        .push(gridcraft_model::ChartGroup { name: "Imported group".into(), chart_ids: ids.clone() });
+    s.execute("sheet.move", json!({"sheet":0, "to":1, "copy":true})).unwrap();
+    let copy = sheet(&s, 1);
+    let copy_ids: Vec<_> = copy.charts.iter().map(|chart| chart.id).collect();
+    assert_eq!(copy.chart_groups[0].chart_ids, copy_ids);
+    assert!(copy_ids.iter().all(|id| !ids.contains(id)));
+    assert_eq!(sheet(&s, 0).chart_groups[0].chart_ids, ids);
+
+    s.execute("chart.move", json!({"chart":copy_ids[0], "sheet":sheet(&s, 0).name, "at":"H2"})).unwrap();
+    assert_eq!(sheet(&s, 1).chart_groups[0].chart_ids, &copy_ids[1..]);
+    assert_eq!(sheet(&s, 0).chart_groups[0].chart_ids, ids);
+    s.execute("object.delete", json!({"kind":"chart", "id":copy_ids[1]})).unwrap();
+    assert!(sheet(&s, 1).chart_groups.is_empty());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(sheet(&s, 1).chart_groups[0].chart_ids, &copy_ids[1..]);
+    s.execute("chart.delete", json!({"chart":copy_ids[2]})).unwrap();
+    assert!(sheet(&s, 1).chart_groups.is_empty());
+    gridcraft_model::validate_recovery_model(&s.doc().unwrap().wb).unwrap();
+}
+
+#[test]
+fn chart_group_edit_that_cannot_be_encoded_reports_xlsx_loss() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range":"A1", "values":[[1],[2],[3]]})).unwrap();
+    let ids: Vec<_> = ["D2", "D14"]
+        .into_iter()
+        .map(|at| id_of(&s.execute("insert.chart", json!({"range":"A1:A3", "type":"column", "at":at})).unwrap(), "chart"))
+        .collect();
+    std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb)
+        .sheet_mut(0)
+        .unwrap()
+        .chart_groups
+        .push(gridcraft_model::ChartGroup { name: "Imported group".into(), chart_ids: ids.clone() });
+    let has_loss = |s: &mut Session| {
+        let analysis = s.execute("file.analyzeSave", json!({"path":"charts.xlsx"})).unwrap();
+        analysis["issues"].as_array().unwrap().iter().any(|i| i["feature"] == "chart group" && i["code"] == "feature.omitted")
+    };
+    assert!(!has_loss(&mut s));
+    for (command, params) in [
+        ("object.setAnchorMode", json!({"kind":"chart", "id":ids[0], "mode":"absolute"})),
+        ("object.move", json!({"kind":"chart", "id":ids[0], "height":0})),
+        ("object.move", json!({"kind":"chart", "id":ids[0], "at":"XFD1048576"})),
+        ("chart.set", json!({"chart":ids[0], "type":"waterfall"})),
+    ] {
+        s.execute(command, params).unwrap();
+        assert!(has_loss(&mut s), "{command} must warn that the native group would be lost");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(!has_loss(&mut s));
+    }
+}

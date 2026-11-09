@@ -1,11 +1,13 @@
 //! Stored object invariants only. No decoding, reference resolution, executable-policy walk,
 //! equation rebuild, writer or layout. Actual screen/page projection remains an owner gate.
+use std::collections::HashSet;
+
 use super::features::validate_numeric_identities;
-use super::{RecoveryModelError, validate_cell_ref, validate_color};
+use super::{RecoveryModelError, RecoveryRepresentation, validate_cell_ref, validate_color};
 use crate::{
-    Anchor, AnchorMode, CellPicture, Chart, ChartDataTable, ChartKind, Comment, ControlAction, ControlKind, FormControl, Hyperlink, Image, LegendPos,
-    LineDash, MacroInput, NoteBox, NoteCorner, QuartileMethod, Series, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Slicer,
-    Sparkline, SparklineKind, Trendline, TrendlineKind, Workbook,
+    Anchor, AnchorMode, CellPicture, Chart, ChartDataTable, ChartGroup, ChartKind, Comment, ControlAction, ControlKind, FormControl, Hyperlink,
+    Image, LegendPos, LineDash, MacroInput, NoteBox, NoteCorner, QuartileMethod, Series, Shape, ShapeFormat, ShapeKind, ShapeTextAlign,
+    ShapeTextAnchor, Slicer, Sparkline, SparklineKind, Trendline, TrendlineKind, Workbook,
 };
 
 fn validate_anchor(anchor: &Anchor) -> Result<(), RecoveryModelError> {
@@ -239,6 +241,19 @@ pub(super) fn validate_workbook_objects(workbook: &Workbook) -> Result<(), Recov
             .chain(sheet.controls.iter().map(|v| u64::from(v.id)))
     }))?;
     for sheet in &workbook.sheets {
+        if !sheet.chart_groups.is_empty() {
+            let mut ungrouped = HashSet::new();
+            ungrouped.try_reserve(sheet.charts.len()).map_err(|_| RecoveryModelError::Capacity)?;
+            ungrouped.extend(sheet.charts.iter().map(|chart| chart.id));
+            for ChartGroup { name, chart_ids } in &sheet.chart_groups {
+                if name.len() > ChartGroup::MAX_NAME_BYTES
+                    || !(2..=ChartGroup::MAX_MEMBERS).contains(&chart_ids.len())
+                    || !chart_ids.iter().all(|id| ungrouped.remove(id))
+                {
+                    return Err(RecoveryModelError::UnsupportedRepresentation(RecoveryRepresentation::AmbiguousIdentity));
+                }
+            }
+        }
         for chart in &sheet.charts {
             validate_chart(chart)?;
         }

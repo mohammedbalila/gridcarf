@@ -68,6 +68,7 @@ pub(super) enum Kind {
     CfTime,
     CfIcon,
     Chart,
+    ChartGroup,
     Shape,
     ShapeFormat,
     Control,
@@ -134,6 +135,8 @@ impl Context {
             (One(Sheet), "tables") => List(Table),
             (One(Sheet), "autofilter") => One(AutoFilter),
             (One(Sheet), "charts") => List(Chart),
+            (One(Sheet), "chart_groups") => List(ChartGroup),
+            (One(ChartGroup), "chart_ids") => List(General),
             (One(Sheet), "images") => List(Image),
             (One(Sheet), "shapes") => List(Shape),
             (One(Sheet), "controls") => List(Control),
@@ -201,7 +204,7 @@ impl Context {
             (One(Macro), "permissions") => List(Metadata),
             (One(Step), "body" | "then" | "else") => List(Step),
             (One(DocProps), "title" | "subject" | "author" | "company" | "keywords" | "description")
-            | (One(DefinedName | Sheet | Font | Control | PivotCalc | NamedInput), "name")
+            | (One(DefinedName | Sheet | Font | Control | PivotCalc | NamedInput | ChartGroup), "name")
             | (One(Theme), "name" | "major_font" | "minor_font" | "major_font_ea" | "minor_font_ea" | "major_font_cs" | "minor_font_cs")
             | (One(Dxf), "scheme")
             | (One(PhoneticProps), "kind" | "alignment")

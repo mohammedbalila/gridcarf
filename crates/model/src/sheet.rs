@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cell::{Cell, CellPicture};
 use crate::features::{
-    Anchor, AutoFilter, Chart, Comment, CondFormat, FormControl, Hyperlink, Image, LineInfo, ObjKind, ObjRef, PivotTable, PrintSettings, Shape,
-    ShapeKind, SheetProtection, Slicer, Sparkline, Table, Validation, WhatIfTable,
+    Anchor, AutoFilter, Chart, ChartGroup, Comment, CondFormat, FormControl, Hyperlink, Image, LineInfo, ObjKind, ObjRef, PivotTable, PrintSettings,
+    Shape, ShapeKind, SheetProtection, Slicer, Sparkline, Table, Validation, WhatIfTable,
 };
 use crate::store::CellStore;
 use crate::style::{Color, StyleId};
@@ -145,6 +145,8 @@ pub struct Sheet {
     #[serde(with = "crate::cellmap")]
     pub hyperlinks: BTreeMap<CellRef, Hyperlink>,
     pub charts: Vec<Chart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chart_groups: Vec<ChartGroup>,
     pub images: Vec<Image>,
     pub shapes: Vec<Shape>,
     pub sparklines: Vec<Sparkline>,
@@ -224,6 +226,7 @@ impl Sheet {
             comments: Arc::new(BTreeMap::new()),
             hyperlinks: BTreeMap::new(),
             charts: vec![],
+            chart_groups: vec![],
             images: vec![],
             shapes: vec![],
             sparklines: vec![],
@@ -345,7 +348,13 @@ impl Sheet {
             v.len() != n
         }
         match o.kind {
-            ObjKind::Chart => take(&mut self.charts, |c| c.id == o.id),
+            ObjKind::Chart => {
+                let removed = take(&mut self.charts, |c| c.id == o.id);
+                if removed {
+                    self.detach_chart_from_group(o.id);
+                }
+                removed
+            }
             ObjKind::Image => take(&mut self.images, |c| c.id == o.id),
             ObjKind::Shape => take(&mut self.shapes, |c| c.id == o.id),
             ObjKind::Slicer => take(&mut self.slicers, |c| c.id == o.id),
@@ -508,6 +517,14 @@ impl Sheet {
             self.autofilter.as_ref().is_some_and(|af| !af.criteria.is_empty() && row > af.range.start.row && row <= af.range.end.row);
         in_sheet_filter || self.tables.iter().any(|t| !t.filter.is_empty() && t.data_range().is_some_and(|r| row >= r.start.row && row <= r.end.row))
     }
+    /// Removing a chart leaves a native group only while at least two members remain.
+    pub fn detach_chart_from_group(&mut self, id: u32) {
+        for group in &mut self.chart_groups {
+            group.chart_ids.retain(|&member| member != id);
+        }
+        self.chart_groups.retain(|group| group.chart_ids.len() >= 2);
+    }
+
     pub fn is_col_hidden(&self, col: u32) -> bool {
         self.cols.get(&col).is_some_and(|r| r.hidden)
     }
@@ -569,10 +586,10 @@ pub struct LineIndex {
 impl LineIndex {
     pub fn new(custom: &BTreeMap<u32, LineInfo>, default: f32, max: u32) -> LineIndex {
         let default = default as f64;
-        let mut lines = Vec::with_capacity(custom.len());
+        let mut lines = Vec::with_capacity(custom.len().min(max as usize));
         let mut pos = 0.0;
         let mut prev = 0u32;
-        for (&line, info) in custom {
+        for (&line, info) in custom.range(..max) {
             pos += (line - prev) as f64 * default;
             let size = if info.hidden { 0.0 } else { info.size.map_or(default, |s| s as f64) };
             lines.push((line, pos, size));

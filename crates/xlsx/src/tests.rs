@@ -6,6 +6,7 @@ mod chart_book_names;
 mod chart_bool_default;
 mod chart_combo_kinds;
 mod chart_data_table;
+mod chart_groups;
 mod chart_ref_offsets;
 mod compatibility_fixtures;
 mod controls_tests;

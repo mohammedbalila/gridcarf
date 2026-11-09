@@ -127,6 +127,7 @@ fn validate_sheet_structure(sheet: &Sheet, style_count: usize) -> Result<(), Rec
         comments: _,
         hyperlinks: _,
         charts: _,
+        chart_groups: _,
         images: _,
         shapes: _,
         sparklines: _,

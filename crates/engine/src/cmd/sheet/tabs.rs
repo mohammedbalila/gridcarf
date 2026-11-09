@@ -184,7 +184,24 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             }
             let mut ids = ids.into_iter();
             let mut fresh = || ids.next().unwrap_or(u32::MAX);
-            sh.charts.iter_mut().for_each(|o| o.id = fresh());
+            if sh.chart_groups.is_empty() {
+                sh.charts.iter_mut().for_each(|o| o.id = fresh());
+            } else {
+                let mut rekeyed = std::collections::HashMap::new();
+                for chart in &mut sh.charts {
+                    let id = fresh();
+                    rekeyed.insert(chart.id, id);
+                    chart.id = id;
+                }
+                for group in &mut sh.chart_groups {
+                    group.chart_ids.retain_mut(|id| {
+                        let Some(new) = rekeyed.get(id) else { return false };
+                        *id = *new;
+                        true
+                    });
+                }
+                sh.chart_groups.retain(|group| group.chart_ids.len() >= 2);
+            }
             sh.images.iter_mut().for_each(|o| o.id = fresh());
             sh.shapes.iter_mut().for_each(|o| o.id = fresh());
             sh.slicers.iter_mut().for_each(|o| o.id = fresh());

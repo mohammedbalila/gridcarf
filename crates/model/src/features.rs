@@ -614,6 +614,19 @@ pub struct Chart {
     pub pivot: Option<String>,
 }
 
+/// XLSX grouping metadata for ordinary charts on a worksheet. Members use their own sheet
+/// coordinates and are ordered as in the native drawing group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChartGroup {
+    pub name: String,
+    pub chart_ids: Vec<u32>,
+}
+
+impl ChartGroup {
+    pub const MAX_MEMBERS: usize = 1024;
+    pub const MAX_NAME_BYTES: usize = 1024;
+}
+
 impl Chart {
     /// Data tables belong to category-axis column, bar, line and area charts.
     pub fn supports_data_table(&self) -> bool {

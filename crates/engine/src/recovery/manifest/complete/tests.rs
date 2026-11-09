@@ -395,3 +395,22 @@ fn decoder_diagnostic_is_useful_structural_and_redacts_sensitive_content() {
         assert!(!diagnostic.contains(secret));
     }
 }
+
+#[test]
+fn complete_snapshot_preserves_chart_group_membership() {
+    let mut s = crate::Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", serde_json::json!({"range":"A1", "values":[[1],[2],[3]]})).unwrap();
+    for at in ["D2", "D14"] {
+        s.execute("insert.chart", serde_json::json!({"range":"A1:A3", "type":"column", "at":at})).unwrap();
+    }
+    let wb = Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sheet = wb.sheet_mut(0).unwrap();
+    let ids: Vec<_> = sheet.charts.iter().rev().map(|chart| chart.id).collect();
+    let group = gridcraft_model::ChartGroup { name: "Retained group".into(), chart_ids: ids };
+    sheet.chart_groups.push(group.clone());
+    let encoded = bytes(wb, &metadata());
+    let decoded = decode_recovery(&encoded).unwrap();
+    assert_eq!(decoded.workbook.sheets[0].chart_groups, [group]);
+    assert_eq!(bytes(&decoded.workbook, &decoded.metadata), encoded);
+}

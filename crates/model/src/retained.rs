@@ -306,6 +306,7 @@ fields!(
         comments,
         hyperlinks,
         charts,
+        chart_groups,
         images,
         shapes,
         sparklines,
@@ -397,6 +398,7 @@ fields!(
     [title, series, x_title, y_title, source, pivot],
     [id, kind, anchor, legend, data_labels, data_table, gridlines, style, hole_size, first_slice_angle, by_rows]
 );
+fields!(crate::ChartGroup, [name, chart_ids], []);
 fields!(Image, [data, mime, alt], [id, anchor]);
 fields!(Shape, [text, format, math], [id, kind, anchor, fill, line]);
 fields!(ShapeFormat, [font], [no_line, font_size, bold, italic, text_color, text_outline, align, anchor, rtl]);
