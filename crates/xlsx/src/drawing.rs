@@ -189,8 +189,12 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
                         };
                         let target = rel.target.clone();
                         if let Some(cx_xml) = cx.optional_xml(&target)? {
-                            let chartex = uri.contains("chartex");
-                            match if chartex { crate::chartex::read_chartex(&cx_xml) } else { crate::chart::read_chart(&cx_xml) } {
+                            let chart = if uri.contains("chartex") {
+                                crate::chartex::read_chartex(&cx_xml)
+                            } else {
+                                crate::chart::read_chart_with_caches(&cx_xml, cx.next_id, &mut cx.pivot_chart_caches)
+                            };
+                            match chart {
                                 Some(mut ch) => {
                                     ch.id = cx.next_object_id();
                                     ch.anchor = anchor;

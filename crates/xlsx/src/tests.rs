@@ -24,6 +24,7 @@ mod ods_tests;
 mod page_order;
 mod passthrough_tests;
 mod phonetic_tests;
+mod pivot_chart_cache;
 mod pivot_tests;
 mod richdata_tests;
 mod roundtrip;

@@ -1,6 +1,6 @@
 # Chart parity
 
-> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-11-02 · **Change:** minor (doughnut charts: every series is a concentric ring, the first series innermost; hole size and first slice angle kept; rotated slices cover their own sweep; legend names categories; earlier: charts resize from eight handles, chart data tables, legend keys and borders, native XLSX round-trip and print/PDF; earlier: selected chart source outlines stay beneath floating objects) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-11-09 · **Change:** minor (PivotChart point caches survive placeholder worksheet references; earlier: doughnut charts: every series is a concentric ring, the first series innermost; hole size and first slice angle kept; rotated slices cover their own sweep; legend names categories; earlier: charts resize from eight handles, chart data tables, legend keys and borders, native XLSX round-trip and print/PDF; earlier: selected chart source outlines stay beneath floating objects) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Excel's chart types and chart elements against GridCraft. Part of
 [target-app-parity.md](target-app-parity.md). **Breadth ~50%, ready ~30%, 40–60 h** (estimated).
@@ -62,7 +62,7 @@ Sources: `crates/model/src/features.rs` (`ChartKind`, `Chart`, `Series`), `crate
 | Recommended Charts | yes | partial (Insert ▸ Recommended) |
 | Switch Row/Column, Select Data | yes | yes (Switch on charts read from files landed in #116); Select Data dialog: data range, remove series, Horizontal (Category) Axis Labels (#287). No series add/edit or hidden/empty cell options |
 | Sparklines (line, column, win/loss, markers, axis) | yes | line, column, win/loss |
-| PivotCharts | yes | Insert ▸ PivotChart (`insert.pivotChart`): bound to a PivotTable's report, rebuilt on refresh and layout changes, `c:pivotSource` round trip; no field buttons, innermost category level only |
+| PivotCharts | yes | Insert ▸ PivotChart (`insert.pivotChart`) binds the chart to a PivotTable report and rebuilds it on refresh or layout changes. XLSX keeps `c:pivotSource`. When a simple worksheet reference disagrees with its saved cache, GridCraft keeps the indexed numeric points and single-level text categories within import limits. Matching references stay live. Field buttons are unsupported and the chart plots the innermost category level. |
 | Animation on data change | yes (Windows) | no |
 
 Data tables are controlled by `chart.addElement {element: "dataTable", on: true,
@@ -107,6 +107,7 @@ are (#1686). Such series get no `numCache`/`strCache` on save (#1690).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Preserve cached numeric points and single-level text categories of PivotCharts with placeholder references, using the cache fallback from #684. The save analysis reports when saved points replace a worksheet reference until the PivotTable refreshes. |
 | 2026-11-02 | minor | Charts move and resize from eight handles, each moving only its own edges (#190); resizing leaves the work list (1–2 h, within the 40–60 h rounding) |
 | 2026-11-01 | minor | Chart data tables for column, bar, line, area and compatible combo charts: command/UI controls, formatted source values, blanks, grouped category headers, legend keys, independent borders, shared print/PDF rendering and native c:dTable import/export. Dense tables show a space notice; no readiness score change. |
 | 2026-10-29 | minor | Selected charts highlight their source cells beneath floating objects, so the blue outline no longer crosses the chart; uncovered source cells remain highlighted (#2861) |

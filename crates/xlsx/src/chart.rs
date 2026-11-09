@@ -10,6 +10,9 @@ use gridcraft_model::{Chart, ChartKind, Color, DefinedName, LegendPos, LineDash,
 use crate::drawing::{dml_color, srgb};
 use crate::xml::{El, esc, num};
 
+mod pivot_cache;
+pub(crate) use pivot_cache::PivotChartImport;
+
 // ---------------------------------------------------------------- reading
 
 fn group_kind(g: &El) -> Option<ChartKind> {
@@ -101,28 +104,35 @@ pub(crate) fn chart_ref_from_file(text: &str) -> String {
     out
 }
 
-fn data_ref(e: Option<&El>) -> Option<String> {
+fn data_ref(e: Option<&El>, pivot_import: Option<&mut PivotChartImport>) -> Option<String> {
     let e = e?;
     for k in ["numRef", "strRef", "multiLvlStrRef"] {
         if let Some(f) = e.child(k).and_then(|r| r.child("f")) {
             return Some(chart_ref_from_file(&f.text));
         }
     }
-    // Literal values become an array constant.
     for k in ["numLit", "strLit"] {
-        if let Some(l) = e.child(k) {
-            let pts: Vec<String> = l
-                .kids("pt")
-                .filter_map(|p| p.child("v"))
-                .map(|v| if k == "numLit" { v.text.trim().to_string() } else { format!("\"{}\"", v.text.replace('"', "\"\"")) })
-                .collect();
-            return Some(format!("{{{}}}", pts.join(",")));
+        if let Some(literal) = e.child(k) {
+            let numeric = k == "numLit";
+            return match pivot_import {
+                Some(import) => import.read_literal(literal, numeric),
+                None => Some(literal_in_document_order(literal, numeric)),
+            };
         }
     }
     None
 }
 
-fn read_series(s: &El) -> Series {
+fn literal_in_document_order(literal: &El, numeric: bool) -> String {
+    let points: Vec<String> = literal
+        .kids("pt")
+        .filter_map(|p| p.child("v"))
+        .map(|v| if numeric { v.text.trim().to_string() } else { format!("\"{}\"", v.text.replace('"', "\"\"")) })
+        .collect();
+    format!("{{{}}}", points.join(","))
+}
+
+fn read_series(s: &El, mut pivot_import: Option<&mut PivotChartImport>) -> Series {
     let name = s
         .child("tx")
         .and_then(|tx| tx.path(&["strRef", "f"]).map(|f| chart_ref_from_file(&f.text)).or_else(|| tx.child("v").map(|v| v.text.clone())));
@@ -134,9 +144,9 @@ fn read_series(s: &El) -> Series {
         .or_else(|| s.path(&["marker", "spPr", "solidFill"]).and_then(dml_color));
     Series {
         name,
-        categories: data_ref(s.child("cat")).or_else(|| data_ref(s.child("xVal"))),
-        values: data_ref(s.child("val")).or_else(|| data_ref(s.child("yVal"))).unwrap_or_default(),
-        bubble_sizes: data_ref(s.child("bubbleSize")),
+        categories: data_ref(s.child("cat"), pivot_import.as_deref_mut()).or_else(|| data_ref(s.child("xVal"), None)),
+        values: data_ref(s.child("val"), pivot_import.as_deref_mut()).or_else(|| data_ref(s.child("yVal"), pivot_import)).unwrap_or_default(),
+        bubble_sizes: data_ref(s.child("bubbleSize"), None),
         color,
         secondary: false,
         kind: None,
@@ -218,16 +228,25 @@ fn axis_ids(g: &El) -> Vec<String> {
     g.kids("axId").filter_map(|a| a.attr("val")).map(str::to_string).collect()
 }
 
+#[cfg(test)]
 pub fn read_chart(root: &El) -> Option<Chart> {
+    read_chart_with_caches(root, 0, &mut PivotChartImport::default())
+}
+
+pub(crate) fn read_chart_with_caches(root: &El, id: u32, import: &mut PivotChartImport) -> Option<Chart> {
     let chart = root.child("chart")?;
     let plot = chart.child("plotArea")?;
     let groups: Vec<(&El, ChartKind)> = plot.children.iter().filter_map(|g| group_kind(g).map(|k| (g, k))).collect();
     let (first, first_kind) = *groups.first()?;
     let first_axes = axis_ids(first);
+    let pivot = root.path(&["pivotSource", "name"]).map(|n| strip_book(n.text.trim()).to_string()).filter(|n| !n.is_empty());
     let mut series = vec![];
     for (gi, (g, k)) in groups.iter().enumerate() {
         for s in g.kids("ser") {
-            let mut ser = read_series(s);
+            let mut ser = read_series(s, pivot.is_some().then_some(&mut *import));
+            if pivot.is_some() {
+                import.defer(id, series.len(), s, &ser);
+            }
             if groups.len() > 1 {
                 // Every series of a combo chart keeps its own group's kind, the first group's included.
                 ser.kind = Some(*k);
@@ -286,7 +305,7 @@ pub fn read_chart(root: &El) -> Option<Chart> {
         y_title: y_ax.and_then(|a| a.child("title")).and_then(rich_title),
         source: None,
         by_rows: false,
-        pivot: root.path(&["pivotSource", "name"]).map(|n| strip_book(n.text.trim()).to_string()).filter(|n| !n.is_empty()),
+        pivot,
     })
 }
 
